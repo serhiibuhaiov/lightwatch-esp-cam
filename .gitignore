@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+.venv/
+__pycache__/
+.pytest_cache/
+src/secrets.h
+private/
+.DS_Store

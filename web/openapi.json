@@ -1,0 +1,1428 @@
+{
+ "openapi": "3.0.3",
+ "info": {
+  "title": "esp32cam-controller API",
+  "version": "1.0",
+  "description": "Керування пристроєм: налаштування, логи, розетки Tuya, сценарії. Усе під HTTP Basic (device.web_user / device.web_password). Порожній web_password => 403. Усі PUT потребують `Content-Type: application/json`."
+ },
+ "servers": [
+  {
+   "url": "/"
+  }
+ ],
+ "security": [
+  {
+   "basic": []
+  }
+ ],
+ "tags": [
+  {
+   "name": "Стан"
+  },
+  {
+   "name": "Конфіг"
+  },
+  {
+   "name": "Логи"
+  },
+  {
+   "name": "Пристрої"
+  },
+  {
+   "name": "Сценарії"
+  }
+ ],
+ "paths": {
+  "/api/status": {
+   "get": {
+    "tags": [
+     "Стан"
+    ],
+    "summary": "Стан пристрою",
+    "description": "SD, Wi-Fi, пам'ять, годинник, запити до розеток (`tuya`), короткий список сценаріїв і історія запусків.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Стан.",
+      "content": {
+       "application/json": {
+        "example": {
+         "uptime_s": 3683,
+         "heap_free": 94512,
+         "sd": "ok",
+         "file_logging": true,
+         "config_source": "SD card",
+         "restart_pending": false,
+         "time_valid": true,
+         "wifi": {
+          "connected": true,
+          "ip": "192.168.8.100",
+          "rssi": -52
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/config": {
+   "get": {
+    "tags": [
+     "Конфіг"
+    ],
+    "summary": "Прочитати конфіг",
+    "description": "Збережена конфігурація (за замовчуванням) або активна (`active=1`). Паролі приховані. Заголовок відповіді `X-Restart-Pending: true|false`.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Конфіг (JSON).",
+      "content": {
+       "application/json": {
+        "example": {
+         "version": 1,
+         "device": {
+          "name": "lightwatch",
+          "web_user": "admin",
+          "web_password": ""
+         },
+         "wifi": {
+          "ssid": "MY_WIFI",
+          "password": "",
+          "restart_after_min": 20
+         },
+         "startup": {
+          "scenario_delay_s": 45
+         },
+         "monitor": {
+          "interval_s": 15,
+          "timeout_ms": 2000,
+          "retries": 2,
+          "grace_s": 120
+         },
+         "log": {
+          "flush_s": 20,
+          "max_file_kb": 1024,
+          "keep_files": 5,
+          "quiet_s": 30,
+          "level": "info"
+         },
+         "time": {
+          "ntp": "pool.ntp.org",
+          "tz": "UTC0"
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "active",
+      "in": "query",
+      "required": false,
+      "description": "`1`: показати активну конфігурацію (з якою пристрій стартував).",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "1"
+       ]
+      }
+     }
+    ],
+    "x-prefill": "self"
+   },
+   "put": {
+    "tags": [
+     "Конфіг"
+    ],
+    "summary": "Замінити конфіг",
+    "description": "**Повна заміна.** Порожній `web_password` лишає старий пароль; порожній `wifi.password` лишає старий, лише якщо ssid той самий. Тіло до 8192 байт, потрібен `Content-Type: application/json`. Більшість змін діє після перезапуску (`reboot=1` перезапускає одразу).",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Збережено.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "sd": true,
+         "flash": true,
+         "restart_required": false,
+         "rebooting": false
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустиме значення.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "413": {
+      "description": "Тіло більше 8192 байт.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "415": {
+      "description": "Не JSON.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "reboot",
+      "in": "query",
+      "required": false,
+      "description": "`1`: перезапустити плату після збереження.",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "1"
+       ]
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "description": "Повний конфіг.",
+     "content": {
+      "application/json": {
+       "example": {
+        "version": 1,
+        "device": {
+         "name": "lightwatch",
+         "web_user": "admin",
+         "web_password": ""
+        },
+        "wifi": {
+         "ssid": "MY_WIFI",
+         "password": "",
+         "restart_after_min": 20
+        },
+        "startup": {
+         "scenario_delay_s": 45
+        },
+        "monitor": {
+         "interval_s": 15,
+         "timeout_ms": 2000,
+         "retries": 2,
+         "grace_s": 120
+        },
+        "log": {
+         "flush_s": 20,
+         "max_file_kb": 1024,
+         "keep_files": 5,
+         "quiet_s": 30,
+         "level": "info"
+        },
+        "time": {
+         "ntp": "pool.ntp.org",
+         "tz": "UTC0"
+        }
+       }
+      }
+     }
+    },
+    "x-danger": "Повна заміна конфігурації. Зверніть увагу на wifi.ssid і web_user: помилка може позбавити доступу до пристрою.",
+    "x-prefill": "/api/config"
+   }
+  },
+  "/api/logs": {
+   "get": {
+    "tags": [
+     "Логи"
+    ],
+    "summary": "Список логів або вміст файла",
+    "description": "Без `file`: список файлів. `file=current` або `log-NNNN.txt`: вміст (текст). `tail` обмежує вміст останніми байтами (до 32768); для `current` додаються рядки, що ще лежать у RAM.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Список (JSON) або текст логу.",
+      "content": {
+       "application/json": {
+        "example": {
+         "sd": "ok",
+         "current": "log-0001.txt",
+         "files": [
+          {
+           "name": "log-0001.txt",
+           "size": 12345
+          }
+         ]
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустиме ім'я файла.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого файла.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Немає SD-картки (доступний лише file=current).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "file",
+      "in": "query",
+      "required": false,
+      "description": "`current` або `log-NNNN.txt`.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(current|log-[0-9]{4}\\.txt)$"
+      }
+     },
+     {
+      "name": "tail",
+      "in": "query",
+      "required": false,
+      "description": "Скільки останніх байт повернути (до 32768).",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 32768
+      }
+     }
+    ]
+   }
+  },
+  "/api/devices": {
+   "get": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Список пристроїв зі станом",
+    "description": "Пристрої з `/devices.json` (ключі не віддаються, лише `key_set`) і кешований стан з фонового опитування. До розеток не звертається.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Пристрої.",
+      "content": {
+       "application/json": {
+        "example": {
+         "sd": true,
+         "count": 1,
+         "poll_interval_s": 15,
+         "devices": [
+          {
+           "name": "towel",
+           "ip": "192.168.8.185",
+           "version": "3.4",
+           "dp": 1,
+           "key_set": true,
+           "ignore": false,
+           "state": {
+            "known": true,
+            "online": true,
+            "fails": 0,
+            "on": true,
+            "dps": {
+             "1": true,
+             "19": 0
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/devices/history": {
+   "get": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Історія показників пристрою",
+    "description": "Останні запити стану (до 80), найновіші в кінці: `age_s`, `time`, `ok`, `on`, `power`, `current`, `voltage`, `energy`.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Історія."
+     },
+     "400": {
+      "description": "Недопустимий limit.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого пристрою.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я пристрою (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "description": "Скільки останніх записів (1..80).",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 80
+      }
+     }
+    ]
+   }
+  },
+  "/api/devices/config": {
+   "get": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Список для редактора",
+    "description": "Імена, адреси, версії, `dp`, `meters`, `key_set` (без ключів).",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Список.",
+      "content": {
+       "application/json": {
+        "example": {
+         "devices": [
+          {
+           "name": "towel",
+           "ip": "192.168.8.185",
+           "key": "",
+           "version": "3.4",
+           "dp": 1,
+           "ignore": false,
+           "meters": {
+            "power": 19,
+            "current": 18,
+            "voltage": 20,
+            "energy": 17
+           }
+          }
+         ]
+        }
+       }
+      }
+     }
+    },
+    "x-prefill": "self"
+   },
+   "put": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Замінити список пристроїв",
+    "description": "**Повна заміна** `/devices.json`. Порожній або відсутній `key` лишає ключ пристрою з тим самим іменем; новий чи перейменований пристрій вимагає ключ (16 символів). Пристрій, якого немає в запиті, видаляється разом з ключем (відновити його можна лише повторним введенням). Запис без `meters` скидає показники до стандартних номерів.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Збережено. `warnings`: сценарії, які посилаються на пристрої, яких тепер немає у списку (збереження від цього не блокується).",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "count": 1,
+         "warnings": [
+          "scenario 'power-restored', step 3: device 'heater1' is not in the list"
+         ]
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустиме значення.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "413": {
+      "description": "Тіло більше 8192 байт.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "415": {
+      "description": "Не JSON.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Немає SD-картки.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "description": "Повний список.",
+     "content": {
+      "application/json": {
+       "example": {
+        "devices": [
+         {
+          "name": "towel",
+          "ip": "192.168.8.185",
+          "key": "",
+          "version": "3.4",
+          "dp": 1,
+          "ignore": false,
+          "meters": {
+           "power": 19,
+           "current": 18,
+           "voltage": 20,
+           "energy": 17
+          }
+         }
+        ]
+       }
+      }
+     }
+    },
+    "x-danger": "Повна заміна списку: пристрій, якого немає в тілі, буде видалено разом із ключем.",
+    "x-prefill": "/api/devices/config"
+   }
+  },
+  "/api/devices/reload": {
+   "post": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Перечитати devices.json",
+    "description": "Перечитує `/devices.json` з SD. Без картки поточний список лишається.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Список пристроїв (як GET /api/devices)."
+     }
+    },
+    "x-danger": "Перечитає devices.json з карти й замінить поточний список."
+   }
+  },
+  "/api/devices/status": {
+   "post": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Запит стану",
+    "description": "Запит усіх data points. Операція йде до кількох секунд. Відповідь HTTP 200, дивіться поле `ok`; `request` (команда), `phases_ms`, `dps`.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Результат операції.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "device": "towel",
+         "op": "status",
+         "ms": 700,
+         "phases_ms": {
+          "connect": 40,
+          "handshake": 120,
+          "command": 90,
+          "queued": 0
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустимий параметр.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого пристрою.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Черга команд повна.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я пристрою (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "timeout_ms",
+      "in": "query",
+      "required": false,
+      "description": "Загальний таймаут операції, мс (за замовчуванням 8000).",
+      "schema": {
+       "type": "integer",
+       "minimum": 500,
+       "maximum": 30000
+      }
+     }
+    ]
+   }
+  },
+  "/api/devices/on": {
+   "post": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Увімкнути",
+    "description": "Надсилає команду «увімкнути» на DP вмикання пристрою. Відповідь HTTP 200, дивіться поле `ok`; `request` (команда), `phases_ms`, `dps`.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Результат операції.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "device": "towel",
+         "op": "on",
+         "ms": 700,
+         "phases_ms": {
+          "connect": 40,
+          "handshake": 120,
+          "command": 90,
+          "queued": 0
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустимий параметр.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого пристрою.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Черга команд повна.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я пристрою (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "timeout_ms",
+      "in": "query",
+      "required": false,
+      "description": "Загальний таймаут операції, мс (за замовчуванням 8000).",
+      "schema": {
+       "type": "integer",
+       "minimum": 500,
+       "maximum": 30000
+      }
+     },
+     {
+      "name": "t",
+      "in": "query",
+      "required": false,
+      "description": "Діагностика: підставити цей час (unix секунди) у команду.",
+      "schema": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 4294967295
+      }
+     }
+    ],
+    "x-danger": "Справді увімкнути розетку «{name}»? Це змінить стан реального пристрою."
+   }
+  },
+  "/api/devices/off": {
+   "post": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Вимкнути",
+    "description": "Надсилає команду «вимкнути» на DP вмикання пристрою. Відповідь HTTP 200, дивіться поле `ok`; `request` (команда), `phases_ms`, `dps`.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Результат операції.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "device": "towel",
+         "op": "off",
+         "ms": 700,
+         "phases_ms": {
+          "connect": 40,
+          "handshake": 120,
+          "command": 90,
+          "queued": 0
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустимий параметр.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого пристрою.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Черга команд повна.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я пристрою (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "timeout_ms",
+      "in": "query",
+      "required": false,
+      "description": "Загальний таймаут операції, мс (за замовчуванням 8000).",
+      "schema": {
+       "type": "integer",
+       "minimum": 500,
+       "maximum": 30000
+      }
+     },
+     {
+      "name": "t",
+      "in": "query",
+      "required": false,
+      "description": "Діагностика: підставити цей час (unix секунди) у команду.",
+      "schema": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 4294967295
+      }
+     }
+    ],
+    "x-danger": "Справді вимкнути розетку «{name}»? Це змінить стан реального пристрою."
+   }
+  },
+  "/api/devices/refresh": {
+   "post": {
+    "tags": [
+     "Пристрої"
+    ],
+    "summary": "Оновити показники (UPDATEDPS)",
+    "description": "`UPDATEDPS` (0x12) і запит стану в одній сесії: розетка перечитує показники й віддає свіжі. Операція ≈1 с.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Результат."
+     },
+     "400": {
+      "description": "Недопустимий параметр.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого пристрою.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Черга команд повна.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я пристрою (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "timeout_ms",
+      "in": "query",
+      "required": false,
+      "description": "Загальний таймаут операції, мс (за замовчуванням 8000).",
+      "schema": {
+       "type": "integer",
+       "minimum": 500,
+       "maximum": 30000
+      }
+     },
+     {
+      "name": "dps",
+      "in": "query",
+      "required": false,
+      "description": "Які data points перечитати, через кому (до 16 чисел 0..255). За замовчуванням номери з `meters`.",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "settle_ms",
+      "in": "query",
+      "required": false,
+      "description": "Скільки чекати відповіді розетки, мс.",
+      "schema": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 5000
+      }
+     },
+     {
+      "name": "compare",
+      "in": "query",
+      "required": false,
+      "description": "`1` (діагностика): додатково запит стану до UPDATEDPS, у відповіді `before`.",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "0",
+        "1"
+       ]
+      }
+     }
+    ]
+   }
+  },
+  "/api/scenarios": {
+   "get": {
+    "tags": [
+     "Сценарії"
+    ],
+    "summary": "Сценарії та стан запусків",
+    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`).",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Сценарії."
+     }
+    },
+    "x-prefill": "self"
+   },
+   "put": {
+    "tags": [
+     "Сценарії"
+    ],
+    "summary": "Замінити список сценаріїв",
+    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). Тіло до 24576 байт, до 8 сценаріїв по 24 кроки.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Збережено.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "count": 2
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустиме значення.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "413": {
+      "description": "Тіло більше 24576 байт.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "415": {
+      "description": "Не JSON.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Немає SD-картки.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "description": "Повний список.",
+     "content": {
+      "application/json": {
+       "example": {
+        "scenarios": [
+         {
+          "name": "power-restored",
+          "enabled": true,
+          "trigger": "power_on",
+          "default_pause_s": 30,
+          "steps": [
+           {
+            "device": "towel",
+            "action": "on",
+            "enabled": true,
+            "pause_after_s": 300
+           }
+          ]
+         },
+         {
+          "name": "heater-idle-off",
+          "enabled": true,
+          "trigger": "power_below",
+          "when": {
+           "device": "heater3",
+           "watts": 100,
+           "for_s": 120,
+           "warmup_s": 60
+          },
+          "steps": [
+           {
+            "device": "heater3",
+            "action": "off"
+           }
+          ]
+         }
+        ]
+       }
+      }
+     }
+    },
+    "x-danger": "Повна заміна: сценарій, якого немає в тілі, буде видалено, а виконуваний зупинено.",
+    "x-prefill": "/api/scenarios"
+   }
+  },
+  "/api/scenarios/run": {
+   "post": {
+    "tags": [
+     "Сценарії"
+    ],
+    "summary": "Запустити сценарій зараз",
+    "description": "Запускає сценарій (також вимкнений). Кроки справді перемикають розетки.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Запущено.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого сценарію.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Уже виконується.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я сценарію (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "x-danger": "Запустити сценарій «{name}»? Він перемикатиме розетки зі списку кроків."
+   }
+  },
+  "/api/scenarios/stop": {
+   "post": {
+    "tags": [
+     "Сценарії"
+    ],
+    "summary": "Зупинити сценарій",
+    "description": "Зупиняє сценарій, що чекає чи виконується (після кроку, що виконується).",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Зупинка запрошена.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Немає такого сценарію.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Не виконується.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": true,
+      "description": "Ім'я сценарію (a-z 0-9 _ -).",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/api/openapi.json": {
+   "get": {
+    "tags": [
+     "Стан"
+    ],
+    "summary": "Ця специфікація",
+    "description": "OpenAPI 3.0 цього API.",
+    "responses": {
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "Специфікація."
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "basic": {
+    "type": "http",
+    "scheme": "basic"
+   }
+  },
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "name": "example",
+      "ip": "192.168.1.50",
+      "key": "CHANGE-ME-16CHAR",
+      "version": "3.4",
+      "dp": 1
+    }
+  ]
+}

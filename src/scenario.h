@@ -1,0 +1,90 @@
+#pragma once
+//
+// Scenarios: named lists of steps ("switch this socket on, wait, switch the next one on ...")
+// that start on a trigger. There can be several, and several on one trigger; every running
+// scenario is its own task, so they run side by side and know nothing about each other.
+//
+// Definitions live in /scenarios.json on the SD card (like /devices.json: no card, no
+// scenarios) and are edited on the "Сценарії" page. A step names a device from /devices.json.
+//
+// Triggers:
+//   power_on  starts `startup.scenario_delay_s` seconds after boot, but only after a real
+//             power-up (reset reason POWERON). Any other start (software restart, panic,
+//             watchdog, brown-out) does NOT start it, and a restart before the delay ends
+//             does not resume it. Only enabled scenarios start on a trigger.
+//   manual    never starts by itself.
+//   power_below / power_above
+//             starts when the power of one socket stays below / above a threshold for a time, with `when`:
+//             { "device", "watts", "for_s", "warmup_s" }. Read from the history of the readings (Devices::checkPower):
+//             every answer of the last for_s seconds on the right side, the relay on, no unanswered query and no gap;
+//             a relay that was just switched on gets warmup_s first (default 60 s). It fires once when the condition
+//             becomes true and is armed again only after the condition has been false at a look (the relay off, the
+//             power on the other side, no data). While a scenario waits for such a rule, the monitor polls that device
+//             with UPDATEDPS so its readings are fresh; no other device gets UPDATEDPS.
+// Any scenario, enabled or not, can be started by hand (runNow) and stopped (stop).
+//
+// A step always sends its action (3 s timeout; the cached state is not trusted: it can be old or empty after a
+// blackout, and "on" to a socket that is already on does no harm), then queries the state to see the new state,
+// up to 3 attempts 2 s apart. After the last failed attempt the step is "failed" and the scenario goes on.
+// A run started by the power-up is more patient, because the router and the sockets are still booting: it first waits
+// for Wi-Fi (at most 15 min, then 10 s more for the sockets), and each step is retried for up to 90 s, 5 s apart.
+// The pause after a step (its own, or the scenario's default) is kept only after a step that really
+// switched something on. The commands go into the user queue of the Tuya worker, so they are served
+// before the periodic polls.
+//
+// Caveat: ESP32 reports every reset through the EN pin (RST button, flashing, opening a serial
+// port) as POWERON too, so on the debug base board those start power_on scenarios as well. On the
+// deployed hardware (module powered directly) POWERON means power came back.
+//
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <esp_system.h>
+
+#include <vector>
+
+namespace Scenario {
+
+constexpr size_t kMaxScenarios = 8;
+constexpr size_t kMaxSteps = 24;
+
+// reasonName: text for the log, e.g. "SW". Call once, after Logger, Config, Devices and Tuya are up.
+// Reads /scenarios.json and, after a power-up, starts the enabled power_on scenarios.
+void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec);
+
+// The card was missing at start and is there now: reads /scenarios.json. Does nothing if the file was read already.
+// Scenarios that start on power-up are NOT started by this (the power-up is over).
+void sdAvailable();
+
+// Which scenarios name a device that is not in `deviceNames`: one text per enabled step (and per power rule) such as
+// "scenario 'power-restored', step 3: device 'heater1' is not in the list". For the warning after the device list is edited.
+std::vector<String> missingDevices(const std::vector<String>& deviceNames);
+
+enum class RunResult { Started, NotFound, AlreadyRunning };
+
+// Starts the scenario now (enabled or not). While it is waiting for its trigger delay, the wait is cut short.
+RunResult runNow(const String& name);
+
+enum class StopResult { Stopping, NotFound, NotRunning };
+
+// Asks a waiting or running scenario to stop: it ends after the step in progress (or at once while waiting).
+StopResult stop(const String& name);
+
+// JSON for GET /api/scenarios: the definitions (editor) with the last run of each (steps and their results).
+String configJson();
+
+// A short entry per scenario for GET /api/status.
+void summary(JsonArray out);
+
+struct SaveResult {
+  bool ok = false;
+  bool invalid = false;   // the document was rejected (HTTP 400), see error
+  bool noSd = false;      // no card (HTTP 503)
+  size_t count = 0;       // scenarios saved
+  String error;
+};
+
+// Validates a full replacement of the list, writes /scenarios.json and applies it at once (no restart).
+// Scenarios that are no longer in the list are stopped. A run in progress keeps the steps it started with.
+SaveResult save(const String& json);
+
+}  // namespace Scenario

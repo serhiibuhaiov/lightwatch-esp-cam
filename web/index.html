@@ -1,0 +1,1180 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lightwatch</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1c2230;--mut:#6b7385;--line:#dde1e8;--acc:#2b6cb0;--ok:#2f855a;--warn:#b7791f;--err:#c53030;--okbg:#e6f4ec;--warnbg:#fbf1dc;--errbg:#fbe5e5;--code:#f0f2f6}
+@media(prefers-color-scheme:dark){:root{--bg:#12151c;--card:#1b2029;--fg:#e4e7ee;--mut:#8f98ab;--line:#2c3340;--acc:#63a4ee;--ok:#5cc08a;--warn:#e3b04b;--err:#f08080;--okbg:#17301f;--warnbg:#33290f;--errbg:#3a1b1b;--code:#151922}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+header h1{font-size:17px;margin:0}
+nav{display:flex;gap:4px}
+nav a{padding:6px 12px;border-radius:6px;color:var(--mut);text-decoration:none;font-weight:500}
+nav a.on{background:var(--acc);color:#fff}
+main{max-width:980px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.kv{display:flex;flex-direction:column;gap:2px}
+.kv span{font-size:12px;color:var(--mut)}
+.kv b{font-size:15px;font-weight:600;word-break:break-all}
+.badge{display:inline-block;padding:1px 9px;border-radius:99px;font-size:13px;font-weight:600}
+.b-ok{background:var(--okbg);color:var(--ok)}.b-warn{background:var(--warnbg);color:var(--warn)}.b-err{background:var(--errbg);color:var(--err)}.b-n{background:var(--code);color:var(--mut)}
+.banner{padding:10px 14px;border-radius:8px;margin-bottom:14px;border:1px solid var(--line)}
+.banner.warn{background:var(--warnbg);color:var(--warn);border-color:var(--warn)}
+.banner.err{background:var(--errbg);color:var(--err);border-color:var(--err)}
+.banner.ok{background:var(--okbg);color:var(--ok);border-color:var(--ok)}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
+.f{display:flex;flex-direction:column;gap:3px}
+.f label{font-size:13px;font-weight:600}
+.f small{color:var(--mut);font-size:12px}
+.f.chg input,.f.chg select{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn)}
+input,select,button{font:inherit;color:var(--fg)}
+input,select{padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);width:100%}
+input:disabled{opacity:.75}
+button{padding:7px 14px;border:1px solid var(--line);border-radius:6px;background:var(--card);cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+button.d{border-color:var(--err);color:var(--err)}
+button:disabled{opacity:.5;cursor:default}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+pre{margin:0;padding:10px;background:var(--code);border-radius:8px;overflow:auto;max-height:62vh;font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-all}
+pre .W{color:var(--warn)}pre .E{color:var(--err);font-weight:600}pre .D{color:var(--mut)}
+.tw{overflow-x:auto}
+table.h{width:100%;border-collapse:collapse;font-size:14px}
+table.h th{text-align:left;font-size:12px;color:var(--mut);font-weight:600;padding:4px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.h td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.h td:first-child{border-left:4px solid var(--line);white-space:nowrap}
+table.h tr.h-ok td:first-child{border-left-color:var(--ok)}
+table.h tr.h-warn td:first-child{border-left-color:var(--warn)}
+table.h tr.h-err td:first-child{border-left-color:var(--err)}
+table.h tr.h-warn,table.h tr.h-err{background:var(--warnbg)}
+table.h tr.h-err{background:var(--errbg)}
+.lg{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.lg h3{font-size:13px;margin:0 0 6px}
+.lg dl{margin:0;font-size:13px}
+.lg dt{font-weight:600;margin-top:6px}
+.lg dd{margin:0;color:var(--mut)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:baseline}
+.seg{display:flex;gap:2px}
+.mut{color:var(--mut);font-size:13px}
+.sm{width:auto;min-width:0}
+a.btn{display:inline-block;padding:7px 14px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);text-decoration:none}
+a.btn.p{background:var(--acc);border-color:var(--acc);color:#fff}
+.dc h2{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.dh{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.dh h3{margin:0;font-size:17px}
+.big{font-size:22px;font-weight:700}
+.met{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin:6px 0 12px}
+.met div{background:var(--code);border-radius:8px;padding:8px 10px}
+.met.stale{opacity:.45}
+.met span{display:block;font-size:12px;color:var(--mut)}
+.met b{font-size:19px}
+details{margin-top:10px}
+details summary{cursor:pointer;color:var(--mut);font-size:13px}
+table.kvt{border-collapse:collapse;font-size:13px;margin-top:6px}
+table.kvt td{padding:2px 14px 2px 0;vertical-align:top}
+table.kvt td:first-child{color:var(--mut);white-space:nowrap}
+input[type=checkbox]{width:auto;accent-color:var(--acc)}
+.srow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}
+.srow .n{width:24px;color:var(--mut);text-align:right}
+.srow select{flex:1;min-width:150px;width:auto}
+.srow input[type=number]{width:120px}
+.srow button{padding:5px 10px}
+.rs{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.rs div{margin:3px 0}
+textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.op{border:1px solid var(--line);border-radius:8px;margin:0 0 8px;padding:0 10px}
+.op>summary{display:flex;gap:10px;align-items:center;padding:8px 0;color:var(--fg);font-size:14px;flex-wrap:wrap}
+.op>summary code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+.op>summary .mut{font-size:13px}
+.op .body{padding:4px 0 12px}
+.mth{display:inline-block;min-width:54px;text-align:center;padding:1px 8px;border-radius:5px;font-size:12px;font-weight:700;color:#fff}
+.mth.get{background:var(--ok)}.mth.post{background:var(--warn)}.mth.put{background:var(--err)}
+.curl{margin-top:8px;max-height:none;font-size:12px}
+.md p{margin:4px 0}
+@media(max-width:560px){header{gap:8px}main{padding:10px}}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">lightwatch</h1>
+  <nav id="nav">
+    <a href="#status" data-t="status">Статус</a>
+    <a href="#devices" data-t="devices">Пристрої</a>
+    <a href="#scenarios" data-t="scenarios">Сценарії</a>
+    <a href="#config" data-t="config">Налаштування</a>
+    <a href="#logs" data-t="logs">Логи</a>
+    <a href="#api" data-t="api">API</a>
+  </nav>
+  <span class="mut" id="stamp" style="margin-left:auto"></span>
+</header>
+<main id="main"></main>
+
+<script>
+"use strict";
+const $ = (s, r) => (r || document).querySelector(s);
+const E = (tag, props, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(c));
+  return e;
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const main = $("#main");
+let timers = [];
+const every = (fn, ms) => { fn(); timers.push(setInterval(() => { if (!document.hidden) fn(); }, ms)); };
+const clearTimers = () => { timers.forEach(clearInterval); timers = []; };
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({ cache: "no-store" }, opts));
+  if (r.status === 401) throw new Error("Потрібна авторизація (оновіть сторінку)");
+  return r;
+}
+async function getJson(path) {
+  const r = await api(path);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return { j, r };
+}
+const note = (cls, text) => E("div", { class: "banner " + cls }, text);
+const badge = (cls, text) => E("span", { class: "badge b-" + cls }, text);
+const stamp = () => { $("#stamp").textContent = "оновлено " + new Date().toLocaleTimeString(); };
+
+function fmtUp(s) {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return (d ? d + " д " : "") + (h || d ? h + " г " : "") + m + " хв " + (s % 60) + " с";
+}
+
+// ---------------------------------------------------------------- status
+const REASON = { POWERON: "увімкнення живлення", EXT: "скидання (RST)", SW: "програмний перезапуск", PANIC: "збій (panic)",
+  INT_WDT: "watchdog", TASK_WDT: "watchdog", WDT: "watchdog", BROWNOUT: "просідання напруги", DEEPSLEEP: "сон", SDIO: "SDIO", UNKNOWN: "невідомо" };
+const REASON_HELP = { POWERON: "живлення подали з нуля. Але ESP32 так само записує будь-яке скидання через лінію EN: кнопка RST, прошивання, відкриття серійного порту. Тож це ще не доказ, що світло зникало",
+  SW: "перезапустила сама прошивка (збереження з перезапуском, Wi-Fi був відсутній довше за допустимий час)",
+  PANIC: "програма впала. Це погано", WDT: "програма зависла (watchdog). Це погано", BROWNOUT: "напруга живлення просіла. Це погано" };
+const STAGE = { started: "старт", storage: "сховище", config: "конфіг", "wifi-started": "Wi-Fi запущено", "got-ip": "є IP", "alive-60s": "працює 60 с" };
+
+function viewStatus() {
+  const box = E("div");
+  main.replaceChildren(box);
+  async function refresh() {
+    try {
+      const { j: s } = await getJson("/api/status");
+      const sdCls = { ok: "ok", missing: "err", fault: "err" }[s.sd] || "n";
+      const sdTxt = { ok: "працює", missing: "відсутня", fault: "несправна" }[s.sd] || s.sd;
+      const rssiCls = s.wifi.rssi > -67 ? "ok" : s.wifi.rssi > -80 ? "warn" : "err";
+      const kv = (k, v) => E("div", { class: "kv" }, E("span", {}, k), E("b", {}, v));
+      const out = [];
+      if (s.sd !== "ok") out.push(note("err", "SD-карта " + sdTxt + ": логи на карту не пишуться, конфіг береться з копії у флеші. Журнал у пам'яті доступний на вкладці «Логи»."));
+      if (s.restart_pending) out.push(note("warn", "Збережені налаштування відрізняються від активних: потрібен перезапуск (вкладка «Налаштування»)."));
+      out.push(E("div", { class: "card" }, E("h2", {}, "Стан"), E("div", { class: "grid" },
+        E("div", { class: "kv" }, E("span", {}, "SD-карта"), badge(sdCls, sdTxt)),
+        E("div", { class: "kv" }, E("span", {}, "Запис логів на карту"), badge(s.file_logging ? "ok" : "warn", s.file_logging ? "так" : "ні")),
+        kv("Конфіг завантажено з", s.config_source),
+        E("div", { class: "kv" }, E("span", {}, "Перезапуск потрібен"), badge(s.restart_pending ? "warn" : "ok", s.restart_pending ? "так" : "ні")),
+        kv("Працює", fmtUp(s.uptime_s)),
+        kv("Вільна пам'ять", (s.heap_free / 1024).toFixed(0) + " КБ"),
+        E("div", { class: "kv" }, E("span", {}, "Годинник"), badge(s.time_valid ? "ok" : "warn", s.time_valid ? "синхронізовано" : "не синхронізовано")))));
+      out.push(E("div", { class: "card" }, E("h2", {}, "Wi-Fi"), E("div", { class: "grid" },
+        E("div", { class: "kv" }, E("span", {}, "Підключення"), badge(s.wifi.connected ? "ok" : "err", s.wifi.connected ? "є" : "немає")),
+        kv("IP", s.wifi.ip), E("div", { class: "kv" }, E("span", {}, "Сигнал"), badge(rssiCls, s.wifi.rssi + " дБм")))));
+      if (s.tuya) {  // how long the requests to the sockets waited since boot (see README: two lanes, one lock per socket)
+        const lanes = [["commands", "Команди", "кнопки, API, сценарії"], ["monitor", "Опитування", "фоновий монітор"]];
+        const ms = v => v + " мс";
+        out.push(E("div", { class: "card" }, E("h2", {}, "Запити до розеток (від запуску)"),
+          E("div", { class: "tw" }, E("table", { class: "h" },
+            E("thead", {}, E("tr", {}, ["Черга", "Запитів", "Очікування, сер.", "Очікування, макс.", "Довше 1 с", "Зайнято"].map(h => E("th", {}, h)))),
+            E("tbody", {}, lanes.map(([k, name, what]) => {
+              const t = s.tuya[k] || {};
+              const cls = t.wait_over_1s > 0 ? "warn" : "ok";
+              return E("tr", { class: "h-" + cls },
+                E("td", { title: what }, name, E("span", { class: "mut" }, " · " + what)),
+                E("td", {}, String(t.jobs)), E("td", {}, ms(t.wait_avg_ms)), E("td", {}, ms(t.wait_max_ms)),
+                E("td", { title: "Скільки запитів чекали в черзі довше за секунду" }, String(t.wait_over_1s)),
+                E("td", { title: "Опитування, пропущені, бо розетку тримав інший запит; команди, що не дочекались розетки" }, String(t.busy)));
+            })))),
+          E("p", { class: "mut", style: "margin:8px 0 0" }, "Очікування це час від постановки запиту в чергу до початку роботи з розеткою (разом з очікуванням її замка). " +
+            "Команди й опитування йдуть окремо й одночасно, але до однієї розетки одночасно лише один запит. Великі значення «Довше 1 с» означають, що розетки (зокрема недоступні) затримують команди.")));
+      }
+      const bad = e => ["BROWNOUT", "PANIC", "INT_WDT", "TASK_WDT", "WDT"].includes(e.reason);
+      const done = e => ["got-ip", "alive-60s"].includes(e.stage);
+      const fmtMin = m => (m < 1 ? "менше хвилини" : m < 60 ? "≥ " + m + " хв" : "≥ " + Math.floor(m / 60) + " г " + (m % 60) + " хв");
+      const fmtTime = e => {
+        if (!e.time) return "невідомо";
+        const iso = new Date(e.time * 1000).toISOString();
+        return e.time_quality === "synced" ? iso.slice(0, 10) + " " + iso.slice(11, 19) + " UTC"
+          : "не раніше " + iso.slice(0, 10) + " " + iso.slice(11, 16) + " UTC";
+      };
+      out.push(scenariosCard(s.scenarios || [], s));
+      const hist = (s.boot_history || []).slice().reverse();
+      const rows = hist.map((e, i) => {
+        const cls = bad(e) ? "err" : done(e) ? "ok" : "warn";
+        const t = E("td", { title: e.time_quality === "synced" ? "точний час" : e.time_quality === "estimated" ? "оцінка: NTP не було, показано останній момент, коли пристрій точно працював" : "час не відомий" }, fmtTime(e));
+        if (e.time_quality === "estimated") t.className = "mut";
+        return E("tr", { class: "h-" + cls },
+          E("td", { title: e.current ? "поточний запуск" : i + " запуск(ів) тому" }, String(i + 1)),
+          t,
+          E("td", { title: REASON_HELP[e.reason] || "" }, REASON[e.reason] || e.reason),
+          E("td", {}, STAGE[e.stage] || e.stage),
+          E("td", {}, e.current ? fmtUp(s.uptime_s) : fmtMin(e.uptime_min)));
+      });
+      out.push(E("div", { class: "card" }, E("h2", {}, "Історія запусків (новіші зверху)"),
+        E("div", { class: "tw" }, E("table", { class: "h" },
+          E("thead", {}, E("tr", {}, ["Запуск", "Час", "Причина", "Дійшов до", "Працював"].map(h => E("th", {}, h)))),
+          E("tbody", {}, rows)))));
+      const dot = c => E("span", { class: "dot", style: "background:var(--" + c + ")" });
+      out.push(E("div", { class: "card" }, E("h2", {}, "Легенда"), E("div", { class: "lg" },
+        E("div", {}, E("h3", {}, "Номер запуску"), E("dl", {},
+          E("dt", {}, "1"), E("dd", {}, "поточний запуск"),
+          E("dt", {}, "2, 3, 4 …"), E("dd", {}, "попередній, перед ним і так далі (до 16)")),
+          E("h3", { style: "margin-top:14px" }, "Колір рядка"), E("dl", {},
+          E("dt", {}, dot("ok"), "зелений"), E("dd", {}, "дійшов до «є IP» чи далі: старт відбувся"),
+          E("dt", {}, dot("warn"), "жовтий"), E("dd", {}, "не дійшов до «є IP»: запуск перервали (вимкнули, скинули) або щось не так зі стартом"),
+          E("dt", {}, dot("err"), "червоний"), E("dd", {}, "збій, зависання чи просідання напруги"))),
+        E("div", {}, E("h3", {}, "Причина запуску"), E("dl", {},
+          ...["POWERON", "SW", "PANIC", "WDT", "BROWNOUT"].flatMap(k => [E("dt", {}, REASON[k]), E("dd", {}, REASON_HELP[k])]))),
+        E("div", {}, E("h3", {}, "Етапи старту (по порядку)"), E("dl", {},
+          E("dt", {}, "старт → сховище → конфіг"), E("dd", {}, "внутрішня пам'ять, SD, читання налаштувань"),
+          E("dt", {}, "Wi-Fi запущено → є IP"), E("dd", {}, "підключення до мережі завершене"),
+          E("dt", {}, "працює 60 с"), E("dd", {}, "запуск пережив першу хвилину: здоровий"))),
+        E("div", {}, E("h3", {}, "Час і тривалість"), E("dl", {},
+          E("dt", {}, "дата й час"), E("dd", {}, "точний: час отримано з NTP (або збережений після програмного перезапуску)"),
+          E("dt", {}, "не раніше …"), E("dd", {}, "NTP не було: показано останній момент, коли пристрій точно працював (запис раз на 10 хв). Справжній запуск був після нього"),
+          E("dt", {}, "невідомо"), E("dd", {}, "пристрій ще ні разу не мав точного часу"),
+          E("dt", {}, "Працював ≥ N хв"), E("dd", {}, "тривалість запуску з точністю до 10 хв; «менше хвилини», якщо його перервали раніше")))
+      )));
+      box.replaceChildren(...out);
+      stamp();
+    } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати статус: " + e.message)); }
+  }
+  every(refresh, 5000);
+}
+
+// ---------------------------------------------------------------- scenarios
+const TRIGGERS = { power_on: "З'явилося живлення", manual: "Лише вручну", power_below: "Споживання розетки нижче порогу", power_above: "Споживання розетки вище порогу" };
+const WATCH_REASON = { met: "умова виконана", waiting: "умова виконується, лічильник іде", warmup: "розігрів після вмикання", "not-met": "потужність по інший бік порогу",
+  "relay-off": "розетка вимкнена", "relay-unknown": "стан реле невідомий", unanswered: "остання спроба опитування невдала", stale: "давно немає відповіді розетки",
+  "no-data": "ще немає даних", "no-power-dp": "у розетки не вказано DP потужності або його немає", ignored: "розетка ігнорується", "no-device": "такої розетки немає в списку пристроїв",
+  "too-long": "тривалість більша за історію показників" };
+const SC_STATE = { idle: ["n", "не запускався"], skipped: ["n", "не запускався"], waiting: ["warn", "чекає старту"], running: ["warn", "виконується"],
+  done: ["ok", "виконано"], stopped: ["warn", "зупинено"] };
+const STEP_STATE = { pending: ["n", "очікує"], disabled: ["n", "крок вимкнено"], running: ["warn", "виконується"], ok: ["ok", "виконано"],
+  skipped: ["n", "пропущено (ігнорується)"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
+
+// One line about a scenario's state, shared by the status card and the scenarios page.
+function scenarioStateText(s) {
+  const why = (/reset reason: (\w+)/.exec(s.skip_reason || "") || [])[1];
+  if (s.state === "waiting") return s.wait_reason === "wifi" ? "чекає на Wi-Fi (потім ще 10 с для розеток)" : "стартує через " + s.starts_in_s + " с";
+  if (s.state === "skipped") return "не запускався: запуск не від вмикання живлення" + (why ? " (" + (REASON[why] || why) + ")" : "");
+  const how = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу" }[s.run_trigger];
+  const prog = s.progress_total != null ? ", кроків " + s.progress_done + " з " + s.progress_total : "";
+  return (SC_STATE[s.state] || ["n", s.state])[1] + (how && s.state !== "idle" ? " (запуск: " + how + ")" : "") + prog;
+}
+
+function scenariosCard(list, st) {
+  const rows = list.map(s => E("div", { class: "row", style: "margin-bottom:6px" },
+    E("b", {}, s.name), badge((SC_STATE[s.state] || ["n"])[0], scenarioStateText(s)),
+    E("span", { class: "mut" }, TRIGGERS[s.trigger] || s.trigger, s.enabled ? "" : " · вимкнено")));
+  return E("div", { class: "card" }, E("h2", {}, "Сценарії"),
+    rows.length ? rows : E("p", { class: "mut", style: "margin:0 0 8px" }, "Сценаріїв ще немає."),
+    E("p", { class: "mut", style: "margin:8px 0 0" }, "Сценарій з тригером «З'явилося живлення» стартує лише після вмикання живлення; програмний перезапуск (зокрема зі сторінки налаштувань) його не запускає. Кроки, запуск і зупинка вручну: ",
+      E("a", { href: "#scenarios" }, "вкладка «Сценарії»"), "."));
+}
+
+function viewScenarios() {
+  const box = E("div");
+  main.replaceChildren(box);
+  const NAME_RE = /^[a-z0-9_-]{1,32}$/;
+  let rows = [], devNames = [], ignored = new Set(), limits = { max: 8, steps: 24, pause: 3600 }, live = {}, info = {}, msg = null, saving = false;
+  const runBoxes = new Map();
+
+  const blankStep = () => ({ device: devNames[0] || "", action: "on", enabled: true, pause: "" });
+  const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60" });
+  const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), steps: [] });
+  const fromServer = s => ({ orig: s.name, name: s.name, enabled: s.enabled, trigger: s.trigger, pause: String(s.default_pause_s),
+    when: s.when ? { device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s) } : blankWhen(),
+    steps: s.steps.map(x => ({ device: x.device, action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s) })) });
+
+  async function load(keepEdits) {
+    try {
+      const [{ j }, { j: dj }] = await Promise.all([getJson("/api/scenarios"), getJson("/api/devices/config")]);
+      devNames = dj.devices.map(d => d.name);
+      ignored = new Set(dj.devices.filter(d => d.ignore).map(d => d.name));
+      limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s };
+      info = { sd: j.sd, error: j.error };
+      live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
+      if (!keepEdits) rows = j.scenarios.map(fromServer);
+      render();
+    } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати сценарії: " + e.message)); }
+  }
+
+  async function poll() {   // only the run state: edits in the form are not touched
+    if (saving) return;
+    try {
+      const { j } = await getJson("/api/scenarios");
+      live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
+      for (const [name, el] of runBoxes) el.replaceChildren(...runBlock(name));
+      stamp();
+    } catch (e) { /* the next poll tries again */ }
+  }
+
+  function runBlock(name) {
+    const s = live[name];
+    if (!s) return [];
+    const active = s.state === "waiting" || s.state === "running";
+    const out = [E("div", { class: "row" }, badge((SC_STATE[s.state] || ["n"])[0], scenarioStateText(s)),
+      E("button", { class: "p", disabled: active, onclick: () => act(s.name, "run") }, "Запустити зараз"),
+      E("button", { class: "d", disabled: !active, onclick: () => act(s.name, "stop") }, "Зупинити"))];
+    if (s.watch) {
+      const w = s.watch;
+      out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(w.met ? "ok" : "n", "умова"), " ",
+        (w.power_w == null ? "потужність невідома" : "потужність " + w.power_w.toFixed(1) + " Вт"), " · ", WATCH_REASON[w.reason] || w.reason,
+        w.reason === "waiting" || w.reason === "met" ? " (" + w.run_s + " з " + s.when.for_s + " с)" : "", " · ", w.armed ? "готовий спрацювати" : "вже спрацював, чекає, поки умова зникне"));
+    }
+    const steps = s.run_steps || [];
+    if (steps.length) {
+      out.push(E("div", { class: "rs" }, steps.map((x, k) => E("div", {}, badge((STEP_STATE[x.state] || ["n"])[0], (STEP_STATE[x.state] || [0, x.state])[1]), " ",
+        E("b", {}, (k + 1) + ". " + x.device), x.attempts > 1 ? " · спроб: " + x.attempts : "", x.detail ? E("span", { class: "mut" }, " · " + x.detail) : ""))));
+    }
+    return out;
+  }
+
+  async function act(name, op) {
+    if (op === "run" && !confirm("Запустити сценарій «" + name + "» зараз? Він виконає кроки зі списку: увімкне чи вимкне вказані розетки.")) return;
+    try {
+      const r = await api("/api/scenarios/" + op + "?name=" + encodeURIComponent(name), { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      msg = null;
+    } catch (e) { msg = { cls: "err", text: "Не вдалося: " + e.message }; render(); return; }
+    setTimeout(poll, 400);
+  }
+
+  function validate() {
+    if (rows.length > limits.max) return "Забагато сценаріїв (максимум " + limits.max + ").";
+    const seen = new Set();
+    const pauseOk = v => /^\d{1,4}$/.test(v) && Number(v) <= limits.pause;
+    for (const [i, r] of rows.entries()) {
+      const at = "Сценарій " + (i + 1) + (r.name ? " («" + r.name + "»)" : "") + ": ";
+      if (!NAME_RE.test(r.name)) return at + "ім'я має бути 1–32 символи a-z, 0-9, _ або -.";
+      if (seen.has(r.name)) return at + "ім'я повторюється.";
+      seen.add(r.name);
+      if (!pauseOk(r.pause)) return at + "пауза за замовчуванням має бути числом 0–" + limits.pause + " с.";
+      if (r.trigger === "power_below" || r.trigger === "power_above") {
+        const w = r.when;
+        if (!NAME_RE.test(w.device)) return at + "оберіть розетку, за якою стежить тригер.";
+        if (!/^\d{1,5}$/.test(w.watts) || Number(w.watts) > 20000) return at + "поріг має бути цілим числом ват 0–20000.";
+        if (!/^\d{1,3}$/.test(w.for_s) || Number(w.for_s) < 10 || Number(w.for_s) > 900) return at + "тривалість має бути цілим числом секунд 10–900.";
+        if (!/^\d{1,4}$/.test(w.warmup_s) || Number(w.warmup_s) > 3600) return at + "розігрів має бути цілим числом секунд 0–3600.";
+      }
+      if (r.steps.length > limits.steps) return at + "забагато кроків (максимум " + limits.steps + ").";
+      for (const [k, st] of r.steps.entries()) {
+        if (!NAME_RE.test(st.device)) return at + "крок " + (k + 1) + ": оберіть пристрій.";
+        if (st.pause !== "" && !pauseOk(st.pause)) return at + "крок " + (k + 1) + ": пауза має бути числом 0–" + limits.pause + " с або порожньою.";
+      }
+    }
+    return null;
+  }
+
+  async function save() {
+    const err = validate();
+    if (err) { msg = { cls: "err", text: err }; render(); return; }
+    saving = true; msg = { cls: "warn", text: "Зберігаю…" }; render();
+    try {
+      const body = { scenarios: rows.map(r => ({ name: r.name, enabled: r.enabled, trigger: r.trigger, default_pause_s: Number(r.pause),
+        ...(r.trigger === "power_below" || r.trigger === "power_above" ? { when: { device: r.when.device, watts: Number(r.when.watts), for_s: Number(r.when.for_s), warmup_s: Number(r.when.warmup_s) } } : {}),
+        steps: r.steps.map(st => { const o = { device: st.device, action: st.action, enabled: st.enabled }; if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
+      const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      msg = { cls: "ok", text: "Збережено: " + j.count + " сценарій(ів). Діє одразу, без перезапуску; сценарій, що вже виконується, доробить зі старими кроками." };
+      saving = false;
+      await load(false);
+    } catch (e) {
+      saving = false;
+      msg = { cls: "err", text: "Не збережено: " + e.message };
+      render();
+    }
+  }
+
+  const field = (label, input, hint) => E("div", { class: "f" }, E("label", {}, label), input, hint ? E("small", {}, hint) : null);
+
+  function stepRow(r, st, k) {
+    const known = devNames.includes(st.device);
+    const sel = E("select", {}, (known || !st.device ? devNames : [st.device, ...devNames]).map(n =>
+      E("option", { value: n, selected: n === st.device }, n + (devNames.includes(n) ? (ignored.has(n) ? " (ігнорується)" : "") : " (немає в списку пристроїв)"))));
+    sel.addEventListener("change", () => { st.device = sel.value; });
+    const act = E("select", { title: "Дія кроку", style: "flex:0 0 auto;min-width:0" }, [["on", "Ввімкнути"], ["off", "Вимкнути"]].map(([v, l]) => E("option", { value: v, selected: v === st.action }, l)));
+    act.addEventListener("change", () => { st.action = act.value; });
+    const en = E("input", { type: "checkbox", checked: st.enabled, title: "крок увімкнено" });
+    en.addEventListener("change", () => { st.enabled = en.checked; });
+    const pz = E("input", { type: "number", min: 0, max: limits.pause, value: st.pause, placeholder: "пауза: " + (r.pause || "30") + " с", title: "Пауза після цього кроку, с. Порожньо: за замовчуванням. Пауза лише після кроку, що справді перемкнув розетку" });
+    pz.addEventListener("input", () => { st.pause = pz.value.trim(); });
+    const mv = d => () => { const j = k + d; if (j < 0 || j >= r.steps.length) return; [r.steps[k], r.steps[j]] = [r.steps[j], r.steps[k]]; render(); };
+    return E("div", { class: "srow" }, E("span", { class: "n" }, (k + 1) + "."), sel, act, en, pz,
+      E("button", { type: "button", title: "вгору", disabled: saving || k === 0, onclick: mv(-1) }, "↑"),
+      E("button", { type: "button", title: "вниз", disabled: saving || k === r.steps.length - 1, onclick: mv(1) }, "↓"),
+      E("button", { type: "button", class: "d", title: "видалити крок", disabled: saving, onclick: () => { r.steps.splice(k, 1); render(); } }, "✕"));
+  }
+
+  // The condition of a power trigger: which socket, which threshold, for how long, and the warm-up after switching on.
+  function whenFields(r) {
+    const w = r.when;
+    const below = r.trigger === "power_below";
+    const dev = E("select", {}, (devNames.includes(w.device) || !w.device ? devNames : [w.device, ...devNames]).map(n =>
+      E("option", { value: n, selected: n === w.device }, n + (devNames.includes(n) ? (ignored.has(n) ? " (ігнорується)" : "") : " (немає в списку пристроїв)"))));
+    dev.addEventListener("change", () => { w.device = dev.value; });
+    const num = (key, min, max) => { const i = E("input", { type: "number", min, max, value: w[key] }); i.addEventListener("input", () => { w[key] = i.value.trim(); }); return i; };
+    return E("div", {},
+      E("h2", { style: "margin-top:14px" }, "Умова спрацьовування"),
+      E("div", { class: "fields" },
+        field("Розетка", dev, "за її потужністю стежить тригер"),
+        field(below ? "Потужність нижче, Вт" : "Потужність вище, Вт", num("watts", 0, 20000), "поріг"),
+        field("Протягом, с", num("for_s", 10, 900), "усі записи за цей час мають бути по правильний бік порогу"),
+        field("Розігрів, с", num("warmup_s", 0, 3600), "скільки чекати після вмикання розетки, перш ніж рахувати час")),
+      E("p", { class: "mut", style: "margin:8px 0 0" }, "Тригер дивиться на історію показників розетки: усі записи за останні N секунд успішні, реле ввімкнене, потужність " +
+        (below ? "нижча" : "вища") + " за поріг, без пропущених опитувань. Будь-який збій, вимкнене реле чи потужність по інший бік порогу починає відлік заново. Спрацьовує один раз і знову готовий, коли умова перестала виконуватись. " +
+        "Поки такий сценарій увімкнений, монітор опитує цю розетку з UPDATEDPS, щоб показники були свіжими."));
+  }
+
+  function card(r, i) {
+    const nameIn = E("input", { type: "text", value: r.name, maxlength: 32, placeholder: "наприклад power-restored", autocomplete: "off" });
+    nameIn.addEventListener("input", () => { r.name = nameIn.value.trim(); });
+    const en = E("input", { type: "checkbox", checked: r.enabled });
+    en.addEventListener("change", () => { r.enabled = en.checked; });
+    const trig = E("select", {}, Object.entries(TRIGGERS).map(([v, l]) => E("option", { value: v, selected: v === r.trigger }, l)));
+    trig.addEventListener("change", () => { r.trigger = trig.value; render(); });
+    const pz = E("input", { type: "number", min: 0, max: limits.pause, value: r.pause });
+    pz.addEventListener("input", () => { r.pause = pz.value.trim(); });
+    const unsaved = !r.orig || r.orig !== r.name;
+    const rb = E("div", { class: "rs" });
+    if (r.orig) { runBoxes.set(r.orig, rb); rb.replaceChildren(...runBlock(r.orig)); }
+    return E("div", { class: "card" },
+      E("h2", {}, "Сценарій " + (i + 1) + (r.orig ? " · " + r.orig : " · новий"),
+        E("button", { type: "button", class: "d", disabled: saving, onclick: () => {
+          if (!confirm("Видалити сценарій «" + (r.name || "без імені") + "»? Зміна застосується після «Зберегти».")) return;
+          rows.splice(i, 1); render();
+        } }, "Видалити")),
+      E("div", { class: "fields" },
+        field("Ім'я", nameIn, "a-z 0-9 _ -, до 32 символів, унікальне"),
+        field("Тригер", trig, "що запускає сценарій автоматично"),
+        field("Пауза між кроками, с", pz, "за замовчуванням; у кроку можна задати свою"),
+        E("div", { class: "f" }, E("label", {}, "Увімкнений"), E("label", { style: "font-weight:400" }, en, " стартує за тригером"),
+          E("small", {}, "Вимкнений сценарій не стартує сам, але запускається вручну"))),
+      r.trigger === "power_below" || r.trigger === "power_above" ? whenFields(r) : null,
+      E("h2", { style: "margin-top:14px" }, "Кроки по черзі"),
+      r.steps.length ? r.steps.map((st, k) => stepRow(r, st, k)) : E("p", { class: "mut", style: "margin:0 0 8px" }, "Кроків ще немає."),
+      E("div", { class: "row" }, E("button", { type: "button", disabled: saving || r.steps.length >= limits.steps || !devNames.length, onclick: () => { r.steps.push(blankStep()); render(); } }, "Додати крок"),
+        devNames.length ? "" : E("span", { class: "mut" }, "Спершу додайте пристрої.")),
+      r.orig ? E("div", {}, rb, unsaved ? E("p", { class: "mut", style: "margin:6px 0 0" }, "Запуск і зупинка діють на збережену версію.") : "") : "");
+  }
+
+  function render() {
+    runBoxes.clear();
+    const out = [];
+    if (msg) out.push(note(msg.cls, msg.text));
+    if (info.error) out.push(note("err", info.error));
+    out.push(E("div", { class: "row" },
+      E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими. " +
+        "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж.")));
+    if (!rows.length) out.push(note("warn", "Сценаріїв ще немає. Натисніть «Додати сценарій»."));
+    rows.forEach((r, i) => out.push(card(r, i)));
+    out.push(E("div", { class: "row" },
+      E("button", { type: "button", disabled: saving || rows.length >= limits.max, onclick: () => { rows.push(blank()); msg = null; render(); } }, "Додати сценарій"),
+      E("button", { type: "button", class: "p", disabled: saving, onclick: save }, "Зберегти"),
+      E("button", { type: "button", disabled: saving, onclick: () => { msg = null; load(false); } }, "Скасувати зміни"),
+      E("span", { class: "mut" }, rows.length + " з " + limits.max)));
+    box.replaceChildren(...out);
+    stamp();
+  }
+
+  load(false).then(() => every(poll, 3000));
+}
+
+// ---------------------------------------------------------------- devices
+// Which data point carries which reading differs between socket models, so every device can map them
+// (devices.json "meters"; the editor has the fields). Not set = the usual Tuya socket numbers below.
+// The units are the usual ones for these sockets: power 0.1 W, current mA, voltage 0.1 V, energy 0.001 kWh.
+const STD_METER_DP = { power: 19, current: 18, voltage: 20, energy: 17 };
+const METERS = [
+  ["power", "Потужність", v => (v / 10).toFixed(1) + " Вт"],
+  ["current", "Струм", v => (v / 1000).toFixed(3) + " А"],
+  ["voltage", "Напруга", v => (v / 10).toFixed(1) + " В"],
+  ["energy", "Енергія", v => (v / 1000).toFixed(3) + " кВт·год"],
+];
+// [{ key, label, fmt, dp }] of the readings this device is set up to have (dp 0 = the socket has none).
+const meterList = d => METERS.map(([key, label, fmt]) => {
+  const set = d.meters ? d.meters[key] : null;
+  return { key, label, fmt, dp: set == null ? STD_METER_DP[key] : set };
+}).filter(m => m.dp > 0);
+const fmtAge = s => s == null ? "—" : s < 60 ? s + " с тому" : s < 3600 ? Math.floor(s / 60) + " хв тому" : Math.floor(s / 3600) + " г тому";
+const ERR_HELP = {
+  connect: "немає з'єднання: пристрій вимкнений, змінився IP, або його вже тримає інший клієнт (додаток Smart Life)",
+  timeout: "пристрій не відповів вчасно", closed: "пристрій закрив з'єднання (хибний ключ або версія протоколу?)",
+  auth: "відповідь не пройшла перевірку: хибний local key", handshake: "не вдалося узгодити сесію (версія протоколу?)",
+  protocol: "некоректна відповідь", device: "пристрій відхилив команду",
+  busy: "пристрій був зайнятий іншим запитом, спробуйте ще раз",
+};
+
+function viewDevices() {
+  const box = E("div");
+  main.replaceChildren(box);
+  const msgs = {};          // last action message per device, survives the periodic re-render
+  const busy = new Set();   // devices with an action in progress
+  const opened = new Set(); // devices whose "all data points" block is open
+  const hist = {};          // device name -> the last /api/devices/history answer (only for devices whose block is open)
+  const histOpen = new Set();
+  let data = null;
+
+  async function load() {
+    try {
+      data = (await getJson("/api/devices")).j;
+      await Promise.all([...histOpen].map(async n => {
+        try { hist[n] = (await getJson("/api/devices/history?name=" + encodeURIComponent(n))).j; } catch (e) { hist[n] = null; }
+      }));
+      render(); stamp();
+    } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати пристрої: " + e.message)); }
+  }
+
+  async function act(d, op) {
+    if (op !== "status" && !confirm((op === "on" ? "Увімкнути" : "Вимкнути") + " «" + d.name + "» (" + d.ip + ")?")) return;
+    busy.add(d.name); msgs[d.name] = { cls: "n", text: "Виконую…" }; render();
+    try {
+      // "Оновити зараз" asks the device to re-read its meters (UPDATEDPS) before the query; if the device does not
+      // take that command, fall back to the plain status query.
+      const call = async o => { const x = await api("/api/devices/" + o + "?name=" + encodeURIComponent(d.name), { method: "POST" }); return [x, await x.json().catch(() => ({}))]; };
+      let [r, j] = await call(op === "status" ? "refresh" : op);
+      if (op === "status" && r.ok && !j.ok && ["closed", "protocol", "device"].includes(j.error)) [r, j] = await call("status");
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      const ph = j.phases_ms || {};
+      const timing = j.ms + " мс (з'єднання " + ph.connect + ", сесія " + ph.handshake + ", команда " + ph.command + ")";
+      if (j.ok) {
+        msgs[d.name] = { cls: "ok", text: ({ status: "Стан оновлено", on: "Команду «ввімкнути» виконано", off: "Команду «вимкнути» виконано" })[op] + ": " + timing };
+        if (op !== "status") {  // confirm the new state from the device itself
+          await api("/api/devices/status?name=" + encodeURIComponent(d.name), { method: "POST" }).then(x => x.json()).catch(() => {});
+        }
+      } else {
+        msgs[d.name] = { cls: "err", text: "Помилка (" + j.error + "): " + (ERR_HELP[j.error] || j.detail || "") + " [" + timing + "]" };
+      }
+    } catch (e) { msgs[d.name] = { cls: "err", text: "Помилка: " + e.message }; }
+    busy.delete(d.name);
+    await load();
+  }
+
+  function card(d) {
+    const st = d.state || {};
+    const on = st.on;
+    const dps = st.dps || {};
+    const isBusy = busy.has(d.name);
+    const online = d.ignore ? badge("n", "ігнорується")
+      : st.known ? (st.online ? (st.fails > 0 ? badge("warn", "онлайн · остання спроба невдала") : badge("ok", "онлайн")) : badge("err", "офлайн")) : badge("n", "невідомо");
+    const sw = !st.known || !st.dps ? badge("n", "невідомо") : on === undefined ? badge("n", "немає даних") : on ? badge("ok", "ввімкнено") : badge("n", "вимкнено");
+    const parts = [E("div", { class: "dh" }, E("h3", {}, d.name), online, sw,
+      E("span", { class: "mut" }, d.ip + " · протокол " + d.version + " · DP " + d.dp))];
+
+    if (d.ignore) {
+      parts.push(note("warn", "Пристрій ігнорується: монітор його не опитує, а кроки сценаріїв для нього пропускаються. Вручну ним можна керувати. Вимкнути ігнорування можна в «Налаштувати пристрої»."));
+    }
+    if (st.known && !st.online) {
+      parts.push(note("err", "Пристрій не відповідає (" + st.error + "): " + (ERR_HELP[st.error] || st.detail || "") +
+        (st.age_s != null ? ". Востаннє відповідав " + fmtAge(st.age_s) : ". Ще жодного разу не відповідав") + ". Невдалих спроб поспіль: " + st.fails + "."));
+    }
+    const metrics = meterList(d).filter(m => typeof dps[m.dp] === "number");
+    if (metrics.length) {
+      // A switched-off socket keeps reporting its last readings for a while: show them dimmed, not as live values.
+      parts.push(E("div", { class: "met" + (on === false ? " stale" : ""), title: on === false ? "Розетка вимкнена: показники можуть бути застарілими" : "" },
+        metrics.map(m => E("div", {}, E("span", {}, m.label), E("b", {}, m.fmt(dps[m.dp]))))));
+    } else if (st.known && st.online && st.dps) {
+      parts.push(E("div", { class: "mut", style: "margin:2px 0 10px" }, "Показників напруги, струму й потужності немає: у цього пристрою вони, ймовірно, в інших data points. Подивіться «Усі data points» і вкажіть їх у «Налаштувати пристрої»."));
+    }
+    parts.push(E("div", { class: "row" },
+      E("button", { class: "p", disabled: isBusy || on === true, onclick: () => act(d, "on") }, "Увімкнути"),
+      E("button", { class: "d", disabled: isBusy || on === false, onclick: () => act(d, "off") }, "Вимкнути"),
+      E("button", { disabled: isBusy, onclick: () => act(d, "status") }, "Оновити зараз"),
+      E("span", { class: "mut" }, st.age_s != null && st.online ? "відповів " + fmtAge(st.age_s) + (st.latency_ms ? " · " + st.latency_ms + " мс" : "") : "")));
+    const m = msgs[d.name];
+    if (m) parts.push(E("div", { class: "mut", style: "margin-bottom:6px" }, badge(m.cls, m.cls === "ok" ? "ok" : m.cls === "err" ? "помилка" : "…"), " ", m.text));
+
+    const keys = Object.keys(dps).sort((a, b) => a - b);
+    if (keys.length) {
+      const det = E("details", {}, E("summary", {}, "Усі data points (" + keys.length + ")"),
+        E("table", { class: "kvt" }, keys.map(k => {
+          const m = meterList(d).find(x => x.dp === Number(k));
+          const n = Number(k) === d.dp ? "Реле (вмик/вимк)" : m ? m.label : "";
+          const shown = m && typeof dps[k] === "number" ? m.fmt(dps[k]) + "  (" + dps[k] + ")" : JSON.stringify(dps[k]);
+          return E("tr", {}, E("td", {}, "DP " + k + (n ? " · " + n : "")), E("td", {}, shown));
+        })));
+      if (opened.has(d.name)) det.open = true;
+      det.addEventListener("toggle", () => { det.open ? opened.add(d.name) : opened.delete(d.name); });
+      parts.push(det);
+    }
+    parts.push(histBlock(d));
+    return E("div", { class: "card" }, parts);
+  }
+
+  // A tiny line chart of the values (null breaks the line); null when there is nothing to draw.
+  function spark(vals) {
+    const nums = vals.filter(v => v != null);
+    if (nums.length < 2) return null;
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 300 48"); svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.cssText = "width:100%;height:48px;background:var(--code);border-radius:6px;margin:6px 0";
+    const lo = Math.min(0, ...nums), hi = Math.max(...nums), span = hi - lo || 1;
+    let path = "";
+    vals.forEach((v, i) => {
+      if (v == null) return;
+      path += (i === 0 || vals[i - 1] == null ? "M" : "L") + (i * 300 / (vals.length - 1)).toFixed(1) + " " + (44 - (v - lo) / span * 40).toFixed(1);
+    });
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", path); p.setAttribute("fill", "none"); p.setAttribute("stroke", "var(--acc)"); p.setAttribute("stroke-width", "1.6");
+    p.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(p);
+    return svg;
+  }
+
+  // "History of readings": the last status queries of the device with their times (loaded when the block is opened).
+  function histBlock(d) {
+    const h = hist[d.name];
+    const det = E("details", {}, E("summary", {}, "Історія показників" + (h && h.samples ? " (" + h.samples.length + " з " + h.capacity + ")" : "")));
+    if (histOpen.has(d.name)) det.open = true;
+    det.addEventListener("toggle", async () => {
+      if (det.open === histOpen.has(d.name)) return;  // the open state we just drew
+      if (!det.open) { histOpen.delete(d.name); return; }
+      histOpen.add(d.name);
+      try { hist[d.name] = (await getJson("/api/devices/history?name=" + encodeURIComponent(d.name))).j; } catch (e) { hist[d.name] = null; }
+      render();
+    });
+    if (!det.open) return det;
+    if (!h) { det.append(E("p", { class: "mut" }, "Не вдалося отримати історію.")); return det; }
+    const samples = h.samples;
+    if (!samples.length) { det.append(E("p", { class: "mut" }, "Записів ще немає: перший запит стану ще не завершився.")); return det; }
+    const m = Object.fromEntries(METERS.map(([k, , f]) => [k, f]));
+    const cell = (s, k) => s[k] == null ? "—" : m[k](s[k]);
+    const when = s => s.time ? new Date(s.time * 1000).toLocaleTimeString() : fmtAge(s.age_s);
+    const sp = spark(samples.map(s => s.ok ? s.power : null));
+    const pw = samples.map(s => s.power).filter(v => v != null);
+    det.append(E("p", { class: "mut", style: "margin:6px 0 0" }, "Кожен запис це завершений запит стану (опитування кожні " + h.poll_interval_s + " с і ваші запити). Прочерк: розетка не відповіла або такого показника немає. Час у записів: " +
+      (h.time_valid ? "за годинником пристрою." : "відносний (годинник ще не синхронізовано).")));
+    if (sp) det.append(sp, E("div", { class: "mut" }, "Потужність: від " + m.power(Math.min(0, ...pw)) + " до " + m.power(Math.max(...pw)) + ", " + samples.length + " записів"));
+    det.append(E("div", { class: "tw" }, E("table", { class: "h" },
+      E("thead", {}, E("tr", {}, ["Час", "Відповідь", "Реле", "Потужність", "Струм", "Напруга"].map(x => E("th", {}, x)))),
+      E("tbody", {}, samples.slice(-12).reverse().map(s => E("tr", { class: s.ok ? "h-ok" : "h-warn" },
+        E("td", {}, when(s)), E("td", {}, s.ok ? "так" : "немає"), E("td", {}, s.on == null ? "—" : s.on ? "ввімк." : "вимк."),
+        E("td", {}, cell(s, "power")), E("td", {}, cell(s, "current")), E("td", {}, cell(s, "voltage"))))))));
+    return det;
+  }
+
+  function render() {
+    const out = [];
+    if (data.error) out.push(note("err", "devices.json: " + data.error));
+    if (!data.sd) out.push(note("warn", "Немає SD-картки: список пристроїв береться лише з неї."));
+    if (!data.devices.length) {
+      out.push(note("warn", "Пристроїв немає. Додайте їх на сторінці «Налаштувати пристрої»."));
+    }
+    out.push(E("div", { class: "row" }, E("a", { class: "btn", href: "#devconfig" }, "Налаштувати пристрої")));
+    out.push(E("p", { class: "mut", style: "margin:0 0 12px" },
+      "Стан оновлюється фоновим опитуванням кожні " + data.poll_interval_s + " с. Кожен запит і відповідь пристрою записуються в журнал (вкладка «Логи», фільтр «tuya»): команди користувача на рівні info, фонове опитування на рівні debug."));
+    for (const d of data.devices) out.push(card(d));
+    box.replaceChildren(...out);
+  }
+  every(load, 5000);
+}
+
+// ---------------------------------------------------------------- devices configuration
+// Edits /devices.json on the SD card (PUT /api/devices/config). The keys are never sent to the page:
+// an empty key field keeps the stored key of a device with the same name.
+function viewDevConfig() {
+  const box = E("div", { class: "dc" });
+  main.replaceChildren(box);
+  let rows = [];
+  let max = 16;
+  let msg = null;      // { cls, text } shown on top, kept across re-renders
+  let saving = false;
+
+  const NAME_RE = /^[a-z0-9_-]{1,32}$/;
+  const IP_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, meters: { power: "", current: "", voltage: "", energy: "" } });
+  const mstr = v => (v == null ? "" : String(v));
+
+  async function load() {
+    try {
+      const { j } = await getJson("/api/devices/config");
+      max = j.max || 16;
+      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore,
+        meters: { power: mstr(d.meters && d.meters.power), current: mstr(d.meters && d.meters.current), voltage: mstr(d.meters && d.meters.voltage), energy: mstr(d.meters && d.meters.energy) } }));
+      render();
+    } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати список: " + e.message)); }
+  }
+
+  // Same rules as the firmware; the firmware checks again.
+  function validate() {
+    if (rows.length > max) return "Забагато пристроїв (максимум " + max + ").";
+    const seen = new Set();
+    for (const [i, r] of rows.entries()) {
+      const at = "Пристрій " + (i + 1) + (r.name ? " («" + r.name + "»)" : "") + ": ";
+      if (!NAME_RE.test(r.name)) return at + "ім'я має бути 1–32 символи a-z, 0-9, _ або -.";
+      if (seen.has(r.name)) return at + "ім'я повторюється.";
+      seen.add(r.name);
+      if (!IP_RE.test(r.ip.trim())) return at + "IP має бути адресою IPv4, наприклад 192.168.1.20.";
+      const inherits = r.key === "" && r.orig === r.name && r.key_set;
+      if (!inherits && r.key.length !== 16) return at + (r.key === "" ? "потрібен ключ (16 символів), бо це новий або перейменований пристрій." : "ключ має бути рівно 16 символів, зараз " + r.key.length + ".");
+      const dp = Number(r.dp);
+      if (!Number.isInteger(dp) || dp < 1 || dp > 255) return at + "DP має бути цілим числом 1–255.";
+      for (const [k, label] of [["power", "потужності"], ["current", "струму"], ["voltage", "напруги"], ["energy", "енергії"]]) {
+        const v = r.meters[k];
+        if (v !== "" && (!/^\d{1,3}$/.test(v) || Number(v) > 255)) return at + "DP " + label + " має бути числом 0–255 (порожньо: стандартний, 0: немає).";
+      }
+    }
+    return null;
+  }
+
+  async function save() {
+    const err = validate();
+    if (err) { msg = { cls: "err", text: err }; render(); return; }
+    saving = true; msg = { cls: "warn", text: "Зберігаю…" }; render();
+    try {
+      const body = { devices: rows.map(r => {
+        const meters = {};
+        for (const [k, v] of Object.entries(r.meters)) if (v !== "") meters[k] = Number(v);  // empty = standard number, left out
+        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, meters };
+      }) };
+      const r = await api("/api/devices/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      msg = { cls: "ok", text: "Збережено: " + j.count + " пристрій(ів). Зміни застосовано без перезапуску; стан нових пристроїв з'явиться після першого опитування." };
+      if (j.warnings && j.warnings.length) {  // scenarios that name a device which is not in the list any more
+        msg = { cls: "warn", text: "Збережено: " + j.count + " пристрій(ів), але сценарії посилаються на пристрої, яких тепер немає. Ці кроки не спрацюють, поки ви не виправите сценарії (вкладка «Сценарії»): " +
+          j.warnings.join("; ") };
+      }
+      saving = false;
+      await load();
+    } catch (e) {
+      saving = false;
+      msg = { cls: "err", text: "Не збережено: " + e.message };
+      render();
+    }
+  }
+
+  function field(label, input, hint) {
+    return E("div", { class: "f" }, E("label", {}, label), input, hint ? E("small", {}, hint) : null);
+  }
+
+  function card(r, i) {
+    const nameIn = E("input", { type: "text", value: r.name, maxlength: 32, placeholder: "наприклад towel", autocomplete: "off" });
+    const ipIn = E("input", { type: "text", value: r.ip, maxlength: 15, placeholder: "192.168.1.20", inputmode: "decimal", autocomplete: "off" });
+    const keyIn = E("input", { type: "password", value: r.key, maxlength: 16, autocomplete: "new-password" });
+    const verIn = E("select", {}, ["3.4", "3.5"].map(v => E("option", { value: v, selected: v === r.version }, v)));
+    const dpIn = E("input", { type: "number", value: r.dp, min: 1, max: 255 });
+    const ign = E("input", { type: "checkbox", checked: r.ignore });
+    ign.addEventListener("change", () => { r.ignore = ign.checked; });
+    const mIn = {};
+    const mField = (k, label) => {
+      mIn[k] = E("input", { type: "number", value: r.meters[k], min: 0, max: 255, placeholder: "станд. " + STD_METER_DP[k] });
+      mIn[k].addEventListener("input", () => { r.meters[k] = mIn[k].value.trim(); });
+      return field("DP " + label, mIn[k]);
+    };
+    const keyHint = E("small", {});
+    const refreshKey = () => {
+      const inherits = r.orig === r.name && r.key_set;
+      keyIn.placeholder = inherits ? "залишити поточний" : "16 символів";
+      keyHint.textContent = inherits ? "Порожнє: ключ лишається без змін. Введіть, щоб замінити."
+        : r.orig && r.orig !== r.name ? "Ім'я змінено: введіть ключ знову." : "local key пристрою (його дає TinyTuya wizard).";
+    };
+    refreshKey();
+    nameIn.addEventListener("input", () => { r.name = nameIn.value.trim(); refreshKey(); });
+    ipIn.addEventListener("input", () => { r.ip = ipIn.value; });
+    keyIn.addEventListener("input", () => { r.key = keyIn.value; });
+    verIn.addEventListener("change", () => { r.version = verIn.value; });
+    dpIn.addEventListener("input", () => { r.dp = dpIn.value; });
+    return E("div", { class: "card" },
+      E("h2", {}, "Пристрій " + (i + 1) + (r.orig ? " · " + r.orig : " · новий"),
+        E("button", { type: "button", class: "d", disabled: saving, onclick: () => {
+          if (!confirm("Видалити «" + (r.name || "без імені") + "» зі списку? Зміна застосується після «Зберегти».")) return;
+          rows.splice(i, 1); render();
+        } }, "Видалити")),
+      E("div", { class: "fields" },
+        field("Ім'я", nameIn, "a-z 0-9 _ -, до 32 символів, унікальне"),
+        field("IP-адреса", ipIn, "зарезервуйте її на роутері"),
+        E("div", { class: "f" }, E("label", {}, "Ключ (local key)"), keyIn, keyHint),
+        field("Версія протоколу", verIn, "3.4 або 3.5"),
+        field("DP вмикання", dpIn, "зазвичай 1"),
+        E("div", { class: "f" }, E("label", {}, "Ігнорувати"), E("label", { style: "font-weight:400" }, ign, " не опитувати, пропускати в сценаріях"),
+          E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати."))),
+      E("details", { open: Object.values(r.meters).some(v => v !== "") },
+        E("summary", {}, "Показники: у яких data points напруга, струм, потужність, енергія"),
+        E("div", { class: "fields", style: "margin-top:10px" },
+          mField("power", "потужності"), mField("current", "струму"), mField("voltage", "напруги"), mField("energy", "енергії")),
+        E("p", { class: "mut", style: "margin:8px 0 0" }, "Порожньо: стандартний номер для розеток Tuya. 0: у цього пристрою такого показника немає. " +
+          "Різні моделі нумерують їх по-різному, номери видно у «Усі data points» на вкладці «Пристрої». " +
+          "Одиниці стандартні: потужність 0,1 Вт, струм мА, напруга 0,1 В, енергія 0,001 кВт·год; якщо числа не збігаються з додатком виробника, значить номер вказано не той.")));
+  }
+
+  function render() {
+    const out = [];
+    if (msg) out.push(note(msg.cls, msg.text));
+    out.push(E("div", { class: "row" },
+      E("a", { class: "btn", href: "#devices" }, "← До пристроїв"),
+      E("span", { class: "mut" }, "Список зберігається лише на SD-картці (devices.json), не у флеші. Ключі ніколи не повертаються на цю сторінку.")));
+    if (!rows.length) out.push(note("warn", "Пристроїв ще немає. Натисніть «Додати пристрій»."));
+    rows.forEach((r, i) => out.push(card(r, i)));
+    out.push(E("div", { class: "row" },
+      E("button", { type: "button", disabled: saving || rows.length >= max, onclick: () => { rows.push(blank()); msg = null; render(); } }, "Додати пристрій"),
+      E("button", { type: "button", class: "p", disabled: saving, onclick: save }, "Зберегти"),
+      E("button", { type: "button", disabled: saving, onclick: () => { msg = null; load(); } }, "Скасувати зміни"),
+      E("span", { class: "mut" }, rows.length + " з " + max)));
+    box.replaceChildren(...out);
+    stamp();
+  }
+  load();
+}
+
+// ---------------------------------------------------------------- config
+const SCHEMA = [
+  { t: "Пристрій", f: [
+    { k: "device.name", l: "Ім'я пристрою (hostname)", type: "text", max: 32, h: "A-Z a-z 0-9 -, без - на краях" },
+    { k: "device.web_user", l: "Логін веб-інтерфейсу", type: "text", max: 32 },
+    { k: "device.web_password", l: "Пароль веб-інтерфейсу", type: "password", max: 64, secret: 1, h: "Порожнє: лишити поточний. Діє одразу після збереження" } ] },
+  { t: "Wi-Fi", f: [
+    { k: "wifi.ssid", l: "SSID", type: "text", max: 32 },
+    { k: "wifi.password", l: "Пароль Wi-Fi", type: "password", max: 64, secret: 1, h: "Порожнє: лишити поточний (лише якщо SSID той самий)" },
+    { k: "wifi.restart_after_min", l: "Перезапуск без Wi-Fi, хв", type: "number", min: 0, max: 1440, h: "0 = ніколи" } ] },
+  { t: "Старт", f: [
+    { k: "startup.scenario_delay_s", l: "Затримка сценарію, с", type: "number", min: 0, max: 3600, h: "Для «З'явилося живлення»: мінімум від запуску; далі сценарій ще чекає на Wi-Fi" } ] },
+  { t: "Опитування (monitor)", f: [
+    { k: "monitor.interval_s", l: "Інтервал, с", type: "number", min: 1, max: 3600 },
+    { k: "monitor.timeout_ms", l: "Таймаут, мс", type: "number", min: 100, max: 60000 },
+    { k: "monitor.retries", l: "Повтори", type: "number", min: 0, max: 10 },
+    { k: "monitor.grace_s", l: "Пауза перед дією, с (не використовується)", type: "number", min: 0, max: 3600, h: "Поки не впливає на роботу" } ] },
+  { t: "Лог", f: [
+    { k: "log.flush_s", l: "Скидання на карту, с", type: "number", min: 1, max: 3600 },
+    { k: "log.max_file_kb", l: "Розмір файла, КБ", type: "number", min: 16, max: 8192 },
+    { k: "log.keep_files", l: "Зберігати файлів", type: "number", min: 1, max: 50 },
+    { k: "log.quiet_s", l: "Тиша після старту, с", type: "number", min: 0, max: 600, h: "Перші секунди на карту не пишемо" },
+    { k: "log.level", l: "Рівень", type: "select", opts: ["debug", "info", "warn", "error"] } ] },
+  { t: "Час", f: [
+    { k: "time.ntp", l: "NTP-сервер", type: "text", max: 64 },
+    { k: "time.tz", l: "Часовий пояс (POSIX TZ)", type: "text", max: 64, h: "UTC0, або напр. EET-2EEST,M3.5.0/3,M10.5.0/4 (Київ)" } ] },
+];
+const dget = (o, p) => p.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
+const dset = (o, p, v) => { const ks = p.split("."); const l = ks.pop(); let n = o; for (const k of ks) n = n[k] = n[k] || {}; n[l] = v; };
+
+function viewConfig() {
+  const box = E("div");
+  main.replaceChildren(box);
+  let mode = "saved", loaded = null, inputs = {};
+
+  async function waitForDevice() {
+    box.replaceChildren(note("warn", "Перезапуск… чекаю на пристрій (до 90 с)"));
+    await sleep(6000);
+    for (let i = 0; i < 40; i++) {
+      try { const r = await fetch("/api/status", { cache: "no-store" }); if (r.ok) return load(); } catch (e) {}
+      await sleep(2000);
+    }
+    box.replaceChildren(note("err", "Пристрій не відповів. Перевірте живлення та Wi-Fi."));
+  }
+
+  async function save(restart) {
+    const form = $("form", box);
+    if (!form.reportValidity()) return;
+    const cfg = JSON.parse(JSON.stringify(loaded));  // keeps anything the form does not show
+    for (const [k, inp] of Object.entries(inputs)) {
+      const def = inp._def;
+      dset(cfg, k, def.type === "number" ? Number(inp.value) : inp.value);
+    }
+    const msg = $("#msg", box);
+    try {
+      const r = await api("/api/config" + (restart ? "?reboot=1" : ""), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+      if (restart) return waitForDevice();
+      await load();
+      $("#msg", box).replaceChildren(note("ok", "Збережено" + (j.sd ? " на SD" : "") + (j.flash ? (j.sd ? " і" : "") + " у флеш" : "") +
+        (j.restart_required ? ". Потрібен перезапуск, щоб налаштування діяли." : ".")));
+    } catch (e) { msg.replaceChildren(note("err", "Не збережено: " + e.message)); }
+  }
+
+  async function load() {
+    try {
+      const { j, r } = await getJson("/api/config" + (mode === "active" ? "?active=1" : ""));
+      const pending = r.headers.get("X-Restart-Pending") === "true";
+      if (mode === "saved") loaded = j;
+      inputs = {};
+      const ro = mode === "active";
+      const form = E("form", { onsubmit: ev => { ev.preventDefault(); save(false); } });
+      for (const sec of SCHEMA) {
+        const fields = E("div", { class: "fields" });
+        for (const d of sec.f) {
+          const id = "f_" + d.k.replace(/\./g, "_");
+          let inp;
+          if (d.type === "select") {
+            inp = E("select", { id, disabled: ro }, d.opts.map(o => E("option", { value: o }, o)));
+            inp.value = dget(j, d.k);
+          } else {
+            inp = E("input", { id, type: d.type, disabled: ro, maxlength: d.max && d.type !== "number" ? d.max : null,
+              min: d.min, max: d.type === "number" ? d.max : null, required: d.type === "number" || d.k === "device.name" || d.k === "device.web_user",
+              autocomplete: d.secret ? "new-password" : "off", placeholder: d.secret ? "(без змін)" : null });
+            inp.value = d.secret ? "" : dget(j, d.k);
+          }
+          inp._def = d; inp._orig = inp.value;
+          if (!ro) inp.addEventListener("input", () => inp.closest(".f").classList.toggle("chg", inp.value !== inp._orig));
+          inputs[d.k] = inp;
+          fields.append(E("div", { class: "f" }, E("label", { for: id }, d.l), inp, d.h ? E("small", {}, d.h) : null));
+        }
+        form.append(E("div", { class: "card" }, E("h2", {}, sec.t), fields));
+      }
+      const seg = E("div", { class: "seg" },
+        E("button", { type: "button", class: mode === "saved" ? "p" : "", onclick: () => { mode = "saved"; load(); } }, "Збережені"),
+        E("button", { type: "button", class: mode === "active" ? "p" : "", onclick: () => { mode = "active"; load(); } }, "Активні (лише перегляд)"));
+      const top = [E("div", { class: "row" }, seg,
+        E("span", { class: "mut" }, "Пристрої Tuya (ключі) змінюються на сторінці «Налаштувати пристрої» (вкладка «Пристрої»); вони зберігаються лише в devices.json на SD-карті."))];
+      if (pending) top.push(note("warn", "Збережені налаштування відрізняються від активних. Щоб застосувати, перезапустіть пристрій."));
+      if (ro) top.push(note("ok", "Це налаштування, з якими пристрій працює зараз."));
+      const actions = ro ? [] : [E("div", { class: "row" },
+        E("button", { type: "submit", class: "p" }, "Зберегти"),
+        E("button", { type: "button", class: "d", onclick: () => { if (confirm("Зберегти та перезапустити пристрій?")) save(true); } }, "Зберегти й перезапустити"),
+        E("button", { type: "button", onclick: load }, "Скасувати зміни"),
+        E("button", { type: "button", onclick: () => { if (confirm("Перезапустити пристрій із збереженими налаштуваннями?")) save(true); } }, "Лише перезапустити")),
+        E("div", { id: "msg" })];
+      form.append(...actions);
+      const keepMsg = $("#msg", box) ? $("#msg", box).cloneNode(true) : null;
+      box.replaceChildren(...top, form);
+      if (keepMsg && $("#msg", box)) $("#msg", box).replaceWith(keepMsg);
+      stamp();
+    } catch (e) { box.replaceChildren(note("err", "Не вдалося завантажити налаштування: " + e.message)); }
+  }
+  load();
+}
+
+// ---------------------------------------------------------------- logs
+const LINE = /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d|\+\d+\.\d+s) ([DIWE]) /;
+const LV = { D: 0, I: 1, W: 2, E: 3 };
+
+function viewLogs() {
+  const sel = E("select", { class: "sm", id: "lf" });
+  const size = E("select", { class: "sm", id: "ls" }, [["4096", "останні 4 КБ"], ["8192", "останні 8 КБ"], ["32768", "останні 32 КБ"], ["whole", "весь файл"]].map(([v, t]) => E("option", { value: v }, t)));
+  size.value = "8192";
+  const lvl = E("select", { class: "sm" }, [["0", "усі рівні"], ["2", "WARN і вище"], ["3", "лише ERROR"]].map(([v, t]) => E("option", { value: v }, t)));
+  const flt = E("input", { class: "sm", placeholder: "фільтр тексту", style: "width:160px" });
+  const auto = E("input", { type: "checkbox", id: "au", checked: true, style: "width:auto" });
+  const dl = E("a", { class: "mut", href: "#", download: "" }, "завантажити файл");
+  const info = E("span", { class: "mut" });
+  const top = E("div", { class: "row" }, sel, size, lvl, flt, E("label", { class: "mut" }, auto, " автооновлення"), E("button", { onclick: () => refresh(true) }, "Оновити"), dl, info);
+  const pre = E("pre");
+  const warn = E("div");
+  main.replaceChildren(warn, E("div", { class: "card" }, top, pre));
+  let text = "", busy = false, sdState = "ok";
+
+  const target = () => { const v = sel.value || "current"; return v; };
+  function render() {
+    const min = Number(lvl.value), q = flt.value.toLowerCase();
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    let lines = text.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    let cut = 0;
+    if (lines.length > 2500) { cut = lines.length - 2500; lines = lines.slice(-2500); }
+    const frag = document.createDocumentFragment();
+    let shown = 0;
+    for (const ln of lines) {
+      const m = LINE.exec(ln);
+      if (m && LV[m[2]] < min) continue;
+      if (q && !ln.toLowerCase().includes(q)) continue;
+      const s = E("div", m ? { class: m[2] } : {}, ln);
+      frag.append(s); shown++;
+    }
+    pre.replaceChildren(frag);
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+    info.textContent = shown + " рядків" + (cut ? " (показано останні 2500)" : "");
+  }
+  async function loadList() {
+    try {
+      const { j } = await getJson("/api/logs");
+      sdState = j.sd;
+      warn.replaceChildren(...(j.sd !== "ok" ? [note("warn", "SD-карта " + ({ missing: "відсутня", fault: "несправна" }[j.sd] || j.sd) + ": доступний лише журнал у пам'яті (поточний, остання частина).")] : []));
+      const prev = sel.value;
+      const opts = [E("option", { value: "current" }, "поточний" + (j.current ? " (" + j.current + ")" : ""))];
+      for (const f of j.files) if (f.name !== j.current) opts.push(E("option", { value: f.name }, f.name + " · " + (f.size / 1024).toFixed(1) + " КБ"));
+      sel.replaceChildren(...opts);
+      sel.value = [...sel.options].some(o => o.value === prev) ? prev : "current";
+    } catch (e) { warn.replaceChildren(note("err", "Не вдалося отримати список логів: " + e.message)); }
+  }
+  async function refresh(full) {
+    if (busy) return; busy = true;
+    try {
+      if (full || !sel.options.length) await loadList();
+      const f = target();
+      const name = f === "current" ? "current" : f;
+      const whole = size.value === "whole" && sdState === "ok";
+      const q = "/api/logs?file=" + encodeURIComponent(name) + (whole ? "" : "&tail=" + size.value);
+      const r = await api(q);
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "HTTP " + r.status); }
+      text = await r.text();
+      dl.href = "/api/logs?file=" + encodeURIComponent(f === "current" ? (sel.selectedOptions[0].textContent.match(/\((log-\d{4}\.txt)\)/) || [])[1] || "current" : f);
+      dl.download = f === "current" ? "current-log.txt" : f;
+      render(); stamp();
+    } catch (e) { pre.replaceChildren(E("div", { class: "E" }, "Помилка: " + e.message)); }
+    busy = false;
+  }
+  sel.addEventListener("change", () => refresh());
+  size.addEventListener("change", () => refresh());
+  lvl.addEventListener("change", render);
+  flt.addEventListener("input", render);
+  loadList().then(() => every(() => { if (auto.checked) refresh(); }, 5000));
+  refresh(true);
+}
+
+// ---------------------------------------------------------------- api
+// The API page: reads the OpenAPI description the firmware serves (/api/openapi.json) and lets you run the requests.
+// Requests that change something ask for confirmation first; the PUTs (full replacement) start from the current content.
+const PREFILL = {
+  "/api/config": j => j,
+  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore,
+    meters: Object.fromEntries(Object.entries(d.meters || {}).filter(([, v]) => v != null)) })) }),
+  "/api/scenarios": j => ({ scenarios: j.scenarios.map(sc => {
+    const o = { name: sc.name, enabled: sc.enabled, trigger: sc.trigger, default_pause_s: sc.default_pause_s };
+    if (sc.when) o.when = sc.when;
+    o.steps = sc.steps.map(st => { const x = { device: st.device, action: st.action, enabled: st.enabled }; if (st.pause_after_s != null) x.pause_after_s = st.pause_after_s; return x; });
+    return o;
+  }) }),
+};
+
+function viewApi() {
+  const box = E("div");
+  main.replaceChildren(box);
+  const mthBadge = m => E("span", { class: "mth " + m }, m.toUpperCase());
+
+  function opCard(path, method, o) {
+    const params = o.parameters || [];
+    const inputs = {};
+    const hasBody = !!o.requestBody;
+    const out = E("div");
+    const curl = E("pre", { class: "curl" });
+    let ta = null, loadedBody = false;
+
+    const val = n => (inputs[n].value || "").trim();
+    const url = () => {
+      const q = params.filter(p => val(p.name) !== "").map(p => encodeURIComponent(p.name) + "=" + encodeURIComponent(val(p.name))).join("&");
+      return path + (q ? "?" + q : "");
+    };
+    const upd = () => {
+      let c = "curl -u USER:PASS -X " + method.toUpperCase() + " " + JSON.stringify(location.origin + url());
+      if (hasBody) c += ' -H "Content-Type: application/json" --data-binary @body.json';
+      curl.textContent = c;
+    };
+
+    const fields = params.map(p => {
+      const sc = p.schema || {};
+      let inp;
+      if (sc.enum) inp = E("select", {}, [E("option", { value: "" }, "—"), ...sc.enum.map(v => E("option", { value: v }, v))]);
+      else inp = E("input", { type: "text", autocomplete: "off", placeholder: sc.minimum != null ? sc.minimum + ".." + sc.maximum : "" });
+      inputs[p.name] = inp;
+      inp.addEventListener("input", upd);
+      inp.addEventListener("change", upd);
+      return E("div", { class: "f" }, E("label", {}, p.name + (p.required ? " *" : "")), inp, E("small", {}, p.description || ""));
+    });
+
+    if (hasBody) {
+      ta = E("textarea", { rows: 14, spellcheck: "false" });
+      ta.value = JSON.stringify(o.requestBody.content["application/json"].example, null, 2);
+    }
+
+    // PUT replaces everything: start from what the device has now, not from the example.
+    async function loadCurrent() {
+      const src = PREFILL[path];
+      if (!hasBody || loadedBody || !src) return;
+      loadedBody = true;
+      try {
+        const { j } = await getJson(path);
+        ta.value = JSON.stringify(src(j), null, 2);
+      } catch (e) { out.replaceChildren(note("err", "Не вдалося підставити поточний вміст: " + e.message)); }
+    }
+
+    async function run() {
+      const missing = params.filter(p => p.required && val(p.name) === "");
+      if (missing.length) { out.replaceChildren(note("err", "Заповніть: " + missing.map(p => p.name).join(", "))); return; }
+      let body;
+      if (hasBody) {
+        try { JSON.parse(ta.value); } catch (e) { out.replaceChildren(note("err", "Тіло не є коректним JSON: " + e.message)); return; }
+        body = ta.value;
+      }
+      if (o["x-danger"]) {
+        const vals = Object.fromEntries(params.map(p => [p.name, val(p.name)]));
+        if (!confirm(o["x-danger"].replace(/\{(\w+)\}/g, (_, k) => vals[k] || "…") + "\n\n" + method.toUpperCase() + " " + url())) return;
+      }
+      btn.disabled = true;
+      out.replaceChildren(E("p", { class: "mut" }, "Виконую…"));
+      const t0 = performance.now();
+      try {
+        const r = await fetch(url(), { method: method.toUpperCase(), cache: "no-store", headers: hasBody ? { "Content-Type": "application/json" } : {}, body });
+        let text = await r.text();
+        const ms = Math.round(performance.now() - t0);
+        const ct = r.headers.get("content-type") || "";
+        if (ct.includes("json")) { try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* show as is */ } }
+        const cut = text.length > 200000;
+        const cls = r.status < 300 ? "ok" : r.status < 500 ? "warn" : "err";
+        out.replaceChildren(E("div", { class: "row" }, badge(cls, r.status + " " + (r.statusText || "")), E("span", { class: "mut" }, ms + " мс · " + ct + " · " + text.length + " байт")),
+          E("pre", {}, cut ? text.slice(0, 200000) + "\n… (показано перші 200000 символів)" : text));
+      } catch (e) { out.replaceChildren(note("err", "Помилка запиту: " + e.message)); }
+      btn.disabled = false;
+    }
+    const btn = E("button", { class: o["x-danger"] ? "d" : "p", onclick: run }, "Виконати");
+
+    const det = E("details", { class: "op" },
+      E("summary", {}, mthBadge(method), E("code", {}, path), E("span", { class: "mut" }, o.summary || "")),
+      E("div", { class: "body" },
+        E("div", { class: "md" }, E("p", { class: "mut" }, (o.description || "").replace(/[`*]/g, ""))),
+        o["x-danger"] ? note("warn", o["x-danger"].replace(/\{(\w+)\}/g, "…")) : null,
+        fields.length ? E("div", { class: "fields", style: "margin:8px 0" }, fields) : null,
+        hasBody ? E("div", { class: "f", style: "margin:8px 0" }, E("label", {}, "Тіло запиту (JSON)"), ta,
+          E("small", {}, PREFILL[path] ? "Підставлено поточний вміст пристрою: PUT замінює його повністю." : o.requestBody.description || "")) : null,
+        E("div", { class: "row" }, btn),
+        curl, out));
+    det.addEventListener("toggle", () => { if (det.open) { upd(); loadCurrent(); } });
+    upd();
+    return det;
+  }
+
+  (async () => {
+    try {
+      const { j: spec } = await getJson("/api/openapi.json");
+      const byTag = new Map((spec.tags || []).map(t => [t.name, []]));
+      for (const [path, ops] of Object.entries(spec.paths)) {
+        for (const [method, o] of Object.entries(ops)) {
+          const tag = (o.tags || ["Інше"])[0];
+          if (!byTag.has(tag)) byTag.set(tag, []);
+          byTag.get(tag).push(opCard(path, method, o));
+        }
+      }
+      const out = [E("div", { class: "card" }, E("h2", {}, spec.info.title + " · " + spec.info.version),
+        E("p", { class: "mut", style: "margin:0 0 8px" }, spec.info.description),
+        E("p", { class: "mut", style: "margin:0" }, "Запити виконуються від вашого імені (браузер уже має логін і пароль). Специфікація OpenAPI 3.0: ",
+          E("a", { href: "/api/openapi.json", target: "_blank" }, "/api/openapi.json"), " (годиться для Postman, Swagger UI, генераторів клієнтів). ",
+          "У прикладах curl `USER:PASS` замініть на ваші дані."))];
+      for (const [tag, cards] of byTag) if (cards.length) out.push(E("div", { class: "card" }, E("h2", {}, tag), cards));
+      box.replaceChildren(...out);
+      stamp();
+    } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати специфікацію: " + e.message)); }
+  })();
+}
+
+// ---------------------------------------------------------------- router
+const views = { status: viewStatus, devices: viewDevices, scenarios: viewScenarios, devconfig: viewDevConfig, config: viewConfig, logs: viewLogs, api: viewApi };
+function route() {
+  clearTimers();
+  const t = (location.hash || "#status").slice(1);
+  const v = views[t] ? t : "status";
+  document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("on", a.dataset.t === (v === "devconfig" ? "devices" : v)));
+  views[v]();
+}
+window.addEventListener("hashchange", route);
+route();
+getJson("/api/config").then(({ j }) => { document.title = j.device.name; $("#title").textContent = j.device.name; }).catch(() => {});
+</script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "device": {
+    "name": "lightwatch",
+    "web_user": "admin",
+    "web_password": "change-me-please"
+  },
+  "wifi": {
+    "ssid": "YOUR_SSID",
+    "password": "YOUR_WIFI_PASSWORD",
+    "restart_after_min": 20
+  },
+  "startup": {
+    "scenario_delay_s": 45
+  },
+  "monitor": {
+    "interval_s": 30,
+    "timeout_ms": 3000,
+    "retries": 3,
+    "grace_s": 120
+  },
+  "log": {
+    "flush_s": 20,
+    "max_file_kb": 1024,
+    "keep_files": 5,
+    "quiet_s": 30,
+    "level": "info"
+  },
+  "time": {
+    "ntp": "pool.ntp.org",
+    "tz": "UTC0"
+  }
+}
