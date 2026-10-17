@@ -68,7 +68,7 @@ struct Job {
   Method method = Method::Get;
   Text url, contentType, body;
   uint32_t timeoutMs = kDefaultTimeoutMs;
-  bool quiet = false;        // a frequent request (an interval scenario): success at DEBUG instead of INFO
+  bool quiet = false;        // a frequent request (an interval scenario): logged at DEBUG, a failure too (not WARN)
   uint32_t submittedMs = 0;
   std::atomic<bool> cancelled{false};  // a job that has not started yet is dropped (error "cancelled")
   std::atomic<bool> done{false};       // set last, after `result` is complete

@@ -537,8 +537,9 @@ class BoardEnv : public ScenarioEngine::Env {
     return nextId_;
   }
 
-  uint32_t submitHttp(const ScenarioEngine::HttpReq& req) override {
+  uint32_t submitHttp(const ScenarioEngine::HttpReq& req, bool quiet) override {
     auto job = std::make_shared<HttpOut::Job>();
+    job->quiet = quiet;  // an interval scenario's ping: not a line in the usual log every time (intervalFinished reports the changes)
     job->method = req.post ? HttpOut::Method::Post : HttpOut::Method::Get;
     job->timeoutMs = req.timeoutMs;
     if (!job->url.assign(req.url.data(), req.url.size()) || !job->contentType.assign(req.contentType.data(), req.contentType.size()) ||

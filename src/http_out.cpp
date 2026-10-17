@@ -251,9 +251,9 @@ void worker(void*) {
                   methodName(job->method), host.c_str(), r.status, static_cast<unsigned long>(r.ms),
                   static_cast<unsigned long>(r.connectMs), static_cast<unsigned long>(queuedMs));
     } else {
-      LOGW(TAG, "%s %s: FAILED (%s) after %lu ms (connect %lu; queued %lu): %s", methodName(job->method), host.c_str(),
-           r.error.c_str(), static_cast<unsigned long>(r.ms), static_cast<unsigned long>(r.connectMs),
-           static_cast<unsigned long>(queuedMs), r.detail.c_str());
+      Logger::log(job->quiet ? Logger::Level::Debug : Logger::Level::Warn, TAG, "%s %s: FAILED (%s) after %lu ms (connect %lu; queued %lu): %s",
+                  methodName(job->method), host.c_str(), r.error.c_str(), static_cast<unsigned long>(r.ms),
+                  static_cast<unsigned long>(r.connectMs), static_cast<unsigned long>(queuedMs), r.detail.c_str());
     }
     job->result = r;
     job->done.store(true, std::memory_order_release);

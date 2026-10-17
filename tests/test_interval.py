@@ -70,6 +70,7 @@ def test_it_runs_on_a_fixed_rate_quietly_and_keeps_a_history_of_its_own(dev, gua
     name = TEST + "ivok"
     path = "/ok?iv=" + name
     since = len(fake.requests)
+    http_lines = log_tail(dev).count(f"http: GET {fake.base.split('//')[1]}:")
     assert put(dev, guard + [interval(name, 10, [ping(fake, path)])]).status_code == 200
     assert wait_for(lambda: len(hits(fake, since, path)) >= 4, 45), hits(fake, since, path)
     at = [g["at"] for g in hits(fake, since, path)]
@@ -88,17 +89,20 @@ def test_it_runs_on_a_fixed_rate_quietly_and_keeps_a_history_of_its_own(dev, gua
     log = log_tail(dev)
     assert f"[{name}] first run since boot: ok" in log
     assert f"[{name}] started" not in log and f"[{name}] finished" not in log  # those are DEBUG lines
+    assert log.count(f"http: GET {fake.base.split('//')[1]}:") <= http_lines  # nor a line per request (<=: older lines may leave the 32 KB tail)
 
 
 def test_failing_runs_are_logged_once_counted_and_filtered_and_then_it_works_again(dev, guard, fake):
     name = TEST + "ivbad"
     failing0 = log_tail(dev).count(f"[{name}] failing:")  # an earlier run of the suite may have left lines in the log
+    failed0 = log_tail(dev).count(f"http: GET {fake.base.split('//')[1]}: FAILED")
     again0 = log_tail(dev).count(f"[{name}] works again after")
     assert put(dev, guard + [interval(name, 10, [ping(fake, "/status/500")])]).status_code == 200
     assert wait_for(lambda: (scn(dev, name, state=1).get("interval") or {}).get("fails_in_row", 0) >= 2, 40)
     v = scn(dev, name, state=1)["interval"]
     assert v["ok"] == 0 and v["failed"] >= 2 and v["last_failed"] is not None and "answered 500" in v["last_error"], v
     assert log_tail(dev).count(f"[{name}] failing:") == failing0 + 1  # one line for the whole series
+    assert log_tail(dev).count(f"http: GET {fake.base.split('//')[1]}: FAILED") <= failed0  # no WARN per attempt
     failed = history(dev, name, failed=1)["runs"]
     assert len(failed) >= 2 and all(r["ok"] is False for r in failed), failed
     assert failed[0]["steps"][0][:2] == ["failed", 3] and "answered 500" in failed[0]["steps"][0][2], failed[0]

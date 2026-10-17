@@ -111,8 +111,10 @@ class FakeEnv : public Env {
     for (const auto& kv : requests) n += (!kv.second.applied && !kv.second.withdrawn) ? 1 : 0;
     return n;
   }
-  uint32_t submitHttp(const HttpReq& req) override {
+  std::vector<bool> httpQuiet;  // `quiet` of every request submitted, in order
+  uint32_t submitHttp(const HttpReq& req, bool quiet) override {
     if (httpPending() >= httpCapacity) return 0;
+    httpQuiet.push_back(quiet);
     FakeRequest q;
     q.req = req;
     q.endMs = std::max(now, httpFreeMs) + 800;
@@ -765,6 +767,7 @@ void test_an_http_step_sends_its_request_with_no_status_query_and_keeps_its_paus
   TEST_ASSERT_TRUE(env->devices["a"].relay);
   TEST_ASSERT_EQUAL_UINT32(2, eng->stats().httpRequests);
   TEST_ASSERT_EQUAL_UINT32(2, eng->stats().jobs);  // the socket's command and query only
+  TEST_ASSERT_TRUE(env->httpQuiet == std::vector<bool>({false, false}));  // an ordinary run's requests are logged as usual
   TEST_ASSERT_TRUE(env->requests.empty());  // every request released
 }
 
@@ -880,6 +883,8 @@ void test_a_quiet_run_logs_quietly_is_not_kept_for_a_restart_and_marks_nothing_d
   TEST_ASSERT_EQUAL(logged, env->logLines.size());  // nothing in the usual log
   TEST_ASSERT_TRUE(env->quietLines.size() >= 4);     // requested, started, two steps, finished
   TEST_ASSERT_TRUE(env->history.back().first == "q");  // the end still reaches the history
+  TEST_ASSERT_EQUAL(1, env->httpQuiet.size());
+  TEST_ASSERT_TRUE(env->httpQuiet[0]);  // its request is quiet in the HTTP lane too
   eng->start("q", "interval", env->now, false, true);
   runFor(500);
   eng->stop("q");  // asked for by hand: that one is in the usual log
