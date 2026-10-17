@@ -220,15 +220,21 @@ void runFor(uint32_t ms) {
   eng->tick();
 }
 
-struct S {  // a step as the tests write it: by device name, or an HTTP request (`url` set)
+struct S {  // a step as the tests write it: by device name, an HTTP request (`url` set) or a wait (`waitS` set)
   std::string device;
   bool on;
   int32_t pause;
   bool enabled;
   std::string url = "", body = "";
   bool post = false;
+  uint32_t waitS = 0;
 };
 S step(const std::string& device, bool on = true, int32_t pause = -1, bool enabled = true) { return S{device, on, pause, enabled}; }
+S wait(uint32_t seconds, bool enabled = true) {
+  S s{"", true, -1, enabled};
+  s.waitS = seconds;
+  return s;
+}
 S http(const std::string& url, bool post = false, const std::string& body = "", int32_t pause = -1) {
   S s{"", true, pause, true};
   s.url = url;
@@ -243,6 +249,13 @@ Def def(const std::string& name, std::vector<S> steps, uint16_t defaultPause = 0
   d.defaultPauseS = defaultPause;
   for (const S& s : steps) {
     StepDef st;
+    if (s.waitS) {
+      st.kind = StepKind::Wait;
+      st.waitS = s.waitS;
+      st.enabled = s.enabled;
+      d.steps.push_back(st);
+      continue;
+    }
     if (!s.url.empty()) {
       HttpReq q;
       q.post = s.post;
@@ -891,6 +904,84 @@ void test_a_quiet_run_logs_quietly_is_not_kept_for_a_restart_and_marks_nothing_d
   TEST_ASSERT_TRUE(contains(env->logLines.back(), "[q] stop requested"));
 }
 
+// ---- wait steps ----------------------------------------------------------------------------------------------------------
+
+void test_a_wait_step_waits_after_the_pause_before_it_and_always_also_after_a_failure() {
+  env->devices["a"] = FakeDevice();
+  env->devices["ign"].ignored = true;
+  setDefs({def("s", {step("a", true, 20), wait(30), step("ign"), wait(10), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(2000);
+  assertStep(StepState::Ok, "s", 0);
+  assertStep(StepState::Pending, "s", 1);  // the 20 s pause of step 1 comes first
+  runFor(20000);
+  assertStep(StepState::Running, "s", 1);  // then the wait (it adds up: 20 + 30)
+  TEST_ASSERT_EQUAL_INT(1, R("s").current);
+  runFor(28000);  // step 1 ended at ~1 s: pause until ~21 s, wait until ~51 s
+  assertStep(StepState::Running, "s", 1);
+  runFor(2500);
+  assertStep(StepState::Ok, "s", 1);
+  TEST_ASSERT_EQUAL_STRING("waited 30 s", stepDetail(R("s"), 1).c_str());
+  assertStep(StepState::Skipped, "s", 2);  // ignored: no pause, but the wait after it still waits
+  assertStep(StepState::Running, "s", 3);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+  runFor(6000);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);  // not yet: 10 s
+  runFor(4000);
+  assertState(RunState::Done, "s");
+  TEST_ASSERT_FALSE(env->devices["a"].relay);
+  TEST_ASSERT_TRUE(R("s").steps[4].atS >= 2 + 20 + 30 + 10);
+}
+
+void test_a_disabled_wait_costs_nothing_and_a_stop_ends_a_wait_at_once() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {wait(3600, false), step("a"), wait(3600), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(2000);
+  assertStep(StepState::Disabled, "s", 0);
+  assertStep(StepState::Ok, "s", 1);
+  assertStep(StepState::Running, "s", 2);
+  runFor(600000);
+  eng->stop("s");
+  runFor(20);
+  assertState(RunState::Stopped, "s");
+  assertStep(StepState::Stopped, "s", 2);
+  runFor(3600000);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);  // the step after the wait never ran
+}
+
+void test_a_run_continued_in_the_middle_of_a_wait_waits_it_again_in_full_and_needs_no_wifi_for_it() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 0), wait(600), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(400000);  // 400 s into the 600 s wait
+  std::vector<Snapshot> snaps = eng->snapshot();
+  TEST_ASSERT_EQUAL(1, snaps.size());
+  TEST_ASSERT_TRUE(snaps[0].phase == Phase::Wait);
+  delete eng;
+  eng = new Engine(*env);  // the restart
+  env->wifi = false;
+  TEST_ASSERT_TRUE(eng->resume(snaps[0], 5000, "SW") == Engine::StartResult::Started);
+  runFor(1000);
+  assertStep(StepState::Running, "s", 1);  // waiting again, without Wi-Fi
+  runFor(590000);
+  assertStep(StepState::Running, "s", 1);  // in full: 600 s, not the 200 s that were left
+  runFor(10000);
+  assertStep(StepState::Ok, "s", 1);
+  TEST_ASSERT_EQUAL_STRING("wifi", R("s").waitReason.c_str());  // the command waits for Wi-Fi
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+  env->wifi = true;
+  runFor(12000);
+  assertState(RunState::Done, "s");
+  TEST_ASSERT_FALSE(env->devices["a"].relay);
+}
+
+void test_a_wait_has_a_label_and_its_seconds_are_in_the_hash() {
+  Def d = def("s", {wait(45)});
+  TEST_ASSERT_EQUAL_STRING("wait 45 s", d.label(0).c_str());
+  TEST_ASSERT_TRUE(defHash(def("s", {wait(45)})) != defHash(def("s", {wait(46)})));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
@@ -926,5 +1017,9 @@ int main(int, char**) {
   RUN_TEST(test_a_full_http_list_makes_the_step_wait_and_a_stop_withdraws_nothing_that_went_out);
   RUN_TEST(test_an_edit_of_an_http_request_changes_the_hash_a_device_step_hashes_as_before);
   RUN_TEST(test_a_quiet_run_logs_quietly_is_not_kept_for_a_restart_and_marks_nothing_dirty);
+  RUN_TEST(test_a_wait_step_waits_after_the_pause_before_it_and_always_also_after_a_failure);
+  RUN_TEST(test_a_disabled_wait_costs_nothing_and_a_stop_ends_a_wait_at_once);
+  RUN_TEST(test_a_run_continued_in_the_middle_of_a_wait_waits_it_again_in_full_and_needs_no_wifi_for_it);
+  RUN_TEST(test_a_wait_has_a_label_and_its_seconds_are_in_the_hash);
   return UNITY_END();
 }

@@ -293,7 +293,7 @@ def scn(dev, name, **params):
     ({"action": "http", "method": "POST", "url": "http://x/", "body": "a" * 16385}, "longer than 16384"),
     ({"action": "http", "url": "http://x/", "timeout_ms": 500}, "timeout_ms"),
     ({"device": "towel", "action": "on", "url": "http://x/"}, "for an http step"),
-    ({"device": "towel", "action": "get"}, "\"on\", \"off\" or \"http\""),
+    ({"device": "towel", "action": "get"}, "\"on\", \"off\", \"http\" or \"wait\""),
 ])
 def test_invalid_http_steps_are_rejected(dev, guard, step, words):
     r = put(dev, guard + [http_scenario(TEST + "hv", [step])])

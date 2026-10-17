@@ -72,10 +72,12 @@ def test_it_runs_on_a_fixed_rate_quietly_and_keeps_a_history_of_its_own(dev, gua
     since = len(fake.requests)
     http_lines = log_tail(dev).count(f"http: GET {fake.base.split('//')[1]}:")
     assert put(dev, guard + [interval(name, 10, [ping(fake, path)])]).status_code == 200
-    assert wait_for(lambda: len(hits(fake, since, path)) >= 4, 45), hits(fake, since, path)
+    assert wait_for(lambda: scn(dev, name, state=1)["interval"]["ok"] >= 4, 50)  # ended runs, not just requests that arrived
     at = [g["at"] for g in hits(fake, since, path)]
     gaps = [b - a for a, b in zip(at, at[1:])]
-    assert all(8.5 < g < 11.5 for g in gaps), gaps  # a fixed rate of 10 s (looked at about once a second)
+    # A fixed rate of 10 s (looked at about once a second). A request may wait in the HTTP lane behind another one (a real
+    # healthcheck on the board takes ~3 s), which moves one arrival but not the schedule: the average stays at 10 s.
+    assert all(5.5 < g < 14.5 for g in gaps) and 9 < (at[-1] - at[0]) / len(gaps) < 11, gaps
     v = scn(dev, name, state=1)["interval"]
     assert v["ok"] >= 4 and v["failed"] == 0 and v["fails_in_row"] == 0 and 0 <= v["next_in_s"] <= 11, v
     h = history(dev, name, limit=50)

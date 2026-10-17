@@ -19,7 +19,7 @@ const char* verb(bool on) { return on ? "on" : "off"; }
 
 // "towel on" or "POST api.telegram.org": the step in a log line.
 std::string what(const Def& d, size_t step) {
-  return d.isHttp(step) ? d.label(step) : d.label(step) + " " + verb(d.steps[step].on);
+  return d.isHttp(step) || d.isWait(step) ? d.label(step) : d.label(step) + " " + verb(d.steps[step].on);
 }
 
 }  // namespace
@@ -37,6 +37,7 @@ std::string hostOf(const Text& url) {
 }
 
 std::string Def::label(size_t step) const {
+  if (isWait(step)) return "wait " + std::to_string(steps[step].waitS) + " s";
   if (!isHttp(step)) return str(device(step));
   const HttpReq& q = request(step);
   return std::string(q.post ? "POST " : "GET ") + hostOf(q.url);
@@ -167,7 +168,10 @@ uint32_t defHash(const Def& d) {
   mix(d.defaultPauseS);
   mix(static_cast<uint32_t>(d.steps.size()));
   for (size_t i = 0; i < d.steps.size(); ++i) {
-    if (d.isHttp(i)) {  // (a device step hashes as it always did: a saved run of an older firmware still matches)
+    if (d.isWait(i)) {
+      mix(0x57414954u);
+      mix(d.steps[i].waitS);
+    } else if (d.isHttp(i)) {  // (a device step hashes as it always did: a saved run of an older firmware still matches)
       const HttpReq& q = d.request(i);
       mix(0x48545450u | (q.post ? 1u : 0u));
       mixText(q.url);
@@ -188,6 +192,7 @@ std::string stepDetail(const Run& r, size_t i) {
   const StepRun& s = r.steps[i];
   switch (s.state) {
     case StepState::Ok: {
+      if (i < r.def.steps.size() && r.def.isWait(i)) return "waited " + std::to_string(r.def.steps[i].waitS) + " s";
       const bool http = i < r.def.steps.size() && r.def.isHttp(i);
       const bool on = i < r.def.steps.size() && r.def.steps[i].on;
       std::string out = http ? "sent: " + str(r.whys.get(i)) : std::string("switched ") + verb(on);
@@ -303,6 +308,7 @@ uint32_t Engine::tick() {
       case Phase::WaitNet: sleep = std::min<uint32_t>(sleep, 250); break;
       case Phase::Settle:
       case Phase::Pause:
+      case Phase::Wait:
       case Phase::Gap: sleep = std::min(sleep, until(now, r.deadlineMs)); break;
       case Phase::Command:
       case Phase::Verify: sleep = std::min(sleep, kBusyTickMs); break;
@@ -362,7 +368,7 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
       case Phase::NextStep:
         nextStep(name, r, now);
         if (r.phase == Phase::NextStep) continue;  // a step was passed (missing, ignored): look at the next one
-        if (r.phase == Phase::Finished || r.phase == Phase::Pause || r.phase == Phase::Command) return;
+        if (r.phase == Phase::Finished || r.phase == Phase::Pause || r.phase == Phase::Command || r.phase == Phase::Wait) return;
         continue;
 
       case Phase::Pause:
@@ -373,6 +379,21 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
         if (!due(now, r.deadlineMs)) return;
         r.phase = Phase::NextStep;
         continue;
+
+      case Phase::Wait: {
+        if (r.stop) {
+          stopNow(name, r, true, 1);
+          return;
+        }
+        if (!due(now, r.deadlineMs)) return;
+        StepRun& sr = r.steps[r.step];
+        sr.state = StepState::Ok;
+        sr.attempts = 1;
+        stepEnded(r, now);
+        ++r.step;  // no pause after a wait step: its seconds are the pause
+        r.phase = Phase::NextStep;
+        continue;
+      }
 
       case Phase::Gap:
         if (r.stop) {
@@ -497,6 +518,17 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
   }
   if (r.stop) {
     stopNow(name, r, true, 0);
+    return;
+  }
+  if (r.def.isWait(r.step)) {  // needs no network: a continued run waits for Wi-Fi before its next command, not here
+    r.current = static_cast<int>(r.step);
+    StepRun& sr = r.steps[r.step];
+    sr.state = StepState::Running;
+    sr.attempts = 1;
+    r.whys.set(r.step, Text());
+    r.deadlineMs = now + r.def.steps[r.step].waitS * 1000UL;
+    logf(false, "[%s] step %u: %s", name.c_str(), static_cast<unsigned>(r.step + 1), r.def.label(r.step).c_str());
+    r.phase = Phase::Wait;
     return;
   }
   if (r.needNet) {  // continued after a restart: the next command needs the network

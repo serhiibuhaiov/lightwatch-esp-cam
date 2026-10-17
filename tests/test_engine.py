@@ -80,7 +80,7 @@ def test_the_most_runs_with_the_most_steps_fit_in_memory(dev, guard, fakes):
     limit = listing(dev)["max"]
     steps = [{"device": FAKE_NAME, "action": "on", "pause_after_s": 600}] + [{"device": f"zz-ghost-{k}"} for k in range(23)]
     names = [f"{TEST}big{i}" for i in range(limit - len(guard))]
-    assert len(names) >= limit - 4, f"leftover scenarios on the board: {[s['name'] for s in guard]}"
+    assert len(names) >= limit - 8, f"leftover scenarios on the board: {[s['name'] for s in guard]}"  # the user's own, up to 8
     assert put(dev, guard + [scenario(n, steps) for n in names]).status_code == 200
     before = dev.get("/api/status").json()["memory"]
     try:

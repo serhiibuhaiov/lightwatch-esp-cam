@@ -18,6 +18,10 @@
 // answers 2xx, with the same attempts, gaps and patience as a socket step and no status query after it; at most
 // kMaxHttpInFlight of them are in that lane at once. The pause after it is kept when it succeeded.
 //
+// A wait step waits its seconds, always (also after a step that failed or was skipped), after the pause of the step
+// before it if that one is due. A stop ends it at once. A run continued after a restart in the middle of a wait starts
+// that wait over (the step it was in is done again, like any step).
+//
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -66,7 +70,8 @@ constexpr uint32_t kBusyTickMs = 100;         // how often the engine looks whil
 constexpr uint32_t kIdleTickMs = 1000;        // the longest sleep (Wi-Fi is watched while a run waits for it)
 
 enum class Op : uint8_t { On, Off, Query };
-enum class StepKind : uint8_t { Device, Http };
+enum class StepKind : uint8_t { Device, Http, Wait };
+constexpr uint32_t kMaxWaitS = 3600;  // a wait step: 1..kMaxWaitS seconds
 
 // The request of an HTTP step. URL and body can be long (2 KB, 16 KB): kept in Def::requests, allocated like the rest.
 struct HttpReq {
@@ -83,7 +88,8 @@ struct StepDef {
   uint16_t dev = 0;          // index into Def::devices (a device step) or Def::requests (an HTTP step)
   bool on = true;            // a device step: switch on or off
   bool enabled = true;
-  int32_t pauseAfterS = -1;  // -1: the scenario's default
+  int32_t pauseAfterS = -1;  // -1: the scenario's default (a wait step has none)
+  uint32_t waitS = 0;        // a wait step: how long
 };
 
 struct Def {
@@ -94,6 +100,7 @@ struct Def {
   List<StepDef> steps;
 
   bool isHttp(size_t step) const { return steps[step].kind == StepKind::Http; }
+  bool isWait(size_t step) const { return steps[step].kind == StepKind::Wait; }
   const Text& device(size_t step) const { return devices[steps[step].dev]; }  // a device step only
   const HttpReq& request(size_t step) const { return requests[steps[step].dev]; }  // an HTTP step only
   // What the log, the API and the history call the step: the device name, or "POST api.telegram.org" (never the path
@@ -187,7 +194,8 @@ class Whys {
   List<std::pair<uint16_t, Text>> v_;
 };
 
-enum class Phase : uint8_t { WaitStart, WaitNet, Settle, NextStep, Pause, Command, Verify, Gap, Finished };
+// Wait: in a wait step (appended last: a saved /runs.json keeps the phases as numbers).
+enum class Phase : uint8_t { WaitStart, WaitNet, Settle, NextStep, Pause, Command, Verify, Gap, Finished, Wait };
 
 struct Run {
   // What the API shows.

@@ -375,7 +375,7 @@ function viewScenarios() {
   const runBoxes = new Map();
 
   const blankHttp = () => ({ method: "GET", url: "", content_type: "application/json", body: "", timeout: "" });
-  const blankStep = () => ({ device: devNames[0] || "", action: devNames.length ? "on" : "http", enabled: true, pause: "", ...blankHttp() });
+  const blankStep = () => ({ device: devNames[0] || "", action: devNames.length ? "on" : "http", enabled: true, pause: "", seconds: "60", ...blankHttp() });
   const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60", every_s: "60" });
   const blankOi = () => ({ ...OI_DEFAULT, resume_within_min: String(OI_DEFAULT.resume_within_min) });
   const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), oi: blankOi(), steps: [] });
@@ -384,6 +384,7 @@ function viewScenarios() {
     when: s.when && s.trigger === "interval" ? { ...blankWhen(), every_s: String(s.when.every_s) }
       : s.when ? { device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s), every_s: "60" } : blankWhen(),
     steps: s.steps.map(x => ({ device: x.device || "", action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s),
+      seconds: x.action === "wait" ? String(x.seconds) : "60",
       ...(x.action === "http" ? { method: x.method, url: x.url, content_type: x.content_type || "application/json", body: x.body || "",
         timeout: x.timeout_ms === limits.httpTimeout ? "" : String(x.timeout_ms) } : blankHttp()) })) });
 
@@ -396,6 +397,7 @@ function viewScenarios() {
       limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s, watts: pr.max_watts || 20000, forMin: pr.min_for_s || 10,
         forMax: pr.max_for_s || 900, warmup: pr.max_warmup_s || 3600, fileBytes: l.max_file_bytes || 32768,
         historyBytes: l.history_file_bytes || 131072, resumeMax: l.max_resume_within_min || 1440, basis: l.basis ? psramBasis(l) : "" };
+      limits.wait = l.max_wait_s || 3600;
       const iv = l.interval || {};
       Object.assign(limits, { everyMin: iv.min_every_s || 10, everyMax: iv.max_every_s || 86400, flushS: iv.history_flush_s || 300 });
       const h = l.http_step || {};
@@ -444,7 +446,7 @@ function viewScenarios() {
     const steps = s.run_steps || [];
     if (steps.length) {
       out.push(E("div", { class: "rs" }, steps.map((x, k) => E("div", {}, badge((STEP_STATE[x.state] || ["n"])[0], (STEP_STATE[x.state] || [0, x.state])[1]), " ",
-        E("b", {}, (k + 1) + ". " + (x.http || x.device)), x.attempts > 1 ? " · спроб: " + x.attempts : "", x.detail ? E("span", { class: "mut" }, " · " + x.detail) : ""))));
+        E("b", {}, (k + 1) + ". " + (x.http || x.device || "почекати " + fmtDur(x.wait_s))), x.attempts > 1 ? " · спроб: " + x.attempts : "", x.detail ? E("span", { class: "mut" }, " · " + x.detail) : ""))));
     }
     return out;
   }
@@ -487,6 +489,8 @@ function viewScenarios() {
         if (st.action === "http") {
           const e = httpError(st);
           if (e) return at + "крок " + (k + 1) + ": " + e;
+        } else if (st.action === "wait") {
+          if (!/^\d{1,4}$/.test(st.seconds) || Number(st.seconds) < 1 || Number(st.seconds) > limits.wait) return at + "крок " + (k + 1) + ": «почекати» має бути цілим числом секунд 1–" + limits.wait + ".";
         } else if (!NAME_RE.test(st.device)) return at + "крок " + (k + 1) + ": оберіть пристрій.";
         if (st.pause !== "" && !pauseOk(st.pause)) return at + "крок " + (k + 1) + ": пауза має бути числом 0–" + limits.pause + " с або порожньою.";
       }
@@ -503,7 +507,9 @@ function viewScenarios() {
         ...(r.trigger === "power_below" || r.trigger === "power_above" ? { when: { device: r.when.device, watts: Number(r.when.watts), for_s: Number(r.when.for_s), warmup_s: Number(r.when.warmup_s) } } : {}),
         ...(r.trigger === "interval" ? { when: { every_s: Number(r.when.every_s) } } : {}),
         on_interrupt: { power: r.oi.power, software: r.oi.software, crash: r.oi.crash, brownout: r.oi.brownout, resume_within_min: Number(r.oi.resume_within_min) },
-        steps: r.steps.map(st => { const o = st.action === "http" ? { action: "http", ...httpFields(st), enabled: st.enabled } : { device: st.device, action: st.action, enabled: st.enabled };
+        steps: r.steps.map(st => {
+          if (st.action === "wait") return { action: "wait", seconds: Number(st.seconds), enabled: st.enabled };
+          const o = st.action === "http" ? { action: "http", ...httpFields(st), enabled: st.enabled } : { device: st.device, action: st.action, enabled: st.enabled };
           if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
       const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -546,15 +552,19 @@ function viewScenarios() {
     const sel = E("select", {}, (known || !st.device ? devNames : [st.device, ...devNames]).map(n =>
       E("option", { value: n, selected: n === st.device }, n + (devNames.includes(n) ? (ignored.has(n) ? " (ігнорується)" : "") : " (немає в списку пристроїв)"))));
     sel.addEventListener("change", () => { st.device = sel.value; });
-    const act = E("select", { title: "Дія кроку", style: "flex:0 0 auto;min-width:0" }, [["on", "Ввімкнути"], ["off", "Вимкнути"], ["http", "HTTP-запит"]].map(([v, l]) => E("option", { value: v, selected: v === st.action }, l)));
+    const act = E("select", { title: "Дія кроку", style: "flex:0 0 auto;min-width:0" }, [["on", "Ввімкнути"], ["off", "Вимкнути"], ["http", "HTTP-запит"], ["wait", "Почекати"]].map(([v, l]) => E("option", { value: v, selected: v === st.action }, l)));
     act.addEventListener("change", () => { st.action = act.value; render(); });
-    const http = st.action === "http";
+    const http = st.action === "http", wait = st.action === "wait";
+    const secs = E("input", { type: "number", min: 1, max: limits.wait || 3600, value: st.seconds, style: "width:120px",
+      title: "Скільки чекати, с (1–" + (limits.wait || 3600) + "). Чекає завжди, також після невдалого чи пропущеного кроку; пауза попереднього кроку йде перед цим" });
+    secs.addEventListener("input", () => { st.seconds = secs.value.trim(); });
     const en = E("input", { type: "checkbox", checked: st.enabled, title: "крок увімкнено" });
     en.addEventListener("change", () => { st.enabled = en.checked; });
     const pz = E("input", { type: "number", min: 0, max: limits.pause, value: st.pause, placeholder: "пауза: " + (r.pause || "30") + " с", title: "Пауза після цього кроку, с. Порожньо: за замовчуванням. Пауза лише після кроку, що вдався (перемкнув розетку, сервер відповів 2xx)" });
     pz.addEventListener("input", () => { st.pause = pz.value.trim(); });
     const mv = d => () => { const j = k + d; if (j < 0 || j >= r.steps.length) return; [r.steps[k], r.steps[j]] = [r.steps[j], r.steps[k]]; render(); };
-    return E("div", { class: "srow" }, E("span", { class: "n" }, (k + 1) + "."), http ? E("span", { style: "flex:1;min-width:150px" }, httpSummary(st)) : sel, act, en, pz,
+    return E("div", { class: "srow" }, E("span", { class: "n" }, (k + 1) + "."),
+      wait ? E("span", { style: "flex:1;min-width:150px" }, "почекати, с:") : http ? E("span", { style: "flex:1;min-width:150px" }, httpSummary(st)) : sel, act, en, wait ? secs : pz,
       E("button", { type: "button", title: "вгору", disabled: saving || k === 0, onclick: mv(-1) }, "↑"),
       E("button", { type: "button", title: "вниз", disabled: saving || k === r.steps.length - 1, onclick: mv(1) }, "↓"),
       E("button", { type: "button", class: "d", title: "видалити крок", disabled: saving, onclick: () => { r.steps.splice(k, 1); render(); } }, "✕"),
@@ -699,6 +709,7 @@ function viewScenarios() {
     out.push(E("div", { class: "row" },
       E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими; від усіх разом у черзі до розеток одночасно не більше 4 команд. " +
         "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж. " +
+        "«Почекати N с» чекає завжди (також після невдалого чи пропущеного кроку), після паузи попереднього кроку; після перезапуску плати з «продовжити» очікування починається заново. " +
         "HTTP-запит (GET чи POST з тілом, наприклад повідомлення в Telegram) вдається, коли сервер відповів 2xx; спроби ті самі; від усіх сценаріїв разом одночасно не більше " + (limits.httpInFlight || 2) + " запитів. Шлях і тіло запиту в лог і історію не пишуться.")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
@@ -758,7 +769,7 @@ function viewScenarios() {
         steps.length ? E("div", { class: "tw" }, E("table", { class: "h" },
           E("thead", {}, E("tr", {}, ["Крок", "Пристрій / адреса", "Дія", "Результат", "Спроб", "Коли (від старту)", "Деталі"].map(x => E("th", {}, x)))),
           E("tbody", {}, steps.map((x, k) => E("tr", { class: "h-" + (STEP_STATE[x.state] || ["n"])[0] },
-            E("td", {}, String(k + 1)), E("td", {}, x.http || x.device), E("td", {}, x.action === "http" ? "HTTP-запит" : x.action === "off" ? "вимкнути" : "увімкнути"),
+            E("td", {}, String(k + 1)), E("td", {}, x.http || x.device || ""), E("td", {}, x.action === "wait" ? "почекати " + fmtDur(x.seconds) : x.action === "http" ? "HTTP-запит" : x.action === "off" ? "вимкнути" : "увімкнути"),
             E("td", {}, (STEP_STATE[x.state] || [0, x.state])[1]), E("td", {}, String(x.attempts)),
             E("td", {}, x.at_s ? fmtDur(x.at_s) : "—"), E("td", { class: "mut" }, x.detail || "")))))) : E("p", { class: "mut" }, "Без кроків."));
     });

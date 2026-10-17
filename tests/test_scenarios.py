@@ -76,14 +76,19 @@ def test_scenario_endpoints_need_auth_and_method(dev):
 
 def test_listing_shape(dev):
     body = listing(dev)
-    assert body["triggers"] == ["power_on", "manual", "power_below", "power_above"]
+    assert body["triggers"] == ["power_on", "manual", "power_below", "power_above", "interval"]
     assert body["max"] >= 1 and body["max_steps"] >= 1 and body["max_pause_s"] >= 60
     assert isinstance(body["sd"], bool) and isinstance(body["scenarios"], list)
     for sc in body["scenarios"]:
         assert {"name", "enabled", "trigger", "state", "default_pause_s", "steps"} <= set(sc)
         assert sc["trigger"] in body["triggers"]
-        for st in sc["steps"]:
-            assert set(st) == {"device", "action", "enabled", "pause_after_s"}
+        for st in sc["steps"]:  # the scenarios on the board: socket, HTTP and wait steps
+            if st["action"] == "http":
+                assert {"action", "method", "url", "timeout_ms", "enabled", "pause_after_s"} <= set(st), st
+            elif st["action"] == "wait":
+                assert set(st) == {"action", "seconds", "enabled"}, st
+            else:
+                assert set(st) == {"device", "action", "enabled", "pause_after_s"}, st
 
 
 def test_run_and_stop_validate_before_looking_anything_up(dev):
@@ -138,11 +143,11 @@ def bad_docs():
 
 @pytest.mark.parametrize("label,doc", list(bad_docs()), ids=[l for l, _ in bad_docs()])
 def test_invalid_documents_are_rejected(dev, guard, label, doc):
-    before = listing(dev)["scenarios"]
+    before = [editable(s) for s in listing(dev)["scenarios"]]  # the definitions (an interval scenario's state moves on its own)
     r = dev.request("PUT", "/api/scenarios", json=doc, headers={"Content-Type": "application/json"})
     assert r.status_code == 400, (label, r.text)
     assert "error" in r.json()
-    after = listing(dev)["scenarios"]
+    after = [editable(s) for s in listing(dev)["scenarios"]]
     assert after == before, (before, after)
 
 

@@ -62,6 +62,7 @@ constexpr uint32_t kWatchTickMs = 3000;  // how often the conditions are looked 
 
 struct Step {
   bool http = false;         // an HTTP step (action "http"): `dev` indexes Def::requests
+  uint16_t waitS = 0;        // a wait step (action "wait"): its seconds (0: not a wait step)
   uint16_t dev = 0;          // index into Def::devices (or Def::requests)
   bool on = true;            // the action: switch the device on (default) or off
   bool enabled = true;
@@ -259,6 +260,25 @@ bool parse(const String& raw, Defs& out, String& err) {
         return false;
       }
       Step st;
+      if (sv["action"] == "wait") {  // {action: "wait", seconds, enabled}: waits, always; no device, no pause after it
+        if (!sv["device"].isNull() || !sv["url"].isNull() || !sv["pause_after_s"].isNull()) {
+          err = at + ": a wait step has only seconds (and enabled): no device, url or pause_after_s";
+          return false;
+        }
+        JsonVariantConst s = sv["seconds"];
+        if (!s.is<int>() || s.as<int>() < 1 || s.as<int>() > static_cast<int>(ScenarioEngine::kMaxWaitS)) {
+          err = at + ".seconds must be an integer 1.." + String(ScenarioEngine::kMaxWaitS) + " for a wait step";
+          return false;
+        }
+        st.waitS = static_cast<uint16_t>(s.as<int>());
+        if (!readBool(sv["enabled"], at + ".enabled", st.enabled, err)) return false;
+        d.steps.push_back(st);
+        continue;
+      }
+      if (!sv["seconds"].isNull()) {
+        err = at + ".seconds is for a wait step (action \"wait\")";
+        return false;
+      }
       if (sv["action"] == "http") {  // {action: "http", method, url, content_type, body, timeout_ms, enabled, pause_after_s}
         if (!sv["device"].isNull()) {
           err = at + ".device is not for an http step";
@@ -294,7 +314,7 @@ bool parse(const String& raw, Defs& out, String& err) {
       if (!st.http && !sv["action"].isNull()) {
         const String a = sv["action"].is<const char*>() ? String(sv["action"].as<const char*>()) : String("");
         if (a != "on" && a != "off") {
-          err = at + ".action must be \"on\", \"off\" or \"http\"";
+          err = at + ".action must be \"on\", \"off\", \"http\" or \"wait\"";
           return false;
         }
         st.on = a == "on";
@@ -351,7 +371,10 @@ void writeOnInterrupt(JsonObject o, const ScenarioEngine::OnInterrupt& p) {
 
 // One step as the file and GET /api/scenarios have it.
 void writeStep(JsonObject so, const Def& d, const Step& s) {
-  if (s.http) {
+  if (s.waitS) {
+    so["action"] = "wait";
+    so["seconds"] = s.waitS;
+  } else if (s.http) {
     const ScenarioEngine::HttpReq& q = d.requests[s.dev];
     so["action"] = "http";
     so["method"] = q.post ? "POST" : "GET";
@@ -487,8 +510,9 @@ class BoardEnv : public ScenarioEngine::Env {
       out.steps.reserve(d.steps.size());
       for (const Step& s : d.steps) {
         ScenarioEngine::StepDef st;
-        st.kind = s.http ? ScenarioEngine::StepKind::Http : ScenarioEngine::StepKind::Device;
+        st.kind = s.waitS ? ScenarioEngine::StepKind::Wait : s.http ? ScenarioEngine::StepKind::Http : ScenarioEngine::StepKind::Device;
         st.dev = s.dev;
+        st.waitS = s.waitS;
         st.on = s.on;
         st.enabled = s.enabled;
         st.pauseAfterS = s.pauseAfterS;
@@ -707,12 +731,16 @@ String runsTextLocked(uint32_t epoch, size_t& count) {
     }
     JsonArray dsteps = def["steps"].to<JsonArray>();
     for (const ScenarioEngine::StepDef& st : s.def.steps) {
-      JsonArray a = dsteps.add<JsonArray>();  // [dev, on, enabled, pause_after_s, http]
+      JsonArray a = dsteps.add<JsonArray>();  // [dev, on, enabled, pause_after_s(, 1 = http | 2 = wait, wait_s)]
       a.add(st.dev);
       a.add(st.on);
       a.add(st.enabled);
       a.add(st.pauseAfterS);
       if (st.kind == ScenarioEngine::StepKind::Http) a.add(1);
+      if (st.kind == ScenarioEngine::StepKind::Wait) {
+        a.add(2);
+        a.add(st.waitS);
+      }
     }
     JsonArray steps = o["steps"].to<JsonArray>();
     for (size_t i = 0; i < s.steps.size(); ++i) {
@@ -786,8 +814,14 @@ void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine
       st.on = a[1] | true;
       st.enabled = a[2] | true;
       st.pauseAfterS = a[3] | -1;
-      st.kind = (a[4] | 0) == 1 ? ScenarioEngine::StepKind::Http : ScenarioEngine::StepKind::Device;
-      if (st.dev >= (st.kind == ScenarioEngine::StepKind::Http ? s.def.requests.size() : s.def.devices.size())) continue;  // damaged
+      const int kind = a[4] | 0;
+      st.kind = kind == 1 ? ScenarioEngine::StepKind::Http : kind == 2 ? ScenarioEngine::StepKind::Wait : ScenarioEngine::StepKind::Device;
+      st.waitS = a[5] | 0u;
+      if (st.kind == ScenarioEngine::StepKind::Wait) {
+        if (st.waitS < 1 || st.waitS > ScenarioEngine::kMaxWaitS) continue;  // damaged
+      } else if (st.dev >= (st.kind == ScenarioEngine::StepKind::Http ? s.def.requests.size() : s.def.devices.size())) {
+        continue;  // damaged
+      }
       s.def.steps.push_back(st);
     }
     for (JsonArrayConst a : o["steps"].as<JsonArrayConst>()) {
@@ -865,7 +899,10 @@ void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
   for (size_t i = 0; i < r.steps.size() && i < r.def.steps.size(); ++i) {
     const ScenarioEngine::StepRun& s = r.steps[i];
     JsonObject o = steps.add<JsonObject>();
-    if (r.def.isHttp(i)) {
+    if (r.def.isWait(i)) {
+      o["action"] = "wait";
+      o["seconds"] = r.def.steps[i].waitS;
+    } else if (r.def.isHttp(i)) {
       o["http"] = r.def.label(i);  // "POST api.telegram.org": never the path or the body
       o["action"] = "http";
     } else {
@@ -1262,7 +1299,9 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
       o["progress_done"] = doneSteps(*r);
       o["progress_total"] = totalSteps(*r);
     }
-    if (r->alive && r->phase == ScenarioEngine::Phase::Pause) o["pause_left_s"] = secondsUntil(r->deadlineMs);
+    if (r->alive && (r->phase == ScenarioEngine::Phase::Pause || r->phase == ScenarioEngine::Phase::Wait)) {
+      o["pause_left_s"] = secondsUntil(r->deadlineMs);  // a pause after a step, or a wait step
+    }
   }
   if (!full) return;
   o["default_pause_s"] = d.defaultPauseS;
@@ -1322,6 +1361,7 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
     for (const Step& s : d.steps) {
       JsonObject so = steps.add<JsonObject>();
       writeStep(so, d, s);
+      if (s.waitS) continue;  // a wait step has no pause after it
       if (s.pauseAfterS >= 0) {
         so["pause_after_s"] = s.pauseAfterS;
       } else {
@@ -1334,7 +1374,9 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
     for (size_t i = 0; i < r->steps.size(); ++i) {
       const ScenarioEngine::StepRun& s = r->steps[i];
       JsonObject ro = run.add<JsonObject>();
-      if (r->def.isHttp(i)) {
+      if (r->def.isWait(i)) {
+        ro["wait_s"] = r->def.steps[i].waitS;
+      } else if (r->def.isHttp(i)) {
         ro["http"] = r->def.label(i);
       } else {
         ro["device"] = r->def.device(i);
@@ -1472,7 +1514,7 @@ std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
       out.push_back(String("scenario '") + d.name + "', trigger: device '" + d.whenDevice + "' is not in the list");
     }
     for (size_t i = 0; i < d.steps.size(); ++i) {
-      if (d.steps[i].enabled && !d.steps[i].http && !known(d.device(d.steps[i]))) {
+      if (d.steps[i].enabled && !d.steps[i].http && !d.steps[i].waitS && !known(d.device(d.steps[i]))) {
         out.push_back(String("scenario '") + d.name + "', step " + String(static_cast<unsigned>(i + 1)) + ": device '" + d.device(d.steps[i]) +
                       "' is not in the list");
       }
@@ -1637,6 +1679,7 @@ void limits(JsonObject out) {
   out["max_body_bytes"] = maxBodyBytes();
   out["max_steps"] = kMaxSteps;
   out["max_pause_s"] = kMaxPauseS;
+  out["max_wait_s"] = ScenarioEngine::kMaxWaitS;  // a wait step: 1..max_wait_s
   out["max_file_bytes"] = maxFileBytes();
   out["history_file_bytes"] = kHistoryFileBytes;  // two files: the current one and the one before
   out["max_resume_within_min"] = ScenarioEngine::kMaxResumeWithinMin;
@@ -1672,6 +1715,7 @@ String configJson(bool stateOnly) {
   triggers.add(kTriggerManual);
   triggers.add(kTriggerPowerBelow);
   triggers.add(kTriggerPowerAbove);
+  triggers.add(kTriggerInterval);
   {
     Lock lock;
     doc["sd"] = gInfo.sd;
