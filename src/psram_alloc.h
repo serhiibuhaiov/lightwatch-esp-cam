@@ -1,13 +1,20 @@
 #pragma once
 //
 // An ArduinoJson allocator that puts a document in PSRAM when the board has it, and falls back to the normal heap when
-// it has not (or PSRAM is full). For the big documents only (scenarios: up to ~40 KB parsed); the small ones stay as
-// they are. Never used for anything a task stack, an interrupt or DMA touches.
+// it has not (or PSRAM is full). For the big documents (scenarios up to ~60 KB, /runs.json, the device list and its
+// state, /api/status, the history of the readings, the config); the small ones stay as they are. Never used for
+// anything a task stack, an interrupt or DMA touches.
 //
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 
 #include <cstdlib>
+
+// True when the board has PSRAM (an AI-Thinker ESP32-CAM has 4 MB): the limits that need memory for big documents depend on it.
+inline bool psramAvailable() {
+  static const bool has = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > (1u << 20);
+  return has;
+}
 
 class PsramAllocator : public ArduinoJson::Allocator {
  public:

@@ -106,7 +106,11 @@ def test_status_limits_match_what_the_other_routes_say(dev):
     assert dv["poll_interval_s"] == devices["poll_interval_s"] and dv["history_span_s"] == dv["history_capacity"] * dv["poll_interval_s"]
     assert pr["max_for_s"] == min(900, (dv["history_capacity"] - 2) * dv["poll_interval_s"])
     assert lim["tuya_queues"] == {"commands": 16, "monitor": 4}
-    assert lim["put_body_bytes"] == {"config": 8192, "devices": 8192, "scenarios": 49152}
+    psram = dev.get("/api/status").json()["memory"]["psram_total"] > 0
+    assert sc["basis"] == ("psram" if psram else "internal")
+    assert (sc["max"], sc["max_file_bytes"], sc["max_body_bytes"]) == ((24, 98304, 65536) if psram else (16, 49152, 49152))
+    assert (sc["max_with_psram"], sc["max_without_psram"]) == (24, 16)
+    assert lim["put_body_bytes"] == {"config": 8192, "devices": 8192, "scenarios": sc["max_body_bytes"]}
     assert lim["logs"] == {"ram_bytes": 8192, "tail_max_bytes": 32768}
     assert 1 <= len(dev.get("/api/status").json()["boot_history"]) <= lim["boot_history"]
 

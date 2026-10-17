@@ -70,6 +70,44 @@ def test_twelve_runs_share_four_places_and_a_button_still_gets_through(dev, guar
     assert all(queued < 4.0 for _, queued in presses), presses
 
 
+def test_the_most_runs_with_the_most_steps_fit_in_memory(dev, guard, fakes):
+    """All scenarios (24 with PSRAM) with 24 steps each, all alive at once (in a pause after their first step): the board
+    keeps enough internal RAM, and the big answers still come."""
+    fakes.start()
+    fakes.set(d1=True)
+    limit = listing(dev)["max"]
+    steps = [{"device": FAKE_NAME, "action": "on", "pause_after_s": 600}] + [{"device": f"zz-ghost-{k}"} for k in range(23)]
+    names = [f"{TEST}big{i}" for i in range(limit - len(guard))]
+    assert len(names) >= limit - 4, f"leftover scenarios on the board: {[s['name'] for s in guard]}"
+    assert put(dev, guard + [scenario(n, steps) for n in names]).status_code == 200
+    before = dev.get("/api/status").json()["memory"]
+    try:
+        for n in names:
+            assert dev.request("POST", "/api/scenarios/run", params={"name": n}).status_code == 200
+        end = time.time() + 180
+        while time.time() < end:
+            listed = {s["name"]: s for s in listing(dev)["scenarios"]}
+            if all(listed[n].get("pause_left_s") for n in names):
+                break
+            time.sleep(2)
+        else:
+            pytest.fail("not every run reached its pause")
+        r = dev.get("/api/scenarios", timeout=20)
+        assert r.status_code == 200
+        st = dev.get("/api/status").json()
+        during, engine_ = st["memory"], st["scenario_engine"]
+        print(f"\n{len(names)} runs x 24 steps alive: runs_alive {engine_['runs_alive']}, internal free {before['internal_free']} -> "
+              f"{during['internal_free']}, minimum since boot {during['internal_min']}, largest block {during['internal_largest']}, "
+              f"GET /api/scenarios {len(r.content)} bytes")
+        assert engine_["runs_alive"] == len(names)
+        assert during["internal_free"] > 40000 and during["internal_largest"] > 20000
+    finally:
+        for n in names:
+            dev.request("POST", "/api/scenarios/stop", params={"name": n})
+    for n in names:
+        wait_state(dev, n, ("stopped",), timeout=20)
+
+
 def test_attempts_on_an_offline_socket_are_counted(dev, guard, fakes):
     fakes.start()
     # The monitor has to have seen the dead socket fail first (one poll cycle, plus a second one for a device that is new).

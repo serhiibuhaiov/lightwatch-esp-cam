@@ -143,10 +143,10 @@ std::string stepDetail(const Run& r, size_t i) {
       if (s.pauseS) out += "; pause " + std::to_string(s.pauseS) + " s before the next step";
       return out;
     }
-    case StepState::Failed: return s.why;
+    case StepState::Failed: return r.whys.get(i);
     case StepState::Skipped: return "the device is ignored (see the device settings)";
     case StepState::Stopped: return "stopped";
-    case StepState::Running: return s.attempts > 1 ? "previous attempt: " + s.why : std::string();
+    case StepState::Running: return s.attempts > 1 ? "previous attempt: " + r.whys.get(i) : std::string();
     default: return std::string();
   }
 }
@@ -449,7 +449,7 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
   if (!d.exists) {
     sr.state = StepState::Failed;
     sr.attempts = 0;
-    sr.why = "no such device in /devices.json";
+    r.whys.set(r.step, "no such device in /devices.json");
     stepEnded(r, now);
     logf(true, "[%s] step %u: no device '%s' in /devices.json", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str());
     ++r.failed;
@@ -480,7 +480,7 @@ void Engine::startAttempt(const std::string& name, Run& r, uint32_t now) {
   StepRun& sr = r.steps[r.step];
   sr.state = StepState::Running;
   sr.attempts = r.attempt;
-  sr.why = r.attempt > 1 ? r.lastWhy : std::string();
+  r.whys.set(r.step, r.attempt > 1 ? r.lastWhy : std::string());
   r.offlineAttempt = env_.device(r.def.device(r.step)).offline;
   r.attemptJobMs = 0;
   r.phase = Phase::Command;
@@ -514,7 +514,7 @@ void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const 
   StepRun& sr = r.steps[r.step];
   sr.state = StepState::Failed;
   sr.attempts = r.attempt;
-  sr.why = r.lastWhy;
+  r.whys.set(r.step, r.lastWhy);
   stepEnded(r, now);
   logf(true, "[%s] step %u: %s FAILED after %u attempts, going on", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str(),
        static_cast<unsigned>(r.attempt));
@@ -529,7 +529,7 @@ void Engine::attemptSucceeded(const std::string& name, Run& r, uint32_t now) {
   StepRun& sr = r.steps[r.step];
   sr.state = StepState::Ok;
   sr.attempts = r.attempt;
-  sr.why.clear();
+  r.whys.set(r.step, "");
   stepEnded(r, now);
   logf(false, "[%s] step %u: %s is %s (attempt %u)", name.c_str(), static_cast<unsigned>(r.step + 1), r.def.device(r.step).c_str(), verb(st.on),
        static_cast<unsigned>(r.attempt));
@@ -546,7 +546,7 @@ void Engine::stopNow(const std::string& name, Run& r, bool markStep, uint8_t att
     StepRun& sr = r.steps[r.step];
     sr.state = StepState::Stopped;
     sr.attempts = attempts;
-    sr.why.clear();
+    r.whys.set(r.step, "");
     stepEnded(r, env_.nowMs());
   }
   finish(name, r, RunState::Stopped);
@@ -646,8 +646,13 @@ bool Engine::takeDirty() {
 }
 
 std::vector<Snapshot> Engine::snapshot() const {
-  const uint32_t now = env_.nowMs();
   std::vector<Snapshot> out;
+  forEachSnapshot([&](const Snapshot& s) { out.push_back(s); });
+  return out;
+}
+
+void Engine::forEachSnapshot(const std::function<void(const Snapshot&)>& fn) const {
+  const uint32_t now = env_.nowMs();
   for (const auto& kv : runs_) {
     const Run& r = kv.second;
     if (!r.alive) continue;
@@ -674,12 +679,12 @@ std::vector<Snapshot> Engine::snapshot() const {
     s.startEpoch = r.startEpoch;
     s.resumed = r.resumed;
     s.steps = r.steps;
+    s.whys = r.whys;
     s.switched = r.switched;
     s.skipped = r.skipped;
     s.failed = r.failed;
-    out.push_back(std::move(s));
+    fn(s);
   }
-  return out;
 }
 
 Engine::StartResult Engine::resume(const Snapshot& s, uint32_t elapsedMs, const std::string& cause) {
@@ -704,6 +709,7 @@ Engine::StartResult Engine::resume(const Snapshot& s, uint32_t elapsedMs, const 
     r.state = RunState::Running;
     r.steps = s.steps;
     r.steps.resize(r.def.steps.size());
+    r.whys = s.whys;
     r.step = std::min<size_t>(s.step, r.def.steps.size());
     r.switched = s.switched;
     r.skipped = s.skipped;
@@ -725,7 +731,7 @@ Engine::StartResult Engine::resume(const Snapshot& s, uint32_t elapsedMs, const 
         StepRun& sr = r.steps[r.step];  // the step it was in is done again
         sr.state = StepState::Pending;
         sr.attempts = 0;
-        sr.why.clear();
+        r.whys.set(r.step, "");
       }
       logf(false, "[%s] continued after a restart (%s) at step %u", s.name.c_str(), cause.c_str(), static_cast<unsigned>(r.step + 1));
     }
@@ -749,10 +755,11 @@ void Engine::interrupted(const Snapshot& s, const std::string& why) {
   r.def = s.def;
   r.steps = s.steps;
   r.steps.resize(r.def.steps.size());
-  for (StepRun& sr : r.steps) {
-    if (sr.state == StepState::Running) {
-      sr.state = StepState::Stopped;
-      sr.why.clear();
+  r.whys = s.whys;
+  for (size_t i = 0; i < r.steps.size(); ++i) {
+    if (r.steps[i].state == StepState::Running) {
+      r.steps[i].state = StepState::Stopped;
+      r.whys.set(i, "");
     }
   }
   r.switched = s.switched;

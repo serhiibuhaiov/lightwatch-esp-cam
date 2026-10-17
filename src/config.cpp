@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include "psram_alloc.h"
 #include "storage.h"
 
 namespace Config {
@@ -95,7 +96,7 @@ bool validLevel(const String& s) {
 // Parses and validates. On success fills `out`; on failure `out` is untouched.
 // `keep` supplies the secrets to retain when the document leaves them empty.
 bool parse(const String& json, AppConfig& out, String& err, const AppConfig* keep) {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   DeserializationError e = deserializeJson(doc, json);
   if (e) {
     err = String("invalid JSON: ") + e.c_str();

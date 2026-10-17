@@ -16,6 +16,7 @@
 #include "config.h"
 #include "devices.h"
 #include "logger.h"
+#include "psram_alloc.h"
 #include "scenario.h"
 #include "storage.h"
 #include "tuya.h"
@@ -32,7 +33,6 @@ namespace {
 
 const char* TAG = "web";
 constexpr size_t kMaxBody = 8192;
-constexpr size_t kMaxScenariosBody = 49152;  // 16 scenarios x 24 steps with long names are ~38 KB (kept in PSRAM when there is one)
 constexpr size_t kDefaultTail = 4096;
 
 AsyncWebServer server(80);
@@ -41,11 +41,30 @@ AsyncWebServer server(80);
 // through Storage (mutex, short operations) and big files are streamed in chunks.
 
 // The largest PUT body the route accepts.
-size_t maxBodyFor(AsyncWebServerRequest* req) { return req->url() == "/api/scenarios" ? kMaxScenariosBody : kMaxBody; }
+size_t maxBodyFor(AsyncWebServerRequest* req) { return req->url() == "/api/scenarios" ? Scenario::maxBodyBytes() : kMaxBody; }
 
-void sendJson(AsyncWebServerRequest* req, int code, const String& body) {
-  req->send(code, "application/json", body);
+// A body of 4 KB and more lives in PSRAM (malloc puts it there). Handed to the library as it is, lwIP copies the packets
+// straight out of PSRAM, and under load (20+ scenario runs alive, little internal RAM left) a few hundred bytes of a big
+// answer arrived as bytes from elsewhere in the same buffer (seen on GET /api/scenarios, 78 KB: 2 of 25 answers, the
+// board's hash of the body right, the received one wrong). Through a callback the library copies each piece into its
+// own send buffer (2 x MSS, internal RAM) first, and the answers came through intact.
+void sendBody(AsyncWebServerRequest* req, int code, const char* type, const String& body) {
+  if (body.length() < 2048) {
+    req->send(code, type, body);
+    return;
+  }
+  auto keep = std::make_shared<String>(body);
+  AsyncWebServerResponse* r = req->beginResponse(type, keep->length(), [keep](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+    if (index >= keep->length()) return 0;
+    const size_t n = std::min(maxLen, keep->length() - index);
+    memcpy(buffer, keep->c_str() + index, n);
+    return n;
+  });
+  r->setCode(code);
+  req->send(r);
 }
+
+void sendJson(AsyncWebServerRequest* req, int code, const String& body) { sendBody(req, code, "application/json", body); }
 
 void sendError(AsyncWebServerRequest* req, int code, const String& message) {
   JsonDocument doc;
@@ -189,7 +208,7 @@ const char* sdStateName(Storage::SdState st) {
 void onStatus(AsyncWebServerRequest* req) {
   if (!authorize(req)) return;
   const Storage::SdState sd = Storage::sdState();
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["uptime_s"] = static_cast<uint32_t>(esp_timer_get_time() / 1000000);  // millis() / 1000 would wrap after 49.7 days
   doc["heap_free"] = ESP.getFreeHeap();
   doc["time_valid"] = time(nullptr) > 1700000000;
@@ -216,7 +235,7 @@ void onStatus(AsyncWebServerRequest* req) {
     JsonObject b = l["put_body_bytes"].to<JsonObject>();
     b["config"] = kMaxBody;
     b["devices"] = kMaxBody;
-    b["scenarios"] = kMaxScenariosBody;
+    b["scenarios"] = Scenario::maxBodyBytes();  // 64 KB with PSRAM, 48 KB without
     JsonObject lg = l["logs"].to<JsonObject>();
     lg["ram_bytes"] = Logger::kRamBufferBytes;
     lg["tail_max_bytes"] = Storage::kMaxTailBytes;
@@ -416,7 +435,7 @@ void onDevicesConfigPut(AsyncWebServerRequest* req) {
 
 JsonDocument devicesSummary() {
   const Devices::LoadInfo info = Devices::info();
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["sd"] = info.sd;
   doc["file_found"] = info.fileFound;
   doc["count"] = info.count;
@@ -709,7 +728,7 @@ void sendLogFile(AsyncWebServerRequest* req) {
     String pending;
     Logger::copyPending(pending);
     if (tail) trimToTail(pending, tail);
-    req->send(200, "text/plain; charset=utf-8", pending);
+    sendBody(req, 200, "text/plain; charset=utf-8", pending);
     return;
   }
   if (current) name = Logger::currentFileName();
@@ -741,7 +760,7 @@ void sendLogFile(AsyncWebServerRequest* req) {
       text += pending;
       trimToTail(text, tail);
     }
-    req->send(200, "text/plain; charset=utf-8", text);
+    sendBody(req, 200, "text/plain; charset=utf-8", text);
     return;
   }
 

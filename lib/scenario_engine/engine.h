@@ -15,6 +15,7 @@
 // command is already on its way (then right after it).
 //
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -92,13 +93,40 @@ enum class StepState : uint8_t { Pending, Disabled, Running, Ok, Skipped, Failed
 const char* runStateName(RunState s);    // idle | skipped | waiting | running | done | stopped | interrupted
 const char* stepStateName(StepState s);  // pending | disabled | running | ok | skipped | failed | stopped
 
-// Kept small: the text the API shows is put together by stepDetail() when asked for.
+// Kept small (8 bytes, 24 runs x 24 steps fit easily): the text the API shows is put together by stepDetail() when asked for.
 struct StepRun {
   StepState state = StepState::Pending;
   uint8_t attempts = 0;
   uint16_t pauseS = 0;  // a pause after this step was kept (seconds)
   uint32_t atS = 0;     // when it ended, seconds since the run began (0: not ended)
-  std::string why;      // failed: the reason; running after a failed attempt: why that one failed
+};
+
+// The reasons of the steps that have one (failed: why; running after a failed attempt: why that one failed). Few steps
+// have one, so they are kept apart from the steps instead of an empty string in every step.
+class Whys {
+ public:
+  const std::string& get(size_t step) const {
+    static const std::string none;
+    for (const auto& w : v_) {
+      if (w.first == step) return w.second;
+    }
+    return none;
+  }
+  void set(size_t step, const std::string& text) {  // "" removes it
+    for (size_t i = 0; i < v_.size(); ++i) {
+      if (v_[i].first != step) continue;
+      if (text.empty()) {
+        v_.erase(v_.begin() + static_cast<long>(i));
+      } else {
+        v_[i].second = text;
+      }
+      return;
+    }
+    if (!text.empty()) v_.emplace_back(static_cast<uint16_t>(step), text);
+  }
+
+ private:
+  std::vector<std::pair<uint16_t, std::string>> v_;
 };
 
 enum class Phase : uint8_t { WaitStart, WaitNet, Settle, NextStep, Pause, Command, Verify, Gap, Finished };
@@ -112,6 +140,7 @@ struct Run {
   uint32_t startAtMs = 0;
   int current = -1;        // the step in progress; -1 in a pause or when none
   std::vector<StepRun> steps;
+  Whys whys;
   bool alive = false;      // started and not finished
   bool stop = false;       // asked to stop
   std::string resumed;     // the restarts this run went through and was continued after: "SW at step 2; PANIC at step 3"
@@ -170,6 +199,7 @@ struct Snapshot {
   std::string resumed;
   Def def;                  // the steps the run works with (empty while it waits for its start)
   std::vector<StepRun> steps;
+  Whys whys;
   unsigned switched = 0, skipped = 0, failed = 0;
 };
 
@@ -230,8 +260,10 @@ class Engine {
   // Moves every run on; returns how long the engine may sleep (it is woken earlier on start/stop/setDefs).
   uint32_t tick();
 
-  // The alive runs, to keep in /runs.json. `dirty`: something worth saving changed since the last takeDirty().
-  std::vector<Snapshot> snapshot() const;
+  // The alive runs, to keep in /runs.json, one at a time (a copy of all of them at once would cost tens of KB of RAM).
+  // `dirty`: something worth saving changed since the last takeDirty().
+  void forEachSnapshot(const std::function<void(const Snapshot&)>& fn) const;
+  std::vector<Snapshot> snapshot() const;  // all at once: for the tests
   bool takeDirty();
   // After a restart: continues the saved run (`elapsedMs` of the interruption are taken off its wait or pause; the step
   // it was in is done again), after waiting for Wi-Fi. NotFound if the scenario is gone. `cause` goes into Run::resumed.

@@ -46,10 +46,16 @@
 
 namespace Scenario {
 
-constexpr size_t kMaxScenarios = 16;
+// How many scenarios, and how big their file and PUT body may be, depends on the memory: with PSRAM the documents live
+// there (24 x 24 steps with long names is ~58 KB of JSON); without it they come out of the ~100 KB of internal RAM.
+constexpr size_t kMaxScenariosPsram = 24, kMaxScenariosNoPsram = 16;
+constexpr size_t kMaxFileBytesPsram = 98304, kMaxFileBytesNoPsram = 49152;  // /scenarios.json (pretty if it fits, else compact)
+constexpr size_t kMaxBodyBytesPsram = 65536, kMaxBodyBytesNoPsram = 49152;  // PUT /api/scenarios
+size_t maxScenarios();
+size_t maxFileBytes();
+size_t maxBodyBytes();
 constexpr size_t kMaxSteps = 24;
 constexpr uint16_t kMaxPauseS = 3600;      // pause after a step
-constexpr size_t kMaxFileBytes = 65536;    // /scenarios.json (16 x 24 steps with long names is ~40 KB)
 constexpr uint32_t kMaxWatts = 20000;      // power rule threshold
 constexpr uint32_t kMinForS = 10, kMaxForS = 900;
 constexpr uint32_t kMaxWarmupS = 3600;

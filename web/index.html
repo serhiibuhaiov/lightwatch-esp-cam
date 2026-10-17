@@ -160,11 +160,17 @@ function fmtDur(s) {
   return h + " г" + (m ? " " + m + " хв" : "");
 }
 
+// Why the scenario limits are what they are: they depend on whether the board has PSRAM.
+const psramBasis = sc => sc.basis === "psram"
+  ? "На цій платі є PSRAM: документи сценаріїв лежать у ній, тому до " + sc.max_with_psram + " сценаріїв (без PSRAM було б " + sc.max_without_psram + ")."
+  : "На цій платі немає PSRAM: документи займають внутрішню пам'ять, тому до " + sc.max_without_psram + " сценаріїв (з PSRAM було б " + sc.max_with_psram + ").";
+
 // Every fixed limit of the firmware (GET /api/status -> limits), as a table.
 function limitsCard(l) {
   const sc = l.scenarios, pr = sc.power_rule, dv = l.devices;
   const rows = [
-    ["Сценарії", "до " + sc.max + " сценаріїв, до " + sc.max_steps + " кроків у кожному; пауза після кроку 0–" + sc.max_pause_s + " с (" + fmtDur(sc.max_pause_s) + "); файл scenarios.json до " + fmtKb(sc.max_file_bytes)],
+    ["Сценарії", "до " + sc.max + " сценаріїв, до " + sc.max_steps + " кроків у кожному; пауза після кроку 0–" + sc.max_pause_s + " с (" + fmtDur(sc.max_pause_s) + "); файл scenarios.json до " +
+      fmtKb(sc.max_file_bytes) + ", запит на збереження до " + fmtKb(sc.max_body_bytes || l.put_body_bytes.scenarios) + ". " + psramBasis(sc)],
     ["Історія запусків сценаріїв", "на SD: поточний файл до " + fmtKb(sc.history_file_bytes || 131072) + " і один попередній; продовження після перезапуску: перерва до " + (sc.max_resume_within_min || 1440) + " хв"],
     ["Тригер споживання", "поріг 0–" + pr.max_watts + " Вт; тривалість " + pr.min_for_s + "–" + pr.max_for_s + " с (не довше за історію показників); розігрів 0–" + pr.max_warmup_s + " с; умова перевіряється кожні " + pr.check_every_s + " с"],
     ["Пристрої", "до " + dv.max + " пристроїв; файл devices.json до " + fmtKb(dv.max_file_bytes)],
@@ -374,7 +380,7 @@ function viewScenarios() {
       const l = j.limits || {}, pr = l.power_rule || {};
       limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s, watts: pr.max_watts || 20000, forMin: pr.min_for_s || 10,
         forMax: pr.max_for_s || 900, warmup: pr.max_warmup_s || 3600, fileBytes: l.max_file_bytes || 32768,
-        historyBytes: l.history_file_bytes || 131072, resumeMax: l.max_resume_within_min || 1440 };
+        historyBytes: l.history_file_bytes || 131072, resumeMax: l.max_resume_within_min || 1440, basis: l.basis ? psramBasis(l) : "" };
       info = { sd: j.sd, error: j.error };
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
       if (!keepEdits) rows = j.scenarios.map(fromServer);
@@ -580,7 +586,7 @@ function viewScenarios() {
         "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж.")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
-      limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Історія запусків: до 2 × " + fmtKb(limits.historyBytes) + " на SD. Усі ліміти: вкладка «Статус»."));
+      limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Історія запусків: до 2 × " + fmtKb(limits.historyBytes) + " на SD. " + limits.basis + " Усі ліміти: вкладка «Статус»."));
     if (!rows.length) out.push(note("warn", "Сценаріїв ще немає. Натисніть «Додати сценарій»."));
     rows.forEach((r, i) => out.push(card(r, i)));
     out.push(E("div", { class: "row" },

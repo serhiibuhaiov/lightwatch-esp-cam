@@ -8,6 +8,7 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -146,8 +147,8 @@ bool parse(const String& raw, std::vector<Def>& out, String& err) {
     err = "\"scenarios\" must be an array";
     return false;
   }
-  if (arr.size() > kMaxScenarios) {
-    err = String("more than ") + String(static_cast<unsigned>(kMaxScenarios)) + " scenarios";
+  if (arr.size() > maxScenarios()) {
+    err = String("more than ") + String(static_cast<unsigned>(maxScenarios())) + " scenarios";
     return false;
   }
 
@@ -360,7 +361,7 @@ void load() {
     // complete temporary file. Never replace that with an empty template.
     String tmp, tmpErr;
     std::vector<Def> tmpList;
-    if (Storage::sdReadAll(kTmp, tmp, kMaxFileBytes) && parse(tmp, tmpList, tmpErr) && Storage::sdReplace(kTmp, kPath)) {
+    if (Storage::sdReadAll(kTmp, tmp, maxFileBytes()) && parse(tmp, tmpList, tmpErr) && Storage::sdReplace(kTmp, kPath)) {
       list = tmpList;
       fileFound = true;
       LOGW(TAG, "promoted %s to %s after an interrupted save", kTmp, kPath);
@@ -379,7 +380,7 @@ void load() {
   } else {
     fileFound = true;
     String raw, err;
-    if (!Storage::sdReadAll(kPath, raw, kMaxFileBytes)) {
+    if (!Storage::sdReadAll(kPath, raw, maxFileBytes())) {
       error = String("cannot read ") + kPath + " (too large or card error)";
       LOGE(TAG, "%s", error.c_str());
       replace = false;
@@ -511,12 +512,16 @@ class BoardEnv : public ScenarioEngine::Env {
 
 std::string clip(const std::string& s) { return s.size() > kWhyMaxChars ? s.substr(0, kWhyMaxChars) : s; }
 
-String runsText(const std::vector<ScenarioEngine::Snapshot>& runs, uint32_t epoch) {
+// /runs.json for the alive runs; `count` = how many. Caller holds gMux (the engine hands the runs over one at a time, the
+// document lives in PSRAM: no copy of all runs in internal RAM, which the SD card's DMA needs at the same moment).
+String runsTextLocked(uint32_t epoch, size_t& count) {
   JsonDocument doc(PsramAllocator::instance());
   doc["version"] = 1;
   doc["saved_epoch"] = epoch;
   JsonArray arr = doc["runs"].to<JsonArray>();
-  for (const ScenarioEngine::Snapshot& s : runs) {
+  count = 0;
+  gEngine->forEachSnapshot([&](const ScenarioEngine::Snapshot& s) {
+    ++count;
     JsonObject o = arr.add<JsonObject>();
     o["name"] = s.name;
     o["trigger"] = s.trigger;
@@ -546,24 +551,24 @@ String runsText(const std::vector<ScenarioEngine::Snapshot>& runs, uint32_t epoc
       a.add(st.pauseAfterS);
     }
     JsonArray steps = o["steps"].to<JsonArray>();
-    for (const ScenarioEngine::StepRun& sr : s.steps) {
+    for (size_t i = 0; i < s.steps.size(); ++i) {
+      const ScenarioEngine::StepRun& sr = s.steps[i];
       JsonArray a = steps.add<JsonArray>();  // [state, attempts, pause_s, at_s, why]
       a.add(static_cast<int>(sr.state));
       a.add(sr.attempts);
       a.add(sr.pauseS);
       a.add(sr.atS);
-      a.add(clip(sr.why));
+      a.add(clip(s.whys.get(i)));
     }
-  }
+  });
   String out;
   serializeJson(doc, out);
   return out;
 }
 
-// Reads the runs a restart interrupted. Nothing (and no error) when there is no card or no file.
-void readRuns(std::vector<ScenarioEngine::Snapshot>& out, uint32_t& savedEpoch) {
-  out.clear();
-  savedEpoch = 0;
+// Reads the runs a restart interrupted and hands them to `fn` one at a time (with the time they were saved, 0 if unknown):
+// 24 runs at once would be ~35 KB of internal RAM at boot. Nothing (and no error) when there is no card or no file.
+void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine::Snapshot&)>& fn) {
   if (!Storage::sdMounted()) return;
   String raw;
   // A save removes the old file before renaming the new one: a power cut in between leaves only the temporary file.
@@ -573,7 +578,7 @@ void readRuns(std::vector<ScenarioEngine::Snapshot>& out, uint32_t& savedEpoch) 
     LOGW(TAG, "%s is not valid JSON: the interrupted runs are not continued", kRunsPath);
     return;
   }
-  savedEpoch = doc["saved_epoch"] | 0u;
+  const uint32_t savedEpoch = doc["saved_epoch"] | 0u;
   for (JsonObjectConst o : doc["runs"].as<JsonArrayConst>()) {
     ScenarioEngine::Snapshot s;
     s.name = o["name"] | "";
@@ -610,10 +615,10 @@ void readRuns(std::vector<ScenarioEngine::Snapshot>& out, uint32_t& savedEpoch) 
       sr.attempts = a[1] | 0;
       sr.pauseS = a[2] | 0;
       sr.atS = a[3] | 0u;
-      sr.why = a[4] | "";
+      s.whys.set(s.steps.size(), a[4] | "");
       s.steps.push_back(sr);
     }
-    if (!s.name.empty()) out.push_back(std::move(s));
+    if (!s.name.empty()) fn(savedEpoch, s);
   }
 }
 
@@ -621,16 +626,15 @@ uint32_t gLastRunsSaveMs = 0;
 bool gRunsDirty = false;
 bool gRunsFileThere = false;  // so that an empty list removes the file once, not on every change
 
-void saveRuns(const std::vector<ScenarioEngine::Snapshot>& runs) {
+// Outside the lock: the card.
+void saveRuns(const String& text, size_t count) {
   gLastRunsSaveMs = millis();
   if (!Storage::sdMounted()) return;
-  if (runs.empty()) {
+  if (!count) {
     if (gRunsFileThere) Storage::sdRemove(kRunsPath);
     gRunsFileThere = false;
     return;
   }
-  const time_t now = time(nullptr);
-  const String text = runsText(runs, now > 1700000000 ? static_cast<uint32_t>(now) : 0);
   if (text.length() > kRunsMaxBytes || !Storage::sdWriteAtomic(kRunsPath, kRunsTmp, text)) {
     LOGW(TAG, "could not save the alive runs to %s (%u bytes)", kRunsPath, static_cast<unsigned>(text.length()));
     return;
@@ -641,10 +645,13 @@ void saveRuns(const std::vector<ScenarioEngine::Snapshot>& runs) {
 // ---- the history of the runs --------------------------------------------------------------------------------------------
 
 uint32_t gHistoryNextId = 1;
-std::vector<String> gHistoryPending;  // lines made under gMux, written to the card by the engine task
+// Lines made under gMux, written to the card by the engine task. One buffer, not a String per line: 24 runs ending at once
+// would otherwise hold ~60 KB of small strings in internal RAM; a buffer over 4 KB goes to PSRAM by itself.
+String gHistoryPending;
+constexpr size_t kHistoryPendingMax = 65536;  // the card is away for long: later lines are dropped
 
 void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
-  JsonDocument doc;  // the key order matters: GET /api/scenarios/history finds a scenario by `{"id":N,"name":"..."`
+  JsonDocument doc(PsramAllocator::instance());  // the key order matters: GET /api/scenarios/history finds a scenario by `{"id":N,"name":"..."`
   doc["id"] = gHistoryNextId++;
   doc["name"] = name;
   doc["trigger"] = r.trigger;
@@ -678,21 +685,20 @@ void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
     const std::string detail = clip(ScenarioEngine::stepDetail(r, i));
     if (!detail.empty()) o["detail"] = detail;
   }
-  String line;
+  if (gHistoryPending.length() >= kHistoryPendingMax) return;
+  String line;  // serializeJson() replaces the content of a String: one line at a time, then appended
   serializeJson(doc, line);
-  if (gHistoryPending.size() < 64) gHistoryPending.push_back(line);  // the card is gone for long: the oldest lines win
+  if (gHistoryPending.isEmpty()) gHistoryPending.reserve(4096);  // > 4 KB: PSRAM when the board has it
+  gHistoryPending += line;
+  gHistoryPending += '\n';
 }
 
-void appendHistory(const std::vector<String>& lines) {
-  if (lines.empty() || !Storage::sdMounted()) return;
+void appendHistory(const String& lines) {
+  if (lines.isEmpty() || !Storage::sdMounted()) return;
   Storage::sdMkdir(kHistoryDir);
   if (Storage::sdSize(kHistoryPath) > static_cast<long>(kHistoryFileBytes)) Storage::sdReplace(kHistoryPath, kHistoryOld);
-  for (const String& line : lines) {
-    const String l = line + "\n";
-    if (!Storage::sdAppend(kHistoryPath, reinterpret_cast<const uint8_t*>(l.c_str()), l.length())) {
-      LOGW(TAG, "could not write the history of the runs");
-      return;
-    }
+  if (!Storage::sdAppend(kHistoryPath, reinterpret_cast<const uint8_t*>(lines.c_str()), lines.length())) {
+    LOGW(TAG, "could not write the history of the runs");
   }
 }
 
@@ -729,24 +735,29 @@ void engineTask(void*) {
   for (;;) {
     uint32_t sleepMs;
     bool save = false;
-    std::vector<ScenarioEngine::Snapshot> snaps;
-    std::vector<String> lines;
+    String runsText;
+    size_t runsCount = 0;
+    String lines;
     {
       Lock lock;
       sleepMs = gEngine->tick();
       if (gEngine->takeDirty()) gRunsDirty = true;
       const uint32_t sinceSave = millis() - gLastRunsSaveMs;
       if ((gRunsDirty && sinceSave >= kRunsSaveGapMs) || (gEngine->alive() && sinceSave >= kRunsCheckpointMs)) {
-        snaps = gEngine->snapshot();
+        const time_t now = time(nullptr);
+        runsText = runsTextLocked(now > 1700000000 ? static_cast<uint32_t>(now) : 0, runsCount);
         save = true;
         gRunsDirty = false;
       } else if (gRunsDirty) {
         sleepMs = std::min<uint32_t>(sleepMs, kRunsSaveGapMs - sinceSave);
       }
-      lines.swap(gHistoryPending);
+      if (!gHistoryPending.isEmpty()) {
+        lines = gHistoryPending;
+        gHistoryPending = String();
+      }
     }
     // The card, outside the lock: the web page and the API never wait for it.
-    if (save) saveRuns(snaps);
+    if (save) saveRuns(runsText, runsCount);
     appendHistory(lines);
     const int32_t toWatch = static_cast<int32_t>(nextWatch - millis());
     if (toWatch <= 0) {
@@ -954,31 +965,28 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
                       : reason == ESP_RST_SW     ? Cause::Software
                       : reason == ESP_RST_BROWNOUT ? Cause::Brownout
                                                    : Cause::Crash;
-  // The runs this restart interrupted, and how long the board was away (known when the clock was set before and after:
-  // it survives a software restart, a panic and a watchdog, not a power cut).
-  std::vector<ScenarioEngine::Snapshot> saved;
-  uint32_t savedEpoch = 0;
-  readRuns(saved, savedEpoch);
-  gRunsFileThere = !saved.empty();
-  const time_t now = time(nullptr);
-  const bool gapKnown = savedEpoch && now > 1700000000;
-  const uint32_t gapS = gapKnown && static_cast<uint32_t>(now) > savedEpoch ? static_cast<uint32_t>(now) - savedEpoch : 0;
-  const uint32_t elapsedMs = gapKnown ? gapS * 1000 : millis();
   {
     Lock lock;
     gHistoryNextId = lastHistoryId() + 1;
-    for (const ScenarioEngine::Snapshot& s : saved) {
+    // The runs this restart interrupted, and how long the board was away (known when the clock was set before and after:
+    // it survives a software restart, a panic and a watchdog, not a power cut).
+    const time_t now = time(nullptr);
+    readRuns([&](uint32_t savedEpoch, const ScenarioEngine::Snapshot& s) {
+      gRunsFileThere = true;
+      const bool gapKnown = savedEpoch && now > 1700000000;
+      const uint32_t gapS = gapKnown && static_cast<uint32_t>(now) > savedEpoch ? static_cast<uint32_t>(now) - savedEpoch : 0;
+      const uint32_t elapsedMs = gapKnown ? gapS * 1000 : millis();
       const Def* d = nullptr;
       for (const Def& x : gDefs) {
         if (x.name == s.name.c_str()) d = &x;
       }
       if (!d) {
         gEngine->interrupted(s, "interrupted by a restart; the scenario no longer exists");
-        continue;
+        return;
       }
       if (!d->enabled && s.trigger != "manual") {
         gEngine->interrupted(s, "interrupted by a restart; the scenario is disabled now");
-        continue;
+        return;
       }
       bool defChanged = false;
       if (s.state == ScenarioEngine::RunState::Running) {
@@ -999,7 +1007,7 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
       } else {
         gEngine->interrupted(s, why);
       }
-    }
+    });
     for (const Def& d : gDefs) {
       if (!d.enabled || d.trigger != kTriggerPowerOn) continue;
       const ScenarioEngine::Run* r = gEngine->run(d.name.c_str());
@@ -1164,16 +1172,24 @@ bool history(const String& name, size_t limit, uint32_t before, String& out) {
   return true;
 }
 
+size_t maxScenarios() { return psramAvailable() ? kMaxScenariosPsram : kMaxScenariosNoPsram; }
+size_t maxFileBytes() { return psramAvailable() ? kMaxFileBytesPsram : kMaxFileBytesNoPsram; }
+size_t maxBodyBytes() { return psramAvailable() ? kMaxBodyBytesPsram : kMaxBodyBytesNoPsram; }
+
 uint32_t maxForS() {
   const uint32_t span = (Devices::kHistoryCapacity - 2) * static_cast<uint32_t>(Devices::pollIntervalSec());
   return span < kMaxForS ? span : kMaxForS;
 }
 
 void limits(JsonObject out) {
-  out["max"] = kMaxScenarios;
+  out["basis"] = psramAvailable() ? "psram" : "internal";  // what the three limits below were chosen for
+  out["max"] = maxScenarios();
+  out["max_with_psram"] = kMaxScenariosPsram;
+  out["max_without_psram"] = kMaxScenariosNoPsram;
+  out["max_body_bytes"] = maxBodyBytes();
   out["max_steps"] = kMaxSteps;
   out["max_pause_s"] = kMaxPauseS;
-  out["max_file_bytes"] = kMaxFileBytes;
+  out["max_file_bytes"] = maxFileBytes();
   out["history_file_bytes"] = kHistoryFileBytes;  // two files: the current one and the one before
   out["max_resume_within_min"] = ScenarioEngine::kMaxResumeWithinMin;
   JsonObject p = out["power_rule"].to<JsonObject>();
@@ -1186,7 +1202,7 @@ void limits(JsonObject out) {
 
 String configJson() {
   JsonDocument doc(PsramAllocator::instance());
-  doc["max"] = kMaxScenarios;
+  doc["max"] = maxScenarios();
   doc["max_steps"] = kMaxSteps;
   doc["max_pause_s"] = kMaxPauseS;
   limits(doc["limits"].to<JsonObject>());
@@ -1242,16 +1258,16 @@ SaveResult save(const String& json) {
     }
   }
   String text = fileText(next, true);  // readable on a PC; without the indentation if that does not fit
-  if (text.length() > kMaxFileBytes) text = fileText(next, false);
-  if (text.length() > kMaxFileBytes) {
+  if (text.length() > maxFileBytes()) text = fileText(next, false);
+  if (text.length() > maxFileBytes()) {
     r.invalid = true;
-    r.error = "the scenarios do not fit in the file (" + String(static_cast<unsigned>(kMaxFileBytes)) + " bytes): fewer scenarios or steps";
+    r.error = "the scenarios do not fit in the file (" + String(static_cast<unsigned>(maxFileBytes())) + " bytes): fewer scenarios or steps";
     return r;
   }
 
   // One generation of backup, so a wrong edit does not destroy the previous list.
   String old;
-  if (Storage::sdReadAll(kPath, old, kMaxFileBytes) && !old.isEmpty()) {
+  if (Storage::sdReadAll(kPath, old, maxFileBytes()) && !old.isEmpty()) {
     if (!Storage::sdWriteAtomic(kBak, kBakTmp, old)) LOGW(TAG, "could not write the backup %s", kBak);
   }
   if (!Storage::sdWriteAtomic(kPath, kTmp, text)) {

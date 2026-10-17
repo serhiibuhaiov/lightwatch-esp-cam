@@ -12,6 +12,7 @@
 
 #include "logger.h"
 #include "power_rule.h"
+#include "psram_alloc.h"
 #include "storage.h"
 
 namespace Devices {
@@ -71,7 +72,7 @@ struct SaveLock {
 // `keep` (the current list) lets a device with an empty or missing key inherit the key of the
 // device with the same name; without it the key is mandatory (the file on the card).
 bool parse(const String& raw, std::vector<Device>& out, String& err, const std::vector<Device>* keep) {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   DeserializationError e = deserializeJson(doc, raw);
   if (e) {
     err = String("invalid JSON: ") + e.c_str();
@@ -206,7 +207,7 @@ void writeMeters(JsonObject m, const Device& d) {
 
 // The file as it is stored on the card (with the keys).
 String fileText(const std::vector<Device>& list) {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["version"] = 1;
   JsonArray arr = doc["devices"].to<JsonArray>();
   for (const Device& d : list) {
@@ -315,7 +316,7 @@ void load() {
 }
 
 String configJson() {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["max"] = kMaxDevices;
   JsonArray arr = doc["devices"].to<JsonArray>();
   for (const Device& d : list()) {
@@ -783,7 +784,7 @@ bool historyJson(const String& name, size_t limit, String& out) {
   const uint32_t nowUp = uptimeS();
   const time_t nowEpoch = time(nullptr);
   const bool timeValid = nowEpoch > 1700000000;
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["name"] = name;
   doc["capacity"] = kHistoryCapacity;
   doc["poll_interval_s"] = pollIntervalSec();

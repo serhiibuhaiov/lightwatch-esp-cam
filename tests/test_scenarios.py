@@ -133,7 +133,7 @@ def bad_docs():
     yield "step-pause-too-big", {"scenarios": [ok(steps=[{"device": "a", "pause_after_s": 99999}])]}
     yield "step-pause-text", {"scenarios": [ok(steps=[{"device": "a", "pause_after_s": "5"}])]}
     yield "too-many-steps", {"scenarios": [ok(steps=[{"device": "a"}] * 25)]}
-    yield "too-many-scenarios", {"scenarios": [scenario(f"zz-{i}") for i in range(17)]}
+    yield "too-many-scenarios", {"scenarios": [scenario(f"zz-{i}") for i in range(25)]}  # over both limits (24 with PSRAM, 16 without)
 
 
 @pytest.mark.parametrize("label,doc", list(bad_docs()), ids=[l for l, _ in bad_docs()])
@@ -151,7 +151,7 @@ def test_broken_json_and_wrong_content_type(dev, guard):
     assert r.status_code == 400
     r = dev.request("PUT", "/api/scenarios", data="scenarios=1")  # a form post: not JSON
     assert r.status_code in (400, 415)
-    r = dev.request("PUT", "/api/scenarios", data="x" * 50000, headers={"Content-Type": "application/json"})  # over 49152
+    r = dev.request("PUT", "/api/scenarios", data="x" * 70000, headers={"Content-Type": "application/json"})  # over 65536 (and 49152)
     assert r.status_code == 413
 
 
@@ -178,8 +178,8 @@ def test_round_trip_order_and_fields(dev, guard):
 
 
 def test_the_documented_maximum_fits_and_is_saved(dev, guard):
-    """The maximum (16 scenarios x 24 steps) with long names and every field set (about 38 KB of JSON): more than the
-    8 KB that the other PUTs accept. Saved, read back and the board keeps its memory."""
+    """The maximum (24 scenarios x 24 steps with PSRAM, 16 x 24 without) with long names and every field set (up to ~58 KB of
+    JSON): more than the 8 KB that the other PUTs accept. Saved, read back and the board keeps its memory."""
     limit = listing(dev)["max"]
     step = {"device": "zz-test-socket-with-a-long-name", "action": "off", "enabled": True, "pause_after_s": 300}
     mine = [scenario(f"{TEST}max{i}", [dict(step) for _ in range(24)]) for i in range(limit - len(guard))]
@@ -187,7 +187,8 @@ def test_the_documented_maximum_fits_and_is_saved(dev, guard):
     r = put(dev, guard + mine)
     assert r.status_code == 200, r.text
     got = listing(dev)["scenarios"]
-    assert len(got) == limit == 16 and all(len(s["steps"]) == 24 for s in got if s["name"].startswith(TEST + "max"))
+    psram = dev.get("/api/status").json()["memory"]["psram_total"] > 0
+    assert len(got) == limit == (24 if psram else 16) and all(len(s["steps"]) == 24 for s in got if s["name"].startswith(TEST + "max"))
     assert dev.get("/api/status").json()["heap_free"] > heap - 20000
     assert put(dev, guard).status_code == 200
 
