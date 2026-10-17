@@ -16,6 +16,7 @@
 
 #include "devices.h"
 #include "engine.h"
+#include "http_out.h"
 #include "logger.h"
 #include "power_rule.h"
 #include "psram_alloc.h"
@@ -56,7 +57,8 @@ constexpr uint32_t kDefaultWarmupS = 60;
 constexpr uint32_t kWatchTickMs = 3000;  // how often the conditions are looked at
 
 struct Step {
-  uint16_t dev = 0;          // index into Def::devices
+  bool http = false;         // an HTTP step (action "http"): `dev` indexes Def::requests
+  uint16_t dev = 0;          // index into Def::devices (or Def::requests)
   bool on = true;            // the action: switch the device on (default) or off
   bool enabled = true;
   int32_t pauseAfterS = -1;  // -1: the scenario's default
@@ -70,6 +72,7 @@ struct Def {
   // In PSRAM when the board has it (ScenarioEngine::setAllocator in begin()), like the runs: 24 scenarios x 24 steps
   // would otherwise take ~16 KB of internal RAM.
   ScenarioEngine::List<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
+  ScenarioEngine::List<ScenarioEngine::HttpReq> requests;  // the requests of the HTTP steps (URL up to 2 KB, body up to 16 KB)
   ScenarioEngine::List<Step> steps;
   // power_below / power_above only:
   String whenDevice;
@@ -241,19 +244,42 @@ bool parse(const String& raw, Defs& out, String& err) {
         return false;
       }
       Step st;
-      if (!sv["device"].is<const char*>() || !validName(sv["device"].as<const char*>())) {
+      if (sv["action"] == "http") {  // {action: "http", method, url, content_type, body, timeout_ms, enabled, pause_after_s}
+        if (!sv["device"].isNull()) {
+          err = at + ".device is not for an http step";
+          return false;
+        }
+        HttpOut::Job q;
+        if (!HttpOut::parse(sv, q, err, at)) return false;
+        ScenarioEngine::HttpReq req;
+        req.post = q.method == HttpOut::Method::Post;
+        req.url.assign(q.url.c_str(), q.url.size());
+        req.contentType.assign(q.contentType.c_str(), q.contentType.size());
+        req.body.assign(q.body.c_str(), q.body.size());
+        req.timeoutMs = q.timeoutMs;
+        st.http = true;
+        st.dev = static_cast<uint16_t>(d.requests.size());
+        d.requests.push_back(std::move(req));
+      } else if (!sv["method"].isNull() || !sv["url"].isNull() || !sv["body"].isNull() || !sv["content_type"].isNull() ||
+                 !sv["timeout_ms"].isNull()) {
+        err = at + ": method, url, content_type, body and timeout_ms are for an http step (action \"http\")";
+        return false;
+      }
+      if (!st.http && (!sv["device"].is<const char*>() || !validName(sv["device"].as<const char*>()))) {
         err = at + ".device must be a device name (1..32 chars of a-z 0-9 _ -)";
         return false;
       }
-      const String device = sv["device"].as<const char*>();
-      size_t k = 0;
-      while (k < d.devices.size() && d.devices[k] != device) ++k;
-      if (k == d.devices.size()) d.devices.push_back(device);
-      st.dev = static_cast<uint16_t>(k);
-      if (!sv["action"].isNull()) {
+      if (!st.http) {
+        const String device = sv["device"].as<const char*>();
+        size_t k = 0;
+        while (k < d.devices.size() && d.devices[k] != device) ++k;
+        if (k == d.devices.size()) d.devices.push_back(device);
+        st.dev = static_cast<uint16_t>(k);
+      }
+      if (!st.http && !sv["action"].isNull()) {
         const String a = sv["action"].is<const char*>() ? String(sv["action"].as<const char*>()) : String("");
         if (a != "on" && a != "off") {
-          err = at + ".action must be \"on\" or \"off\"";
+          err = at + ".action must be \"on\", \"off\" or \"http\"";
           return false;
         }
         st.on = a == "on";
@@ -308,6 +334,25 @@ void writeOnInterrupt(JsonObject o, const ScenarioEngine::OnInterrupt& p) {
   o["resume_within_min"] = p.resumeWithinMin;
 }
 
+// One step as the file and GET /api/scenarios have it.
+void writeStep(JsonObject so, const Def& d, const Step& s) {
+  if (s.http) {
+    const ScenarioEngine::HttpReq& q = d.requests[s.dev];
+    so["action"] = "http";
+    so["method"] = q.post ? "POST" : "GET";
+    so["url"] = q.url.c_str();
+    if (q.post) {
+      so["content_type"] = q.contentType.empty() ? HttpOut::kDefaultContentType : q.contentType.c_str();
+      so["body"] = q.body.c_str();
+    }
+    so["timeout_ms"] = q.timeoutMs;
+  } else {
+    so["device"] = d.device(s);
+    so["action"] = s.on ? "on" : "off";
+  }
+  so["enabled"] = s.enabled;
+}
+
 String fileText(const Defs& list, bool pretty) {
   JsonDocument doc(PsramAllocator::instance());
   doc["version"] = 1;
@@ -329,9 +374,7 @@ String fileText(const Defs& list, bool pretty) {
     JsonArray steps = o["steps"].to<JsonArray>();
     for (const Step& s : d.steps) {
       JsonObject so = steps.add<JsonObject>();
-      so["device"] = d.device(s);
-      so["action"] = s.on ? "on" : "off";
-      so["enabled"] = s.enabled;
+      writeStep(so, d, s);
       if (s.pauseAfterS >= 0) so["pause_after_s"] = s.pauseAfterS;
     }
   }
@@ -424,9 +467,11 @@ class BoardEnv : public ScenarioEngine::Env {
       out.defaultPauseS = d.defaultPauseS;
       out.devices.reserve(d.devices.size());
       for (const String& n : d.devices) out.devices.push_back(n.c_str());
+      out.requests = d.requests;
       out.steps.reserve(d.steps.size());
       for (const Step& s : d.steps) {
         ScenarioEngine::StepDef st;
+        st.kind = s.http ? ScenarioEngine::StepKind::Http : ScenarioEngine::StepKind::Device;
         st.dev = s.dev;
         st.on = s.on;
         st.enabled = s.enabled;
@@ -476,8 +521,41 @@ class BoardEnv : public ScenarioEngine::Env {
     return nextId_;
   }
 
+  uint32_t submitHttp(const ScenarioEngine::HttpReq& req) override {
+    auto job = std::make_shared<HttpOut::Job>();
+    job->method = req.post ? HttpOut::Method::Post : HttpOut::Method::Get;
+    job->timeoutMs = req.timeoutMs;
+    if (!job->url.assign(req.url.data(), req.url.size()) || !job->contentType.assign(req.contentType.data(), req.contentType.size()) ||
+        !job->body.assign(req.body.data(), req.body.size())) {
+      job->result.error = "memory";
+      job->result.detail = "no memory for the request";
+      job->done.store(true, std::memory_order_release);
+    } else if (!HttpOut::submit(job)) {
+      return 0;  // its list is full
+    }
+    if (++nextId_ == 0) ++nextId_;
+    httpJobs_[nextId_] = job;
+    return nextId_;
+  }
+
   ScenarioEngine::JobStatus poll(uint32_t id) override {
     ScenarioEngine::JobStatus s;
+    auto hj = httpJobs_.find(id);
+    if (hj != httpJobs_.end()) {
+      const HttpOut::Job& job = *hj->second;
+      s.done = job.done.load(std::memory_order_acquire);
+      if (!s.done) return s;
+      const HttpOut::Result& r = job.result;
+      s.ok = r.ok;
+      s.ms = r.ms;
+      s.error = r.error.c_str();
+      if (r.ok) {
+        s.detail = "answered " + std::to_string(r.status) + " in " + std::to_string(r.ms) + " ms";
+      } else {
+        s.detail = r.detail.c_str();
+      }
+      return s;
+    }
     auto it = jobs_.find(id);
     if (it == jobs_.end()) {
       s.done = true;
@@ -496,6 +574,12 @@ class BoardEnv : public ScenarioEngine::Env {
   }
 
   void release(uint32_t id, bool withdraw) override {
+    auto hj = httpJobs_.find(id);
+    if (hj != httpJobs_.end()) {
+      if (withdraw) hj->second->cancelled.store(true);  // still queued: dropped, never sent
+      httpJobs_.erase(hj);
+      return;
+    }
     auto it = jobs_.find(id);
     if (it == jobs_.end()) return;
     if (withdraw) it->second->cancelled.store(true);  // still queued: dropped, never reaches the socket
@@ -508,6 +592,7 @@ class BoardEnv : public ScenarioEngine::Env {
 
  private:
   std::map<uint32_t, std::shared_ptr<Tuya::Job>> jobs_;
+  std::map<uint32_t, std::shared_ptr<HttpOut::Job>> httpJobs_;  // the same id space as jobs_
   uint32_t nextId_ = 0;
 };
 
@@ -563,13 +648,22 @@ String runsTextLocked(uint32_t epoch, size_t& count) {
     def["default_pause_s"] = s.def.defaultPauseS;
     JsonArray devs = def["devices"].to<JsonArray>();
     for (const ScenarioEngine::Text& n : s.def.devices) devs.add(n.c_str());
+    // An HTTP request only as "GET http://host": for the history's label. A run that is continued takes its steps from the
+    // definitions (an edit since shows in def_hash), so the URL's path, the body and any token stay out of this file.
+    JsonArray reqs = def["requests"].to<JsonArray>();
+    for (const ScenarioEngine::HttpReq& q : s.def.requests) {
+      JsonArray a = reqs.add<JsonArray>();  // [post, "http://host"]
+      a.add(q.post);
+      a.add("http://" + ScenarioEngine::hostOf(q.url));
+    }
     JsonArray dsteps = def["steps"].to<JsonArray>();
     for (const ScenarioEngine::StepDef& st : s.def.steps) {
-      JsonArray a = dsteps.add<JsonArray>();  // [dev, on, enabled, pause_after_s]
+      JsonArray a = dsteps.add<JsonArray>();  // [dev, on, enabled, pause_after_s, http]
       a.add(st.dev);
       a.add(st.on);
       a.add(st.enabled);
       a.add(st.pauseAfterS);
+      if (st.kind == ScenarioEngine::StepKind::Http) a.add(1);
     }
     JsonArray steps = o["steps"].to<JsonArray>();
     for (size_t i = 0; i < s.steps.size(); ++i) {
@@ -631,13 +725,20 @@ void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine
     s.def.name = s.name;
     s.def.defaultPauseS = def["default_pause_s"] | 0;
     for (JsonVariantConst n : def["devices"].as<JsonArrayConst>()) s.def.devices.push_back(n.as<const char*>() ? n.as<const char*>() : "");
+    for (JsonArrayConst a : def["requests"].as<JsonArrayConst>()) {
+      ScenarioEngine::HttpReq q;
+      q.post = a[0] | false;
+      q.url = a[1] | "";
+      s.def.requests.push_back(std::move(q));
+    }
     for (JsonArrayConst a : def["steps"].as<JsonArrayConst>()) {
       ScenarioEngine::StepDef st;
       st.dev = a[0] | 0;
       st.on = a[1] | true;
       st.enabled = a[2] | true;
       st.pauseAfterS = a[3] | -1;
-      if (st.dev >= s.def.devices.size()) continue;  // damaged: leave the step out
+      st.kind = (a[4] | 0) == 1 ? ScenarioEngine::StepKind::Http : ScenarioEngine::StepKind::Device;
+      if (st.dev >= (st.kind == ScenarioEngine::StepKind::Http ? s.def.requests.size() : s.def.devices.size())) continue;  // damaged
       s.def.steps.push_back(st);
     }
     for (JsonArrayConst a : o["steps"].as<JsonArrayConst>()) {
@@ -708,8 +809,13 @@ void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
   for (size_t i = 0; i < r.steps.size() && i < r.def.steps.size(); ++i) {
     const ScenarioEngine::StepRun& s = r.steps[i];
     JsonObject o = steps.add<JsonObject>();
-    o["device"] = r.def.device(i);
-    o["action"] = r.def.steps[i].on ? "on" : "off";
+    if (r.def.isHttp(i)) {
+      o["http"] = r.def.label(i);  // "POST api.telegram.org": never the path or the body
+      o["action"] = "http";
+    } else {
+      o["device"] = r.def.device(i);
+      o["action"] = r.def.steps[i].on ? "on" : "off";
+    }
     o["state"] = ScenarioEngine::stepStateName(s.state);
     o["attempts"] = s.attempts;
     if (s.atS) o["at_s"] = s.atS;
@@ -821,20 +927,24 @@ void refreshWatched() {
 }
 
 void watchTick() {
-  Defs rules;
+  struct Rule {  // what a look needs of an enabled power rule (not its steps: an HTTP step may carry 16 KB of body)
+    String name, trigger, whenDevice;
+    uint32_t watts, forS, warmupS;
+  };
+  std::vector<Rule> rules;
   {
     Lock lock;
     for (const Def& d : gDefs) {
-      if (d.enabled && d.isPower()) rules.push_back(d);
+      if (d.enabled && d.isPower()) rules.push_back(Rule{d.name, d.trigger, d.whenDevice, d.watts, d.forS, d.warmupS});
     }
     for (auto it = gWatch.begin(); it != gWatch.end();) {  // forget the rules that are gone or switched off
       bool present = false;
-      for (const Def& d : rules) present = present || d.name == it->first;
+      for (const Rule& d : rules) present = present || d.name == it->first;
       if (!present && !it->second.armed) gRunsDirty = true;
       it = present ? std::next(it) : gWatch.erase(it);
     }
   }
-  for (const Def& d : rules) {
+  for (const Rule& d : rules) {
     const bool below = d.trigger == kTriggerPowerBelow;
     Devices::PowerCheck pc = Devices::checkPower(d.whenDevice, below, d.watts, d.forS, d.warmupS);
     if (d.forS > (Devices::kHistoryCapacity - 2) * static_cast<uint32_t>(Devices::pollIntervalSec())) {
@@ -912,7 +1022,9 @@ uint32_t secondsUntil(uint32_t atMs) {
 }
 
 // The caller holds the lock. Strings go in as std::string, so ArduinoJson copies them.
-void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool full) {
+// `full`: the definition too (on_interrupt, when, the power rule's state, the steps' run state); `withSteps`: also the steps
+// as defined (HTTP steps carry their URL and body: up to 16 KB each, left out of the page's frequent polls).
+void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool full, bool withSteps = true) {
   using ScenarioEngine::RunState;
   o["name"] = d.name;
   o["enabled"] = d.enabled;
@@ -962,16 +1074,16 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
       }
     }
   }
-  JsonArray steps = o["steps"].to<JsonArray>();
-  for (const Step& s : d.steps) {
-    JsonObject so = steps.add<JsonObject>();
-    so["device"] = d.device(s);
-    so["action"] = s.on ? "on" : "off";
-    so["enabled"] = s.enabled;
-    if (s.pauseAfterS >= 0) {
-      so["pause_after_s"] = s.pauseAfterS;
-    } else {
-      so["pause_after_s"] = nullptr;
+  if (withSteps) {
+    JsonArray steps = o["steps"].to<JsonArray>();
+    for (const Step& s : d.steps) {
+      JsonObject so = steps.add<JsonObject>();
+      writeStep(so, d, s);
+      if (s.pauseAfterS >= 0) {
+        so["pause_after_s"] = s.pauseAfterS;
+      } else {
+        so["pause_after_s"] = nullptr;
+      }
     }
   }
   if (r && !r->steps.empty()) {
@@ -979,7 +1091,11 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
     for (size_t i = 0; i < r->steps.size(); ++i) {
       const ScenarioEngine::StepRun& s = r->steps[i];
       JsonObject ro = run.add<JsonObject>();
-      ro["device"] = r->def.device(i);
+      if (r->def.isHttp(i)) {
+        ro["http"] = r->def.label(i);
+      } else {
+        ro["device"] = r->def.device(i);
+      }
       ro["state"] = ScenarioEngine::stepStateName(s.state);
       ro["attempts"] = s.attempts;
       const std::string detail = ScenarioEngine::stepDetail(*r, i);
@@ -1113,7 +1229,7 @@ std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
       out.push_back(String("scenario '") + d.name + "', trigger: device '" + d.whenDevice + "' is not in the list");
     }
     for (size_t i = 0; i < d.steps.size(); ++i) {
-      if (d.steps[i].enabled && !known(d.device(d.steps[i]))) {
+      if (d.steps[i].enabled && !d.steps[i].http && !known(d.device(d.steps[i]))) {
         out.push_back(String("scenario '") + d.name + "', step " + String(static_cast<unsigned>(i + 1)) + ": device '" + d.device(d.steps[i]) +
                       "' is not in the list");
       }
@@ -1168,6 +1284,8 @@ void engineStats(JsonObject out) {
   out["slot_waits"] = s.slotWaits;
   out["slot_wait_max_ms"] = s.slotWaitMaxMs;
   out["queue_full"] = s.queueFull;
+  out["max_http_in_flight"] = ScenarioEngine::kMaxHttpInFlight;
+  out["http_requests"] = s.httpRequests;
   out["offline_attempts"] = s.offlineAttempts;
   out["offline_attempts_ok"] = s.offlineAttemptsOk;
   out["offline_attempt_ms"] = s.offlineAttemptMs;
@@ -1260,9 +1378,17 @@ void limits(JsonObject out) {
   p["max_for_s"] = maxForS();
   p["max_warmup_s"] = kMaxWarmupS;
   p["check_every_s"] = kWatchTickMs / 1000;
+  JsonObject h = out["http_step"].to<JsonObject>();  // an HTTP step's request (the same limits as POST /api/http/test)
+  h["max_url_bytes"] = HttpOut::kMaxUrlBytes;
+  h["max_body_bytes"] = HttpOut::kMaxBodyBytes;
+  h["max_content_type_bytes"] = HttpOut::kMaxContentTypeBytes;
+  h["timeout_ms"] = HttpOut::kDefaultTimeoutMs;
+  h["min_timeout_ms"] = HttpOut::kMinTimeoutMs;
+  h["max_timeout_ms"] = HttpOut::kMaxTimeoutMs;
+  h["max_in_flight"] = ScenarioEngine::kMaxHttpInFlight;  // requests of all scenarios in the HTTP lane at once
 }
 
-String configJson() {
+String configJson(bool stateOnly) {
   JsonDocument doc(PsramAllocator::instance());
   doc["max"] = maxScenarios();
   doc["max_steps"] = kMaxSteps;
@@ -1279,7 +1405,7 @@ String configJson() {
     doc["file_found"] = gInfo.fileFound;
     if (!gInfo.error.isEmpty()) doc["error"] = gInfo.error;
     JsonArray arr = doc["scenarios"].to<JsonArray>();
-    for (const Def& d : gDefs) describe(arr.add<JsonObject>(), d, gEngine ? gEngine->run(d.name.c_str()) : nullptr, true);
+    for (const Def& d : gDefs) describe(arr.add<JsonObject>(), d, gEngine ? gEngine->run(d.name.c_str()) : nullptr, true, !stateOnly);
   }
   String out;
   serializeJson(doc, out);

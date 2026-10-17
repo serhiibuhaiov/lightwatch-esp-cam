@@ -92,7 +92,8 @@ enum class StopResult { Stopping, NotFound, NotRunning };
 StopResult stop(const String& name);
 
 // JSON for GET /api/scenarios: the definitions (editor) with the last run of each (steps and their results).
-String configJson();
+// `stateOnly`: without the steps as defined (HTTP steps hold up to 16 KB of body each): what the page polls every few seconds.
+String configJson(bool stateOnly = false);
 
 // GET /api/scenarios/history: the ended runs, newest first, as {"runs":[...], "more":bool, "sd":bool}: at most `limit`, only
 // those older than the run with id `before` (0: from the newest), only of scenario `name` ("": all). False without a card.

@@ -1,8 +1,9 @@
-"""Outgoing HTTP requests (POST /api/http/test, the way an HTTP step of a scenario sends one).
+"""Outgoing HTTP requests: POST /api/http/test, and the HTTP steps of scenarios (action "http").
 
 The default suite checks the validation (nothing is sent) and sends plain HTTP to a fake server on this computer: the
 16 KB body arrives byte for byte, the status, the timeout, a refused connection, a name that does not resolve, and that
-the log shows the host but never the path. `-m internet` sends HTTPS to public servers: the certificate check, that
+the log shows the host but never the path. HTTP steps: validation, the document round trip, runs against the fake
+server (what arrives, the step's state and history, failures and retries) and a document near the PUT limit. `-m internet` sends HTTPS to public servers: the certificate check, that
 TLS keeps out of the internal RAM, and that a 16 KB body from PSRAM arrives intact over TLS.
 """
 import contextlib
@@ -18,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from fake_tuya import lan_ip_towards
+from test_scenarios import TEST, guard, listing, put, wait_state  # noqa: F401
+from test_interrupt import in_pause, reboot
 
 H = {"Content-Type": "application/json"}
 
@@ -264,3 +267,188 @@ def test_a_16_kb_body_from_psram_arrives_intact_over_tls(dev):
 def test_https_with_a_bad_certificate_fails(dev):
     j = send(dev, {"url": "https://self-signed.badssl.com/", "timeout_ms": 15000}).json()
     assert j["ok"] is False and j["error"] == "tls" and j["status"] is None, j
+
+
+# ---- HTTP steps in scenarios ---------------------------------------------------------------------------------------------
+
+def http_scenario(name, steps, **kw):
+    d = {"name": name, "enabled": False, "trigger": "manual", "default_pause_s": 0, "steps": steps}
+    d.update(kw)
+    return d
+
+
+def scn(dev, name, **params):
+    r = dev.get("/api/scenarios", params=params)
+    assert r.status_code == 200, r.text
+    return next(s for s in r.json()["scenarios"] if s["name"] == name)
+
+
+@pytest.mark.parametrize("step, words", [
+    ({"action": "http"}, "url is required"),
+    ({"action": "http", "url": "ftp://x/"}, "http:// or https://"),
+    ({"action": "http", "url": "http://x/", "device": "towel"}, "device is not for an http step"),
+    ({"action": "http", "url": "http://x/", "body": "a"}, "POST only"),
+    ({"action": "http", "method": "PUT", "url": "http://x/"}, "method"),
+    ({"action": "http", "method": "POST", "url": "http://x/", "body": "a" * 16385}, "longer than 16384"),
+    ({"action": "http", "url": "http://x/", "timeout_ms": 500}, "timeout_ms"),
+    ({"device": "towel", "action": "on", "url": "http://x/"}, "for an http step"),
+    ({"device": "towel", "action": "get"}, "\"on\", \"off\" or \"http\""),
+])
+def test_invalid_http_steps_are_rejected(dev, guard, step, words):
+    r = put(dev, guard + [http_scenario(TEST + "hv", [step])])
+    assert r.status_code == 400, r.text
+    assert words in r.json()["error"] and "steps[0]" in r.json()["error"], r.text
+
+
+def test_http_steps_round_trip_with_their_defaults(dev, guard):
+    steps = [{"action": "http", "url": "https://hc-ping.com/0000", "pause_after_s": 5},
+             {"action": "http", "method": "POST", "url": "https://api.telegram.org/bot1:x/sendMessage", "body": '{"text":"Привіт"}',
+              "timeout_ms": 15000, "enabled": False},
+             {"action": "http", "method": "POST", "url": "http://10.0.0.5/x", "content_type": "text/plain"}]
+    assert put(dev, guard + [http_scenario(TEST + "hrt", steps)]).status_code == 200
+    got = scn(dev, TEST + "hrt")["steps"]
+    assert got[0] == {"action": "http", "method": "GET", "url": "https://hc-ping.com/0000", "timeout_ms": 10000, "enabled": True, "pause_after_s": 5}
+    assert got[1] == {"action": "http", "method": "POST", "url": "https://api.telegram.org/bot1:x/sendMessage", "content_type": "application/json",
+                      "body": '{"text":"Привіт"}', "timeout_ms": 15000, "enabled": False, "pause_after_s": None}
+    assert got[2]["content_type"] == "text/plain" and got[2]["body"] == ""
+    light = scn(dev, TEST + "hrt", state=1)
+    assert "steps" not in light and light["state"] == "idle", light
+    assert dev.get("/api/scenarios", params={"state": 2}).status_code == 400
+
+
+def test_a_scenario_with_http_steps_sends_them_and_shows_only_the_host(dev, guard, fake):
+    body = ascii_text(16384, seed=11)
+    secret = "bot42:SECRET-" + ascii_text(10, seed=12).replace(" ", "x")
+    steps = [{"action": "http", "url": f"{fake.base}/ok?{secret}"},
+             {"action": "http", "method": "POST", "url": f"{fake.base}/echo/{secret}", "content_type": "text/plain", "body": body}]
+    name = TEST + "hrun"
+    assert put(dev, guard + [http_scenario(name, steps)]).status_code == 200
+    before = len(fake.requests)
+    assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+    s = wait_state(dev, name, ("done",), timeout=30)
+    got = fake.requests[before:]
+    assert [(g["method"], g["path"]) for g in got] == [("GET", f"/ok?{secret}"), ("POST", f"/echo/{secret}")]
+    assert got[1]["body"] == body.encode() and got[1]["headers"]["Content-Type"] == "text/plain"
+    host = fake.base.split("//")[1]
+    assert [x["http"] for x in s["run_steps"]] == [f"GET {host}", f"POST {host}"], s["run_steps"]
+    assert all(x["state"] == "ok" and x["detail"].startswith("sent: answered 200 in ") for x in s["run_steps"]), s["run_steps"]
+    hist = dev.get("/api/scenarios/history", params={"name": name, "limit": 1}).json()["runs"][0]
+    assert [(x["http"], x["action"], x["state"]) for x in hist["steps"]] == [(f"GET {host}", "http", "ok"), (f"POST {host}", "http", "ok")]
+    log = dev.get("/api/logs", params={"file": "current", "tail": 16384}).text
+    for text in (json.dumps(hist), json.dumps(scn(dev, name, state=1)), log):
+        assert secret not in text
+
+
+def test_a_failing_http_step_is_tried_three_times_and_the_scenario_goes_on(dev, guard, fake):
+    name = TEST + "hfail"
+    steps = [{"action": "http", "url": f"{fake.base}/status/500", "pause_after_s": 600}, {"action": "http", "url": f"{fake.base}/ok"}]
+    assert put(dev, guard + [http_scenario(name, steps)]).status_code == 200
+    before = len(fake.requests)
+    assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+    s = wait_state(dev, name, ("done",), timeout=40)
+    first, second = s["run_steps"]
+    assert first["state"] == "failed" and first["attempts"] == 3 and first["detail"] == "http: the server answered 500", first
+    assert second["state"] == "ok"  # no 600 s pause after a step that failed
+    assert [g["path"] for g in fake.requests[before:]] == ["/status/500"] * 3 + ["/ok"]
+
+
+def test_a_document_near_the_put_limit_saves_reads_back_and_leaves_the_internal_ram(dev, guard):
+    if dev.get("/api/status").json()["memory"]["psram_total"] == 0:
+        pytest.skip("no PSRAM: the documents are limited to 48 KB")
+    big = [{"action": "http", "method": "POST", "url": f"https://example.com/{i}", "body": ascii_text(16000, seed=100 + i)} for i in range(15)]
+    doc = guard + [http_scenario(TEST + "hbig", big)]
+    size = len(json.dumps({"scenarios": doc}).encode())
+    assert 230000 < size < 262144, size
+    t0 = time.time()
+    r = put(dev, doc, timeout=60)
+    print(f"\nPUT {size} bytes: {r.status_code} in {time.time() - t0:.1f} s")
+    assert r.status_code == 200, r.text
+    got = scn(dev, TEST + "hbig")["steps"]
+    assert [g["body"] for g in got] == [b["body"] for b in big]
+    m = dev.get("/api/status").json()["memory"]
+    assert m["dram_free"] > 40000 and m["dram_largest"] > 20000, m
+
+
+# ---- HTTP steps over a restart (-m restart) -------------------------------------------------------------------------------
+# /runs.json keeps an HTTP step as its method and host only; a continued run takes the request from the definitions. The API
+# cannot read /runs.json, so the second test shows it by size: the paths of the URLs would not fit into its 128 KB.
+
+@pytest.mark.restart
+def test_an_http_step_of_a_continued_run_is_sent_as_the_definition_has_it(dev, guard, fake):
+    name = TEST + "hres"
+    tail = "second?tag=A&token=" + ascii_text(40, seed=21).replace(" ", "x")
+    steps = [{"action": "http", "url": f"{fake.base}/ok", "pause_after_s": 45},
+             {"action": "http", "method": "POST", "url": f"{fake.base}/{tail}", "content_type": "text/plain", "body": "the body of step 2"}]
+    assert put(dev, guard + [http_scenario(name, steps)]).status_code == 200
+    assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+    in_pause(dev, name)
+    time.sleep(5)  # /runs.json is written at most every 3 s
+    before = len(fake.requests)
+    reboot(dev)
+    s = scn(dev, name)
+    assert s["state"] == "running" and s["resumed"] == "SW at step 2" and s.get("pause_left_s"), s
+    s = wait_state(dev, name, ("done",), timeout=70)
+    assert [x["state"] for x in s["run_steps"]] == ["ok", "ok"], s["run_steps"]
+    sent = fake.requests[before:]
+    assert [(g["method"], g["path"], g["body"]) for g in sent] == [("POST", "/" + tail, b"the body of step 2")]
+    time.sleep(1.5)
+    rec = dev.get("/api/scenarios/history", params={"name": name, "limit": 1}).json()["runs"][0]
+    assert rec["result"] == "done" and rec["resumed"] == "SW at step 2" and "token" not in json.dumps(rec), rec
+
+
+@pytest.mark.restart
+def test_an_edit_of_an_http_request_during_the_run_starts_it_again_with_the_new_request(dev, guard, fake):
+    name = TEST + "hedit"
+    steps = [{"action": "http", "url": f"{fake.base}/ok?v=1", "pause_after_s": 600}, {"action": "http", "url": f"{fake.base}/ok?v=2"}]
+    assert put(dev, guard + [http_scenario(name, steps)]).status_code == 200
+    assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+    in_pause(dev, name)
+    edited = [dict(steps[0], url=f"{fake.base}/ok?v=edited"), steps[1]]  # the URL only: the running copy keeps v=1
+    assert put(dev, guard + [http_scenario(name, edited)]).status_code == 200
+    time.sleep(5)
+    before = len(fake.requests)
+    reboot(dev)
+    end = time.time() + 40
+    while time.time() < end and not scn(dev, name).get("pause_left_s"):
+        time.sleep(1)
+    s = scn(dev, name)
+    assert s["state"] == "running" and s["pause_left_s"] > 500, s  # started again from step 1
+    assert [g["path"] for g in fake.requests[before:]] == ["/ok?v=edited"]
+    time.sleep(1.5)
+    rec = dev.get("/api/scenarios/history", params={"name": name, "limit": 1}).json()["runs"][0]
+    assert rec["result"] == "interrupted" and "edited" in rec["reason"], rec
+    assert dev.request("POST", "/api/scenarios/stop", params={"name": name}).status_code == 200
+
+
+@pytest.mark.restart
+def test_runs_json_does_not_keep_the_paths_of_the_urls(dev, guard, fake):
+    """Three runs of 24 HTTP steps with 2 KB URLs, paused after step 1: their URLs alone are ~147 KB, more than /runs.json may
+    hold (128 KB: a bigger one is not saved, and nothing would be continued). All three are continued: the paths were not there."""
+    names = [TEST + f"hpath{i}" for i in range(3)]
+    marker = "/p/"
+    def long_url(i, k):
+        head = f"{fake.base}{marker}{i}-{k}/"
+        return head + "a" * (2048 - len(head))
+    docs = [http_scenario(n, [{"action": "http", "url": f"{fake.base}/ok", "pause_after_s": 300}] +
+                          [{"action": "http", "url": long_url(i, k)} for k in range(23)]) for i, n in enumerate(names)]
+    urls = sum(len(st["url"]) for d in docs for st in d["steps"])
+    assert urls > 140000, urls
+    assert put(dev, guard + docs, timeout=60).status_code == 200
+    for n in names:
+        assert dev.request("POST", "/api/scenarios/run", params={"name": n}).status_code == 200
+    for n in names:
+        in_pause(dev, n)
+    time.sleep(5)
+    try:
+        before = len(fake.requests)
+        reboot(dev)
+        for n in names:
+            s = scn(dev, n, state=1)
+            assert s["state"] == "running" and s["resumed"] == "SW at step 2" and s.get("pause_left_s"), s
+        assert not any(marker in g["path"] for g in fake.requests[before:])  # still in their pauses
+        log = dev.get("/api/logs", params={"file": "current", "tail": 32768}).text
+        assert "could not save the alive runs" not in log
+    finally:
+        for n in names:
+            dev.request("POST", "/api/scenarios/stop", params={"name": n})
+

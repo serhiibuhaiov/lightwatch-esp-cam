@@ -17,9 +17,30 @@ uint32_t until(uint32_t now, uint32_t at) {
 }
 const char* verb(bool on) { return on ? "on" : "off"; }
 
+// "towel on" or "POST api.telegram.org": the step in a log line.
+std::string what(const Def& d, size_t step) {
+  return d.isHttp(step) ? d.label(step) : d.label(step) + " " + verb(d.steps[step].on);
+}
+
 }  // namespace
 
 void setAllocator(AllocFn fn) { gAlloc = fn ? fn : &std::malloc; }
+
+std::string hostOf(const Text& url) {
+  size_t from = url.find("://");
+  from = from == Text::npos ? 0 : from + 3;
+  size_t to = from;
+  while (to < url.size() && url[to] != '/' && url[to] != '?' && url[to] != '#') ++to;
+  const size_t at = url.rfind('@', to == 0 ? 0 : to - 1);
+  if (at != Text::npos && at >= from && at < to) from = at + 1;  // user:password@host: never shown
+  return std::string(url.data() + from, to - from);
+}
+
+std::string Def::label(size_t step) const {
+  if (!isHttp(step)) return str(device(step));
+  const HttpReq& q = request(step);
+  return std::string(q.post ? "POST " : "GET ") + hostOf(q.url);
+}
 
 void* allocBytes(size_t bytes) {
   void* p = gAlloc(bytes ? bytes : 1);
@@ -142,7 +163,16 @@ uint32_t defHash(const Def& d) {
   mix(d.defaultPauseS);
   mix(static_cast<uint32_t>(d.steps.size()));
   for (size_t i = 0; i < d.steps.size(); ++i) {
-    mixText(d.device(i));
+    if (d.isHttp(i)) {  // (a device step hashes as it always did: a saved run of an older firmware still matches)
+      const HttpReq& q = d.request(i);
+      mix(0x48545450u | (q.post ? 1u : 0u));
+      mixText(q.url);
+      mixText(q.contentType);
+      mixText(q.body);
+      mix(q.timeoutMs);
+    } else {
+      mixText(d.device(i));
+    }
     mix((d.steps[i].on ? 1u : 0u) | (d.steps[i].enabled ? 2u : 0u));
     mix(static_cast<uint32_t>(d.steps[i].pauseAfterS));
   }
@@ -154,8 +184,9 @@ std::string stepDetail(const Run& r, size_t i) {
   const StepRun& s = r.steps[i];
   switch (s.state) {
     case StepState::Ok: {
+      const bool http = i < r.def.steps.size() && r.def.isHttp(i);
       const bool on = i < r.def.steps.size() && r.def.steps[i].on;
-      std::string out = std::string("switched ") + verb(on);
+      std::string out = http ? "sent: " + str(r.whys.get(i)) : std::string("switched ") + verb(on);
       if (s.attempts > 1) out += " after " + std::to_string(s.attempts) + " attempts";
       if (s.pauseS) out += "; pause " + std::to_string(s.pauseS) + " s before the next step";
       return out;
@@ -345,8 +376,10 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
       case Phase::Command:
       case Phase::Verify: {
         const bool verify = r.phase == Phase::Verify;
-        const char* lateWhy = verify ? "the command was accepted, but the status query did not get through in time"
-                                     : "the command did not get through the device queue in time";
+        const bool http = r.def.isHttp(r.step);
+        const char* lateWhy = http     ? "the request did not get through the HTTP queue in time"
+                              : verify ? "the command was accepted, but the status query did not get through in time"
+                                       : "the command did not get through the device queue in time";
         if (r.job == 0) {  // still waiting for a place (or for room in the Tuya list)
           if (!verify && r.stop) {  // nothing has gone out for this attempt yet
             stopNow(name, r, true, static_cast<uint8_t>(r.attempt - 1));
@@ -367,6 +400,14 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
         }
         dropJob(r, false);
         r.attemptJobMs += st.ms;
+        if (http) {  // the server's answer is the result: no status query after it
+          if (st.ok) {
+            attemptSucceeded(name, r, now, st.detail);
+          } else {
+            attemptFailed(name, r, now, st.error + ": " + st.detail);
+          }
+          continue;
+        }
         if (!verify) {
           if (!st.ok) {
             attemptFailed(name, r, now, st.error + ": " + st.detail);
@@ -460,6 +501,13 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
     }
   }
   r.current = static_cast<int>(r.step);
+  if (r.def.isHttp(r.step)) {
+    r.attempt = 0;
+    r.windowEndMs = now + kPatientWindowMs;
+    r.lastWhy.clear();
+    startAttempt(name, r, now);
+    return;
+  }
   const Text& device = r.def.device(r.step);
   const DeviceInfo d = env_.device(str(device));
   StepRun& sr = r.steps[r.step];
@@ -498,7 +546,7 @@ void Engine::startAttempt(const std::string& name, Run& r, uint32_t now) {
   sr.state = StepState::Running;
   sr.attempts = r.attempt;
   r.whys.set(r.step, r.attempt > 1 ? r.lastWhy : Text());
-  r.offlineAttempt = env_.device(str(r.def.device(r.step))).offline;
+  r.offlineAttempt = !r.def.isHttp(r.step) && env_.device(str(r.def.device(r.step))).offline;
   r.attemptJobMs = 0;
   r.phase = Phase::Command;
   r.wantsSlot = true;
@@ -516,10 +564,9 @@ void Engine::endAttemptMeasurement(Run& r, bool ok) {
 
 void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const std::string& why) {
   endAttemptMeasurement(r, false);
-  const StepDef& st = r.def.steps[r.step];
-  const Text& device = r.def.device(r.step);
+  const std::string step = what(r.def, r.step);
   r.lastWhy.assign(why.data(), why.size());
-  logf(true, "[%s] step %u: %s %s attempt %u failed: %s", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str(), verb(st.on),
+  logf(true, "[%s] step %u: %s attempt %u failed: %s", name.c_str(), static_cast<unsigned>(r.step + 1), step.c_str(),
        static_cast<unsigned>(r.attempt), why.c_str());
   const uint32_t gap = r.patient ? kPatientGapMs : kRetryGapMs;
   const bool more = r.patient ? static_cast<int32_t>(r.windowEndMs - now) > static_cast<int32_t>(gap) && r.attempt < 255 : r.attempt < kAttempts;
@@ -533,23 +580,28 @@ void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const 
   sr.attempts = r.attempt;
   r.whys.set(r.step, r.lastWhy);
   stepEnded(r, now);
-  logf(true, "[%s] step %u: %s FAILED after %u attempts, going on", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str(),
-       static_cast<unsigned>(r.attempt));
+  logf(true, "[%s] step %u: %s FAILED after %u attempts, going on", name.c_str(), static_cast<unsigned>(r.step + 1),
+       r.def.label(r.step).c_str(), static_cast<unsigned>(r.attempt));
   ++r.failed;
   ++r.step;
   r.phase = Phase::NextStep;
 }
 
-void Engine::attemptSucceeded(const std::string& name, Run& r, uint32_t now) {
+void Engine::attemptSucceeded(const std::string& name, Run& r, uint32_t now, const std::string& note) {
   endAttemptMeasurement(r, true);
   const StepDef& st = r.def.steps[r.step];
   StepRun& sr = r.steps[r.step];
   sr.state = StepState::Ok;
   sr.attempts = r.attempt;
-  r.whys.set(r.step, "");
+  r.whys.set(r.step, Text(note.data(), note.size()));  // an HTTP step: what the server answered (stepDetail shows it)
   stepEnded(r, now);
-  logf(false, "[%s] step %u: %s is %s (attempt %u)", name.c_str(), static_cast<unsigned>(r.step + 1), r.def.device(r.step).c_str(), verb(st.on),
-       static_cast<unsigned>(r.attempt));
+  if (r.def.isHttp(r.step)) {
+    logf(false, "[%s] step %u: %s: %s (attempt %u)", name.c_str(), static_cast<unsigned>(r.step + 1), r.def.label(r.step).c_str(),
+         note.c_str(), static_cast<unsigned>(r.attempt));
+  } else {
+    logf(false, "[%s] step %u: %s is %s (attempt %u)", name.c_str(), static_cast<unsigned>(r.step + 1), r.def.device(r.step).c_str(),
+         verb(st.on), static_cast<unsigned>(r.attempt));
+  }
   ++r.switched;
   r.pauseS = st.pauseAfterS >= 0 ? static_cast<uint32_t>(st.pauseAfterS) : r.def.defaultPauseS;
   r.pauseFrom = r.step;
@@ -594,10 +646,16 @@ void Engine::finish(const std::string& name, Run& r, RunState state) {
 void Engine::dropJob(Run& r, bool withdraw) {
   env_.release(r.job, withdraw);
   r.job = 0;
-  if (stats_.inFlight) --stats_.inFlight;
+  if (r.jobHttp) {
+    if (httpInFlight_) --httpInFlight_;
+  } else if (stats_.inFlight) {
+    --stats_.inFlight;
+  }
+  r.jobHttp = false;
 }
 
-// Hands the free places (kMaxInFlight in all) to the runs that asked for one, oldest request first.
+// Hands the free places (kMaxInFlight in the Tuya lane, kMaxHttpInFlight in the HTTP lane) to the runs that asked for
+// one, oldest request first.
 void Engine::grantSlots(uint32_t now) {
   std::vector<Run*> asking;
   for (auto& kv : runs_) {
@@ -608,9 +666,23 @@ void Engine::grantSlots(uint32_t now) {
   for (size_t i = 0; i < order.size(); ++i) order[i] = i;
   std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return now - asking[a]->askedMs > now - asking[b]->askedMs; });
 
-  bool full = false;
+  bool full = false, httpFull = false;
   for (size_t k : order) {
     Run& r = *asking[k];
+    if (r.def.isHttp(r.step)) {  // the HTTP lane: its own places, no slot statistics (those are about the sockets)
+      if (httpFull || httpInFlight_ >= kMaxHttpInFlight) continue;
+      const uint32_t id = env_.submitHttp(r.def.request(r.step));
+      if (!id) {  // its list is full (the API's test requests): try again on the next look
+        httpFull = true;
+        continue;
+      }
+      r.job = id;
+      r.jobHttp = true;
+      r.wantsSlot = false;
+      ++httpInFlight_;
+      ++stats_.httpRequests;
+      continue;
+    }
     if (full || stats_.inFlight >= kMaxInFlight) {
       if (!r.slotWaitCounted) {
         r.slotWaitCounted = true;

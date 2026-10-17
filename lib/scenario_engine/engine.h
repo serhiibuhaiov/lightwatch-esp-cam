@@ -14,6 +14,10 @@
 // the Tuya command list at once (the others wait here, first come first served), and a stop acts at once unless a
 // command is already on its way (then right after it).
 //
+// An HTTP step sends one request (GET or POST with a static body) through the HTTP lane: it succeeds when the server
+// answers 2xx, with the same attempts, gaps and patience as a socket step and no status query after it; at most
+// kMaxHttpInFlight of them are in that lane at once. The pause after it is kept when it succeeded.
+//
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -51,6 +55,7 @@ using List = std::vector<T, Alloc<T>>;
 inline std::string str(const Text& t) { return std::string(t.data(), t.size()); }
 
 constexpr uint8_t kMaxInFlight = 4;           // engine jobs queued or running in the Tuya command lane at once
+constexpr uint8_t kMaxHttpInFlight = 2;       // engine requests in the HTTP lane at once (it has 4 places; the API uses it too)
 constexpr uint8_t kAttempts = 3;              // tries per step
 constexpr uint32_t kRetryGapMs = 2000;
 constexpr uint32_t kQueueWaitMs = 120000;     // a command that has not finished this long after it asked for a place is given up
@@ -61,12 +66,22 @@ constexpr uint32_t kBusyTickMs = 100;         // how often the engine looks whil
 constexpr uint32_t kIdleTickMs = 1000;        // the longest sleep (Wi-Fi is watched while a run waits for it)
 
 enum class Op : uint8_t { On, Off, Query };
+enum class StepKind : uint8_t { Device, Http };
+
+// The request of an HTTP step. URL and body can be long (2 KB, 16 KB): kept in Def::requests, allocated like the rest.
+struct HttpReq {
+  bool post = false;
+  Text url, contentType, body;  // contentType and body: POST only ("" = none)
+  uint32_t timeoutMs = 10000;
+};
 
 // A step names its device by an index into Def::devices: a scenario with 24 steps on the same few sockets keeps each name
-// once (16 scenarios x 24 steps would otherwise hold ~400 copies of the names in internal RAM).
+// once (16 scenarios x 24 steps would otherwise hold ~400 copies of the names in internal RAM). An HTTP step names its
+// request the same way, by an index into Def::requests.
 struct StepDef {
-  uint16_t dev = 0;          // index into Def::devices
-  bool on = true;
+  StepKind kind = StepKind::Device;
+  uint16_t dev = 0;          // index into Def::devices (a device step) or Def::requests (an HTTP step)
+  bool on = true;            // a device step: switch on or off
   bool enabled = true;
   int32_t pauseAfterS = -1;  // -1: the scenario's default
 };
@@ -74,11 +89,20 @@ struct StepDef {
 struct Def {
   std::string name;
   uint16_t defaultPauseS = 30;
-  List<Text> devices;  // the distinct device names of the steps
+  List<Text> devices;      // the distinct device names of the steps
+  List<HttpReq> requests;  // the requests of the HTTP steps, one per step
   List<StepDef> steps;
 
-  const Text& device(size_t step) const { return devices[steps[step].dev]; }
+  bool isHttp(size_t step) const { return steps[step].kind == StepKind::Http; }
+  const Text& device(size_t step) const { return devices[steps[step].dev]; }  // a device step only
+  const HttpReq& request(size_t step) const { return requests[steps[step].dev]; }  // an HTTP step only
+  // What the log, the API and the history call the step: the device name, or "POST api.telegram.org" (never the path
+  // or the query of the URL: a token may be there).
+  std::string label(size_t step) const;
 };
+
+// "api.telegram.org" out of "https://api.telegram.org/bot.../sendMessage" (no user:password@ either).
+std::string hostOf(const Text& url);
 
 struct DeviceInfo {
   bool exists = false;
@@ -108,6 +132,9 @@ class Env {
   virtual DeviceInfo device(const std::string& name) = 0;
   // Queues a command (On/Off) or a status query for the device in the command lane; 0 = the list is full right now.
   virtual uint32_t submit(Op op, const std::string& device) = 0;
+  // Queues the request of an HTTP step in the HTTP lane; 0 = its list is full right now. The ids share one space with submit().
+  // JobStatus::detail of a request that succeeded says what the server answered ("answered 200 in 812 ms").
+  virtual uint32_t submitHttp(const HttpReq& req) = 0;
   virtual JobStatus poll(uint32_t job) = 0;
   // The engine is done with the job. `withdraw`: it has not finished, drop it if it has not started yet.
   virtual void release(uint32_t job, bool withdraw) = 0;
@@ -184,6 +211,7 @@ struct Run {
   uint32_t deadlineMs = 0;       // end of the settle time, a pause or a gap
   uint32_t windowEndMs = 0;      // patient: end of the retry window of the step
   uint32_t job = 0;              // the job in flight, 0 = none
+  bool jobHttp = false;          // that job is an HTTP request (counted against kMaxHttpInFlight)
   bool wantsSlot = false;        // waits for one of the kMaxInFlight places (Command/Verify without a job yet)
   bool slotWaitCounted = false;
   bool queueFullCounted = false;
@@ -202,6 +230,7 @@ struct Run {
 
 struct Stats {
   uint32_t jobs = 0;           // jobs the engine queued
+  uint32_t httpRequests = 0;   // HTTP requests the engine queued (in the HTTP lane, not counted in `jobs`)
   uint32_t inFlight = 0;       // now
   uint32_t maxInFlightSeen = 0;
   uint32_t slotWaits = 0;      // commands/queries that had to wait for a place (all kMaxInFlight taken)
@@ -309,7 +338,7 @@ class Engine {
   void nextStep(const std::string& name, Run& r, uint32_t now);
   void startAttempt(const std::string& name, Run& r, uint32_t now);
   void attemptFailed(const std::string& name, Run& r, uint32_t now, const std::string& why);
-  void attemptSucceeded(const std::string& name, Run& r, uint32_t now);
+  void attemptSucceeded(const std::string& name, Run& r, uint32_t now, const std::string& note = std::string());
   void endAttemptMeasurement(Run& r, bool ok);
   void finish(const std::string& name, Run& r, RunState state);
   void stopNow(const std::string& name, Run& r, bool markStep, uint8_t attempts);
@@ -323,6 +352,7 @@ class Engine {
   Env& env_;
   std::map<std::string, Run, std::less<std::string>, Alloc<std::pair<const std::string, Run>>> runs_;  // by scenario name
   Stats stats_;
+  uint32_t httpInFlight_ = 0;  // engine requests in the HTTP lane now
   bool dirty_ = false;
   uint32_t lastSignature_ = 0;
 };

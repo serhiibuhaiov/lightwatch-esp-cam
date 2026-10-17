@@ -83,6 +83,10 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}
 .srow select{flex:1;min-width:150px;width:auto}
 .srow input[type=number]{width:120px}
 .srow button{padding:5px 10px}
+.hreq{flex-basis:100%;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin-left:32px}
+.hreq input[type=text]{flex:1;min-width:220px}
+.hreq textarea{flex-basis:100%;min-height:70px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.hreq .res{flex-basis:100%}
 .rs{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
 .rs div{margin:3px 0}
 textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -370,14 +374,17 @@ function viewScenarios() {
     live = {}, info = {}, msg = null, saving = false;
   const runBoxes = new Map();
 
-  const blankStep = () => ({ device: devNames[0] || "", action: "on", enabled: true, pause: "" });
+  const blankHttp = () => ({ method: "GET", url: "", content_type: "application/json", body: "", timeout: "" });
+  const blankStep = () => ({ device: devNames[0] || "", action: devNames.length ? "on" : "http", enabled: true, pause: "", ...blankHttp() });
   const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60" });
   const blankOi = () => ({ ...OI_DEFAULT, resume_within_min: String(OI_DEFAULT.resume_within_min) });
   const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), oi: blankOi(), steps: [] });
   const fromServer = s => ({ orig: s.name, name: s.name, enabled: s.enabled, trigger: s.trigger, pause: String(s.default_pause_s),
     oi: s.on_interrupt ? { ...s.on_interrupt, resume_within_min: String(s.on_interrupt.resume_within_min) } : blankOi(),
     when: s.when ? { device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s) } : blankWhen(),
-    steps: s.steps.map(x => ({ device: x.device, action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s) })) });
+    steps: s.steps.map(x => ({ device: x.device || "", action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s),
+      ...(x.action === "http" ? { method: x.method, url: x.url, content_type: x.content_type || "application/json", body: x.body || "",
+        timeout: x.timeout_ms === limits.httpTimeout ? "" : String(x.timeout_ms) } : blankHttp()) })) });
 
   async function load(keepEdits) {
     try {
@@ -388,6 +395,9 @@ function viewScenarios() {
       limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s, watts: pr.max_watts || 20000, forMin: pr.min_for_s || 10,
         forMax: pr.max_for_s || 900, warmup: pr.max_warmup_s || 3600, fileBytes: l.max_file_bytes || 32768,
         historyBytes: l.history_file_bytes || 131072, resumeMax: l.max_resume_within_min || 1440, basis: l.basis ? psramBasis(l) : "" };
+      const h = l.http_step || {};
+      Object.assign(limits, { httpUrl: h.max_url_bytes || 2048, httpBody: h.max_body_bytes || 16384, httpTimeout: h.timeout_ms || 10000,
+        httpTimeoutMin: h.min_timeout_ms || 1000, httpTimeoutMax: h.max_timeout_ms || 30000, httpInFlight: h.max_in_flight || 2 });
       info = { sd: j.sd, error: j.error };
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
       if (!keepEdits) rows = j.scenarios.map(fromServer);
@@ -395,10 +405,10 @@ function viewScenarios() {
     } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати сценарії: " + e.message)); }
   }
 
-  async function poll() {   // only the run state: edits in the form are not touched
+  async function poll() {   // only the run state (no step definitions: HTTP bodies can be long): edits in the form are not touched
     if (saving) return;
     try {
-      const { j } = await getJson("/api/scenarios");
+      const { j } = await getJson("/api/scenarios?state=1");
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
       for (const [name, el] of runBoxes) el.replaceChildren(...runBlock(name));
       stamp();
@@ -424,13 +434,13 @@ function viewScenarios() {
     const steps = s.run_steps || [];
     if (steps.length) {
       out.push(E("div", { class: "rs" }, steps.map((x, k) => E("div", {}, badge((STEP_STATE[x.state] || ["n"])[0], (STEP_STATE[x.state] || [0, x.state])[1]), " ",
-        E("b", {}, (k + 1) + ". " + x.device), x.attempts > 1 ? " · спроб: " + x.attempts : "", x.detail ? E("span", { class: "mut" }, " · " + x.detail) : ""))));
+        E("b", {}, (k + 1) + ". " + (x.http || x.device)), x.attempts > 1 ? " · спроб: " + x.attempts : "", x.detail ? E("span", { class: "mut" }, " · " + x.detail) : ""))));
     }
     return out;
   }
 
   async function act(name, op) {
-    if (op === "run" && !confirm("Запустити сценарій «" + name + "» зараз? Він виконає кроки зі списку: увімкне чи вимкне вказані розетки.")) return;
+    if (op === "run" && !confirm("Запустити сценарій «" + name + "» зараз? Він виконає кроки зі списку: увімкне чи вимкне вказані розетки, надішле HTTP-запити.")) return;
     try {
       const r = await api("/api/scenarios/" + op + "?name=" + encodeURIComponent(name), { method: "POST" });
       const j = await r.json().catch(() => ({}));
@@ -462,7 +472,10 @@ function viewScenarios() {
         return at + "«продовжувати, якщо перерва до» має бути цілим числом хвилин 0–" + limits.resumeMax + ".";
       if (r.steps.length > limits.steps) return at + "забагато кроків (максимум " + limits.steps + ").";
       for (const [k, st] of r.steps.entries()) {
-        if (!NAME_RE.test(st.device)) return at + "крок " + (k + 1) + ": оберіть пристрій.";
+        if (st.action === "http") {
+          const e = httpError(st);
+          if (e) return at + "крок " + (k + 1) + ": " + e;
+        } else if (!NAME_RE.test(st.device)) return at + "крок " + (k + 1) + ": оберіть пристрій.";
         if (st.pause !== "" && !pauseOk(st.pause)) return at + "крок " + (k + 1) + ": пауза має бути числом 0–" + limits.pause + " с або порожньою.";
       }
     }
@@ -477,7 +490,8 @@ function viewScenarios() {
       const body = { scenarios: rows.map(r => ({ name: r.name, enabled: r.enabled, trigger: r.trigger, default_pause_s: Number(r.pause),
         ...(r.trigger === "power_below" || r.trigger === "power_above" ? { when: { device: r.when.device, watts: Number(r.when.watts), for_s: Number(r.when.for_s), warmup_s: Number(r.when.warmup_s) } } : {}),
         on_interrupt: { power: r.oi.power, software: r.oi.software, crash: r.oi.crash, brownout: r.oi.brownout, resume_within_min: Number(r.oi.resume_within_min) },
-        steps: r.steps.map(st => { const o = { device: st.device, action: st.action, enabled: st.enabled }; if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
+        steps: r.steps.map(st => { const o = st.action === "http" ? { action: "http", ...httpFields(st), enabled: st.enabled } : { device: st.device, action: st.action, enabled: st.enabled };
+          if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
       const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
@@ -491,6 +505,27 @@ function viewScenarios() {
     }
   }
 
+  // The same checks as the firmware (HttpOut::parse), so the message comes before saving.
+  function httpError(st) {
+    const bytes = s => new TextEncoder().encode(s).length;
+    if (!/^https?:\/\/[^\/?#:@\s]/.test(st.url)) return "адреса має починатися з http:// або https:// і мати хост.";
+    if (/[^\x21-\x7e]/.test(st.url)) return "в адресі не може бути пробілів і не-ASCII символів (кодуйте їх через %XX).";
+    if (bytes(st.url) > limits.httpUrl) return "адреса довша за " + limits.httpUrl + " байт.";
+    if (st.method === "POST") {
+      if (!st.content_type || st.content_type.length > 100 || /[^\x20-\x7e]/.test(st.content_type)) return "Content-Type: 1–100 символів ASCII.";
+      if (bytes(st.body) > limits.httpBody) return "тіло довше за " + limits.httpBody + " байт (зараз " + bytes(st.body) + ").";
+    }
+    if (st.timeout !== "" && !(/^\d{4,5}$/.test(st.timeout) && Number(st.timeout) >= limits.httpTimeoutMin && Number(st.timeout) <= limits.httpTimeoutMax))
+      return "таймаут має бути " + limits.httpTimeoutMin + "–" + limits.httpTimeoutMax + " мс або порожнім.";
+    return null;
+  }
+  const httpFields = st => {  // a step's request as the firmware takes it (save, and "Перевірити")
+    const o = { method: st.method, url: st.url };
+    if (st.method === "POST") { o.content_type = st.content_type; o.body = st.body; }
+    if (st.timeout !== "") o.timeout_ms = Number(st.timeout);
+    return o;
+  };
+
   const field = (label, input, hint) => E("div", { class: "f" }, E("label", {}, label), input, hint ? E("small", {}, hint) : null);
 
   function stepRow(r, st, k) {
@@ -498,17 +533,63 @@ function viewScenarios() {
     const sel = E("select", {}, (known || !st.device ? devNames : [st.device, ...devNames]).map(n =>
       E("option", { value: n, selected: n === st.device }, n + (devNames.includes(n) ? (ignored.has(n) ? " (ігнорується)" : "") : " (немає в списку пристроїв)"))));
     sel.addEventListener("change", () => { st.device = sel.value; });
-    const act = E("select", { title: "Дія кроку", style: "flex:0 0 auto;min-width:0" }, [["on", "Ввімкнути"], ["off", "Вимкнути"]].map(([v, l]) => E("option", { value: v, selected: v === st.action }, l)));
-    act.addEventListener("change", () => { st.action = act.value; });
+    const act = E("select", { title: "Дія кроку", style: "flex:0 0 auto;min-width:0" }, [["on", "Ввімкнути"], ["off", "Вимкнути"], ["http", "HTTP-запит"]].map(([v, l]) => E("option", { value: v, selected: v === st.action }, l)));
+    act.addEventListener("change", () => { st.action = act.value; render(); });
+    const http = st.action === "http";
     const en = E("input", { type: "checkbox", checked: st.enabled, title: "крок увімкнено" });
     en.addEventListener("change", () => { st.enabled = en.checked; });
-    const pz = E("input", { type: "number", min: 0, max: limits.pause, value: st.pause, placeholder: "пауза: " + (r.pause || "30") + " с", title: "Пауза після цього кроку, с. Порожньо: за замовчуванням. Пауза лише після кроку, що справді перемкнув розетку" });
+    const pz = E("input", { type: "number", min: 0, max: limits.pause, value: st.pause, placeholder: "пауза: " + (r.pause || "30") + " с", title: "Пауза після цього кроку, с. Порожньо: за замовчуванням. Пауза лише після кроку, що вдався (перемкнув розетку, сервер відповів 2xx)" });
     pz.addEventListener("input", () => { st.pause = pz.value.trim(); });
     const mv = d => () => { const j = k + d; if (j < 0 || j >= r.steps.length) return; [r.steps[k], r.steps[j]] = [r.steps[j], r.steps[k]]; render(); };
-    return E("div", { class: "srow" }, E("span", { class: "n" }, (k + 1) + "."), sel, act, en, pz,
+    return E("div", { class: "srow" }, E("span", { class: "n" }, (k + 1) + "."), http ? E("span", { style: "flex:1;min-width:150px" }, httpSummary(st)) : sel, act, en, pz,
       E("button", { type: "button", title: "вгору", disabled: saving || k === 0, onclick: mv(-1) }, "↑"),
       E("button", { type: "button", title: "вниз", disabled: saving || k === r.steps.length - 1, onclick: mv(1) }, "↓"),
-      E("button", { type: "button", class: "d", title: "видалити крок", disabled: saving, onclick: () => { r.steps.splice(k, 1); render(); } }, "✕"));
+      E("button", { type: "button", class: "d", title: "видалити крок", disabled: saving, onclick: () => { r.steps.splice(k, 1); render(); } }, "✕"),
+      http ? httpRequestFields(st) : null);
+  }
+
+  // "POST api.telegram.org": what the step is called in the run's state and in the history (never the path: a token may be there).
+  const httpSummary = st => { const m = /^https?:\/\/(?:[^\/?#@]*@)?([^\/?#]*)/.exec(st.url); return st.method + " " + (m && m[1] ? m[1] : "…"); };
+
+  // The request of an HTTP step: method, URL, Content-Type and body (POST), timeout, and a test that sends it now.
+  function httpRequestFields(st) {
+    const method = E("select", { style: "flex:0 0 auto;min-width:0" }, ["GET", "POST"].map(v => E("option", { value: v, selected: v === st.method }, v)));
+    method.addEventListener("change", () => { st.method = method.value; render(); });
+    const url = E("input", { type: "text", value: st.url, placeholder: "https://hc-ping.com/… або https://api.telegram.org/bot<токен>/sendMessage", autocomplete: "off", spellcheck: "false" });
+    url.addEventListener("input", () => { st.url = url.value.trim(); });
+    const to = E("input", { type: "number", min: limits.httpTimeoutMin, max: limits.httpTimeoutMax, value: st.timeout, placeholder: "таймаут: " + limits.httpTimeout + " мс", style: "width:150px" });
+    to.addEventListener("input", () => { st.timeout = to.value.trim(); });
+    const res = E("div", { class: "res" });
+    const test = E("button", { type: "button", disabled: saving, onclick: async () => {
+      const e = httpError(st);
+      if (e) { res.replaceChildren(note("err", e)); return; }
+      if (!confirm("Надіслати цей запит з пристрою зараз?\n\n" + httpSummary(st))) return;
+      test.disabled = true;
+      res.replaceChildren(E("span", { class: "mut" }, "Надсилаю…"));
+      try {
+        const r = await api("/api/http/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(httpFields(st)) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+        res.replaceChildren(E("div", {}, badge(j.ok ? "ok" : "err", j.status != null ? "відповідь " + j.status : j.error),
+          E("span", { class: "mut" }, " · " + j.ms + " мс" + (j.ok ? "" : " · " + (j.detail || ""))),
+          j.response ? E("pre", { style: "margin:6px 0 0;white-space:pre-wrap;max-height:120px;overflow:auto" }, j.response) : ""));
+      } catch (e) { res.replaceChildren(note("err", "Не вдалося: " + e.message)); }
+      test.disabled = false;
+    } }, "Перевірити");
+    const parts = [method, url, to, test];
+    if (st.method === "POST") {
+      const ct = E("input", { type: "text", value: st.content_type, placeholder: "Content-Type", style: "flex:0 1 240px;min-width:160px" });
+      ct.addEventListener("input", () => { st.content_type = ct.value.trim(); });
+      const body = E("textarea", { spellcheck: "false", placeholder: "{\"chat_id\": 123456789, \"text\": \"Бойлер нагрів воду\"}" });
+      body.value = st.body;
+      const count = E("small", { class: "mut" });
+      const upd = () => { st.body = body.value; count.textContent = new TextEncoder().encode(body.value).length + " з " + limits.httpBody + " байт"; };
+      body.addEventListener("input", upd);
+      upd();
+      parts.push(ct, body, count);
+    }
+    parts.push(res);
+    return E("div", { class: "hreq" }, ...parts);
   }
 
   // The condition of a power trigger: which socket, which threshold, for how long, and the warm-up after switching on.
@@ -579,8 +660,8 @@ function viewScenarios() {
       interruptFields(r),
       E("h2", { style: "margin-top:14px" }, "Кроки по черзі"),
       r.steps.length ? r.steps.map((st, k) => stepRow(r, st, k)) : E("p", { class: "mut", style: "margin:0 0 8px" }, "Кроків ще немає."),
-      E("div", { class: "row" }, E("button", { type: "button", disabled: saving || r.steps.length >= limits.steps || !devNames.length, onclick: () => { r.steps.push(blankStep()); render(); } }, "Додати крок"),
-        devNames.length ? "" : E("span", { class: "mut" }, "Спершу додайте пристрої.")),
+      E("div", { class: "row" }, E("button", { type: "button", disabled: saving || r.steps.length >= limits.steps, onclick: () => { r.steps.push(blankStep()); render(); } }, "Додати крок"),
+        devNames.length ? "" : E("span", { class: "mut" }, "Пристроїв ще немає: крок буде HTTP-запитом.")),
       r.orig ? E("div", {}, rb, unsaved ? E("p", { class: "mut", style: "margin:6px 0 0" }, "Запуск і зупинка діють на збережену версію.") : "") : "");
   }
 
@@ -591,7 +672,8 @@ function viewScenarios() {
     if (info.error) out.push(note("err", info.error));
     out.push(E("div", { class: "row" },
       E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими; від усіх разом у черзі до розеток одночасно не більше 4 команд. " +
-        "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж.")));
+        "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж. " +
+        "HTTP-запит (GET чи POST з тілом, наприклад повідомлення в Telegram) вдається, коли сервер відповів 2xx; спроби ті самі; від усіх сценаріїв разом одночасно не більше " + (limits.httpInFlight || 2) + " запитів. Шлях і тіло запиту в лог і історію не пишуться.")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
       limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Історія запусків: до 2 × " + fmtKb(limits.historyBytes) + " на SD. " + limits.basis + " Усі ліміти: вкладка «Статус»."));
@@ -636,9 +718,9 @@ function viewScenarios() {
         h.reason ? E("p", { class: "mut", style: "margin:6px 0" }, h.reason) : "",
         h.resumed ? E("p", { class: "mut", style: "margin:6px 0" }, "Перезапуски, після яких запуск продовжився: " + h.resumed) : "",
         steps.length ? E("div", { class: "tw" }, E("table", { class: "h" },
-          E("thead", {}, E("tr", {}, ["Крок", "Пристрій", "Дія", "Результат", "Спроб", "Коли (від старту)", "Деталі"].map(x => E("th", {}, x)))),
+          E("thead", {}, E("tr", {}, ["Крок", "Пристрій / адреса", "Дія", "Результат", "Спроб", "Коли (від старту)", "Деталі"].map(x => E("th", {}, x)))),
           E("tbody", {}, steps.map((x, k) => E("tr", { class: "h-" + (STEP_STATE[x.state] || ["n"])[0] },
-            E("td", {}, String(k + 1)), E("td", {}, x.device), E("td", {}, x.action === "off" ? "вимкнути" : "увімкнути"),
+            E("td", {}, String(k + 1)), E("td", {}, x.http || x.device), E("td", {}, x.action === "http" ? "HTTP-запит" : x.action === "off" ? "вимкнути" : "увімкнути"),
             E("td", {}, (STEP_STATE[x.state] || [0, x.state])[1]), E("td", {}, String(x.attempts)),
             E("td", {}, x.at_s ? fmtDur(x.at_s) : "—"), E("td", { class: "mut" }, x.detail || "")))))) : E("p", { class: "mut" }, "Без кроків."));
     });
@@ -1199,7 +1281,8 @@ const PREFILL = {
   "/api/scenarios": j => ({ scenarios: j.scenarios.map(sc => {
     const o = { name: sc.name, enabled: sc.enabled, trigger: sc.trigger, default_pause_s: sc.default_pause_s };
     if (sc.when) o.when = sc.when;
-    o.steps = sc.steps.map(st => { const x = { device: st.device, action: st.action, enabled: st.enabled }; if (st.pause_after_s != null) x.pause_after_s = st.pause_after_s; return x; });
+    if (sc.on_interrupt) o.on_interrupt = sc.on_interrupt;
+    o.steps = sc.steps.map(st => { const x = { ...st }; if (x.pause_after_s == null) delete x.pause_after_s; return x; });  // HTTP steps keep url, body, ...
     return o;
   }) }),
 };

@@ -326,7 +326,17 @@ void onScenariosGet(AsyncWebServerRequest* req) {
     sendError(req, 404, "not found");
     return;
   }
-  sendJson(req, 200, Scenario::configJson());
+  // ?state=1: the runs and the power rules only, not the steps as defined (the page polls this every few seconds).
+  bool stateOnly = false;
+  if (req->hasParam("state")) {
+    const String v = req->getParam("state")->value();
+    if (v != "0" && v != "1") {
+      sendError(req, 400, "state must be 0 or 1");
+      return;
+    }
+    stateOnly = v == "1";
+  }
+  sendJson(req, 200, Scenario::configJson(stateOnly));
 }
 
 void onScenariosPut(AsyncWebServerRequest* req) {

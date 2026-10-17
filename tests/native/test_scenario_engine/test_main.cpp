@@ -2,7 +2,8 @@
 //
 // FakeEnv plays the board: a clock moved by the test, Wi-Fi, sockets (working, dead, ignored, "the command has no
 // effect") and the Tuya command lane, which runs one job at a time (a command 700 ms, a query 300 ms, a dead socket
-// 1.5 s) from a list of limited size. Hours of pauses pass in milliseconds.
+// 1.5 s) from a list of limited size, and the HTTP lane (one request at a time, 800 ms, answers set per URL). Hours of
+// pauses pass in milliseconds.
 #include <unity.h>
 
 #include <algorithm>
@@ -24,6 +25,13 @@ struct FakeDevice {
   int cached = -1;         // what the board's cache says (set by a successful query)
 };
 
+struct FakeRequest {
+  HttpReq req;
+  uint32_t endMs = 0;
+  bool withdrawn = false, applied = false, ok = false;
+  std::string error, detail;
+};
+
 struct FakeJob {
   Op op;
   std::string device;
@@ -43,6 +51,13 @@ class FakeEnv : public Env {
   uint32_t nextId = 1;
   uint32_t laneFreeMs = 0;
   std::vector<std::pair<Op, std::string>> sent;  // what reached a socket, in order
+  // The HTTP lane.
+  std::map<uint32_t, FakeRequest> requests;  // ids from the same counter as the jobs
+  size_t httpCapacity = 4;
+  uint32_t httpFreeMs = 0;
+  std::map<std::string, int> answers;  // by URL: the status the server answers (0: no answer); not listed: 200
+  std::vector<HttpReq> httpSent;       // what reached a server, in order
+  size_t httpMaxPending = 0;           // the most requests queued or running at once
   std::vector<std::string> logLines;
 
   bool known(const std::string& name) override { return defs.count(name) > 0; }
@@ -91,7 +106,32 @@ class FakeEnv : public Env {
     jobs[nextId] = j;
     return nextId++;
   }
+  size_t httpPending() const {
+    size_t n = 0;
+    for (const auto& kv : requests) n += (!kv.second.applied && !kv.second.withdrawn) ? 1 : 0;
+    return n;
+  }
+  uint32_t submitHttp(const HttpReq& req) override {
+    if (httpPending() >= httpCapacity) return 0;
+    FakeRequest q;
+    q.req = req;
+    q.endMs = std::max(now, httpFreeMs) + 800;
+    httpFreeMs = q.endMs;
+    requests[nextId] = q;
+    httpMaxPending = std::max(httpMaxPending, httpPending());
+    return nextId++;
+  }
   JobStatus poll(uint32_t id) override {
+    auto rq = requests.find(id);
+    if (rq != requests.end()) {
+      JobStatus s;
+      s.done = rq->second.applied;
+      s.ok = rq->second.ok;
+      s.error = rq->second.error;
+      s.detail = rq->second.detail;
+      s.ms = rq->second.applied ? 800 : 0;
+      return s;
+    }
     FakeJob& j = jobs.at(id);
     JobStatus s;
     s.done = j.applied;
@@ -102,6 +142,15 @@ class FakeEnv : public Env {
     return s;
   }
   void release(uint32_t id, bool withdraw) override {
+    auto rq = requests.find(id);
+    if (rq != requests.end()) {
+      if (withdraw && !rq->second.applied) {
+        rq->second.withdrawn = true;
+      } else {
+        requests.erase(rq);
+      }
+      return;
+    }
     auto it = jobs.find(id);
     if (it == jobs.end()) return;
     if (withdraw && !it->second.applied) {
@@ -112,8 +161,24 @@ class FakeEnv : public Env {
   }
   void log(bool, const std::string& line) override { logLines.push_back(line); }
 
-  // The lane: jobs finish in order; a finished job acts on the socket (and a query on the cache).
+  // The lanes: jobs finish in order; a finished job acts on the socket (and a query on the cache), a request reaches its server.
   void work() {
+    for (auto& kv : requests) {
+      FakeRequest& q = kv.second;
+      if (q.applied || q.withdrawn || static_cast<int32_t>(now - q.endMs) < 0) continue;
+      q.applied = true;
+      const std::string url = str(q.req.url);
+      const int status = answers.count(url) ? answers[url] : 200;
+      if (status == 0) {
+        q.error = "connect";
+        q.detail = "no answer";
+        continue;
+      }
+      httpSent.push_back(q.req);
+      q.ok = status >= 200 && status < 300;
+      q.error = q.ok ? "" : "http";
+      q.detail = q.ok ? "answered " + std::to_string(status) : "the server answered " + std::to_string(status);
+    }
     for (auto& kv : jobs) {
       FakeJob& j = kv.second;
       if (j.applied || j.withdrawn || static_cast<int32_t>(now - j.endMs) < 0) continue;
@@ -151,13 +216,22 @@ void runFor(uint32_t ms) {
   eng->tick();
 }
 
-struct S {  // a step as the tests write it: by device name
+struct S {  // a step as the tests write it: by device name, or an HTTP request (`url` set)
   std::string device;
   bool on;
   int32_t pause;
   bool enabled;
+  std::string url = "", body = "";
+  bool post = false;
 };
 S step(const std::string& device, bool on = true, int32_t pause = -1, bool enabled = true) { return S{device, on, pause, enabled}; }
+S http(const std::string& url, bool post = false, const std::string& body = "", int32_t pause = -1) {
+  S s{"", true, pause, true};
+  s.url = url;
+  s.post = post;
+  s.body = body;
+  return s;
+}
 
 Def def(const std::string& name, std::vector<S> steps, uint16_t defaultPause = 0) {
   Def d;
@@ -165,6 +239,19 @@ Def def(const std::string& name, std::vector<S> steps, uint16_t defaultPause = 0
   d.defaultPauseS = defaultPause;
   for (const S& s : steps) {
     StepDef st;
+    if (!s.url.empty()) {
+      HttpReq q;
+      q.post = s.post;
+      q.url = s.url.c_str();
+      q.body = s.body.c_str();
+      if (s.post) q.contentType = "application/json";
+      st.kind = StepKind::Http;
+      st.dev = static_cast<uint16_t>(d.requests.size());
+      d.requests.push_back(q);
+      st.pauseAfterS = s.pause;
+      d.steps.push_back(st);
+      continue;
+    }
     auto it = std::find(d.devices.begin(), d.devices.end(), s.device.c_str());
     if (it == d.devices.end()) it = d.devices.insert(d.devices.end(), Text(s.device.c_str()));
     st.dev = static_cast<uint16_t>(it - d.devices.begin());
@@ -654,6 +741,121 @@ void test_the_steps_names_and_reasons_of_a_run_come_from_the_allocator_set() {
   TEST_ASSERT_EQUAL(before, gCountedBytes);
 }
 
+// ---- HTTP steps --------------------------------------------------------------------------------------------------------
+
+const char* kPing = "https://hc-ping.com/0000-uuid";
+const char* kTelegram = "https://api.telegram.org/bot123:SECRET/sendMessage?chat_id=1";
+
+void test_an_http_step_sends_its_request_with_no_status_query_and_keeps_its_pause() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {http(kPing, false, "", 30), http(kTelegram, true, "{\"text\":\"hot\"}"), step("a")})});
+  eng->start("s", "manual", env->now);
+  runFor(2000);
+  assertStep(StepState::Ok, "s", 0);
+  TEST_ASSERT_EQUAL_STRING("sent: answered 200; pause 30 s before the next step", stepDetail(R("s"), 0).c_str());
+  TEST_ASSERT_EQUAL(1, env->httpSent.size());
+  TEST_ASSERT_EQUAL(0, env->sent.size());  // nothing went to a socket, no status query
+  runFor(32000);
+  assertState(RunState::Done, "s");
+  TEST_ASSERT_EQUAL(2, env->httpSent.size());
+  TEST_ASSERT_TRUE(env->httpSent[1].post);
+  TEST_ASSERT_EQUAL_STRING("{\"text\":\"hot\"}", env->httpSent[1].body.c_str());
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+  TEST_ASSERT_EQUAL_UINT32(2, eng->stats().httpRequests);
+  TEST_ASSERT_EQUAL_UINT32(2, eng->stats().jobs);  // the socket's command and query only
+  TEST_ASSERT_TRUE(env->requests.empty());  // every request released
+}
+
+void test_the_label_of_an_http_step_never_shows_the_path_or_the_query() {
+  Def d = def("s", {http(kTelegram, true), http("http://user:pw@10.0.0.5:8080/x?y=1"), http("https://h.example")});
+  TEST_ASSERT_EQUAL_STRING("POST api.telegram.org", d.label(0).c_str());
+  TEST_ASSERT_EQUAL_STRING("GET 10.0.0.5:8080", d.label(1).c_str());
+  TEST_ASSERT_EQUAL_STRING("GET h.example", d.label(2).c_str());
+  setDefs({d});
+  env->answers[kTelegram] = 500;
+  eng->start("s", "manual", env->now);
+  runFor(20000);
+  for (const std::string& line : env->logLines) TEST_ASSERT_FALSE(contains(line, "SECRET") || contains(line, "sendMessage") || contains(line, "pw@"));
+}
+
+void test_an_http_step_that_fails_is_tried_three_times_and_the_scenario_goes_on() {
+  env->devices["a"] = FakeDevice();
+  env->answers[kPing] = 503;
+  setDefs({def("s", {http(kPing, false, "", 600), step("a")})});
+  eng->start("s", "manual", env->now);
+  runFor(10000);  // 3 x 0.8 s + 2 x 2 s
+  assertStep(StepState::Failed, "s", 0);
+  TEST_ASSERT_EQUAL_UINT8(3, R("s").steps[0].attempts);
+  TEST_ASSERT_EQUAL_STRING("http: the server answered 503", stepDetail(R("s"), 0).c_str());
+  assertState(RunState::Done, "s");  // no pause after a step that failed
+  assertStep(StepState::Ok, "s", 1);
+  env->answers[kPing] = 0;  // no answer at all
+  eng->start("s", "manual", env->now);
+  runFor(10000);
+  TEST_ASSERT_EQUAL_STRING("connect: no answer", stepDetail(R("s"), 0).c_str());
+}
+
+void test_a_power_up_run_keeps_trying_an_http_step_for_90_s() {
+  env->answers[kPing] = 0;  // the internet is not back yet
+  setDefs({def("p", {http(kPing)})});
+  eng->start("p", "power-on", env->now);
+  runFor(10000 + 40000);  // 10 s for the sockets to join, then 40 s of attempts
+  assertState(RunState::Running, "p");
+  env->answers[kPing] = 200;
+  runFor(10000);
+  assertStep(StepState::Ok, "p", 0);
+  TEST_ASSERT_TRUE(R("p").steps[0].attempts >= 6);
+}
+
+void test_many_runs_hold_at_most_two_places_in_the_http_lane_and_the_sockets_do_not_wait_for_it() {
+  std::vector<Def> defs;
+  for (int i = 0; i < 6; ++i) defs.push_back(def("h" + std::to_string(i), {http(kPing), http(kPing)}));
+  env->devices["a"] = FakeDevice();
+  defs.push_back(def("dev", {step("a")}));
+  setDefs(defs);
+  for (int i = 0; i < 6; ++i) eng->start("h" + std::to_string(i), "manual", env->now);
+  eng->start("dev", "manual", env->now);
+  runFor(1500);
+  assertState(RunState::Done, "dev");  // 1 s of the Tuya lane, not behind 12 requests of 0.8 s
+  runFor(15000);
+  for (int i = 0; i < 6; ++i) assertState(RunState::Done, "h" + std::to_string(i));
+  TEST_ASSERT_EQUAL(kMaxHttpInFlight, env->httpMaxPending);
+  TEST_ASSERT_EQUAL(12, env->httpSent.size());
+}
+
+void test_a_full_http_list_makes_the_step_wait_and_a_stop_withdraws_nothing_that_went_out() {
+  env->httpCapacity = 0;  // the API's test requests hold the list
+  setDefs({def("s", {http(kPing), http(kTelegram, true)})});
+  eng->start("s", "manual", env->now);
+  runFor(30000);
+  assertStep(StepState::Running, "s", 0);
+  TEST_ASSERT_EQUAL(0, env->httpSent.size());
+  env->httpCapacity = 4;
+  runFor(400);  // the request is on its way (0.8 s)
+  eng->stop("s");
+  runFor(5000);
+  assertState(RunState::Stopped, "s");
+  TEST_ASSERT_EQUAL(1, env->httpSent.size());  // the one on its way arrived, the next never went out
+}
+
+void test_an_edit_of_an_http_request_changes_the_hash_a_device_step_hashes_as_before() {
+  const uint32_t a = defHash(def("s", {http(kTelegram, true, "{\"text\":\"a\"}")}));
+  const uint32_t b = defHash(def("s", {http(kTelegram, true, "{\"text\":\"b\"}")}));
+  const uint32_t c = defHash(def("s", {http(kTelegram, false)}));
+  TEST_ASSERT_TRUE(a != b && a != c && b != c);
+  // FNV-1a of a one-step "towel on" scenario as the firmware before HTTP steps saved it in /runs.json.
+  Def d = def("s", {step("towel")}, 30);
+  uint32_t h = 2166136261u;
+  auto mix = [&](uint32_t v) { for (int i = 0; i < 4; ++i) { h ^= (v >> (8 * i)) & 0xff; h *= 16777619u; } };
+  mix(30);
+  mix(1);
+  for (char ch : std::string("towel")) { h ^= static_cast<unsigned char>(ch); h *= 16777619u; }
+  mix(5);
+  mix(1u | 2u);
+  mix(static_cast<uint32_t>(-1));
+  TEST_ASSERT_EQUAL_UINT32(h, defHash(d));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
@@ -681,5 +883,12 @@ int main(int, char**) {
   RUN_TEST(test_dirty_marks_what_is_worth_saving_and_the_history_gets_every_end);
   RUN_TEST(test_the_start_time_is_counted_back_when_the_clock_comes_later);
   RUN_TEST(test_the_steps_names_and_reasons_of_a_run_come_from_the_allocator_set);
+  RUN_TEST(test_an_http_step_sends_its_request_with_no_status_query_and_keeps_its_pause);
+  RUN_TEST(test_the_label_of_an_http_step_never_shows_the_path_or_the_query);
+  RUN_TEST(test_an_http_step_that_fails_is_tried_three_times_and_the_scenario_goes_on);
+  RUN_TEST(test_a_power_up_run_keeps_trying_an_http_step_for_90_s);
+  RUN_TEST(test_many_runs_hold_at_most_two_places_in_the_http_lane_and_the_sockets_do_not_wait_for_it);
+  RUN_TEST(test_a_full_http_list_makes_the_step_wait_and_a_stop_withdraws_nothing_that_went_out);
+  RUN_TEST(test_an_edit_of_an_http_request_changes_the_hash_a_device_step_hashes_as_before);
   return UNITY_END();
 }
