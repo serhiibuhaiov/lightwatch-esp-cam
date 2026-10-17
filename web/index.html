@@ -222,8 +222,13 @@ function viewStatus() {
           kv("Внутрішня: вільно", fmtKb(m.internal_free)),
           kv("Внутрішня: мінімум від старту", fmtKb(m.internal_min)),
           kv("Найбільший вільний блок", fmtKb(m.internal_largest)),
+          kv("8-бітна (DRAM): вільно", fmtKb(m.dram_free)),
+          kv("8-бітна (DRAM): мінімум від старту", fmtKb(m.dram_min)),
+          kv("8-бітна (DRAM): найбільший блок", fmtKb(m.dram_largest)),
+          kv("Для DMA (карта SD): вільно / мінімум", fmtKb(m.dma_free) + " / " + fmtKb(m.dma_min)),
           kv("PSRAM", m.psram_total ? fmtKb(m.psram_free) + " вільно з " + (m.psram_total / 1048576).toFixed(1) + " МБ" : "немає")),
           E("p", { class: "mut", style: "margin:8px 0 0" }, "Внутрішня пам'ять тримає стеки завдань, мережу й більшість даних прошивки; «мінімум від старту» показує, наскільки близько вона підходила до межі. " +
+            "«Внутрішня» рахує й залишок IRAM, придатний лише для 32-бітного доступу; рядкам, мережі й карті SD потрібна 8-бітна (DRAM), а драйверу карти ще й придатна для DMA: коли вона закінчується, запис на карту не вдається, хоч «внутрішня» показує десятки КБ. " +
             "У PSRAM ідуть великі виділення (від 4 КБ), якщо вона є на платі.")));
       }
       if (s.tuya) {  // how long the requests to the sockets waited since boot (see README: two lanes, one lock per socket)

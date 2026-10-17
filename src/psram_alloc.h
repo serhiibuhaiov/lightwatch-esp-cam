@@ -16,12 +16,15 @@ inline bool psramAvailable() {
   return has;
 }
 
+// malloc() from PSRAM when the board has it, from the normal heap otherwise (or when PSRAM is full); free() releases it.
+inline void* psramMalloc(size_t size) {
+  void* p = psramAvailable() ? heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  return p ? p : malloc(size);
+}
+
 class PsramAllocator : public ArduinoJson::Allocator {
  public:
-  void* allocate(size_t size) override {
-    void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    return p ? p : malloc(size);
-  }
+  void* allocate(size_t size) override { return psramMalloc(size); }
   void deallocate(void* p) override { free(p); }  // free() releases a block from any heap_caps region
   void* reallocate(void* p, size_t size) override {
     void* q = heap_caps_realloc(p, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

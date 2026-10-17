@@ -214,12 +214,23 @@ void onStatus(AsyncWebServerRequest* req) {
   doc["time_valid"] = time(nullptr) > 1700000000;
   {
     // Internal RAM (task stacks, network, most of the firmware) and PSRAM (allocations of 4 KB and more go there when
-    // the board has it). "min" is the lowest free internal RAM since boot; "largest" the biggest block that can still
-    // be allocated in one piece (fragmentation).
+    // the board has it). "min" is the lowest free since boot; "largest" the biggest block that can still be allocated in
+    // one piece (fragmentation).
+    // "internal" also counts the IRAM left over from the code, usable only for 32-bit access: not for strings, the network
+    // or the SD card. "dram" (8-bit internal RAM) is what almost every allocation needs, "dma" what the SD card driver
+    // needs for its buffers (on the ESP32 the same RAM as "dram"): when they run out, writing to the card fails while
+    // "internal" still shows tens of KB.
     JsonObject m = doc["memory"].to<JsonObject>();
     m["internal_free"] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     m["internal_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     m["internal_largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    constexpr uint32_t kDram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    m["dram_free"] = heap_caps_get_free_size(kDram);
+    m["dram_min"] = heap_caps_get_minimum_free_size(kDram);
+    m["dram_largest"] = heap_caps_get_largest_free_block(kDram);
+    m["dma_free"] = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    m["dma_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_DMA);
+    m["dma_largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
     m["psram_total"] = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
     m["psram_free"] = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     m["psram_largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);

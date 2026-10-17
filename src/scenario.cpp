@@ -67,8 +67,10 @@ struct Def {
   bool enabled = true;
   String trigger = kTriggerPowerOn;
   uint16_t defaultPauseS = 30;
-  std::vector<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
-  std::vector<Step> steps;
+  // In PSRAM when the board has it (ScenarioEngine::setAllocator in begin()), like the runs: 24 scenarios x 24 steps
+  // would otherwise take ~16 KB of internal RAM.
+  ScenarioEngine::List<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
+  ScenarioEngine::List<Step> steps;
   // power_below / power_above only:
   String whenDevice;
   uint32_t watts = 0;
@@ -79,10 +81,11 @@ struct Def {
   bool isPower() const { return trigger == kTriggerPowerBelow || trigger == kTriggerPowerAbove; }
   const String& device(const Step& s) const { return devices[s.dev]; }
 };
+using Defs = ScenarioEngine::List<Def>;
 
 SemaphoreHandle_t gMux = nullptr;      // guards everything below
 SemaphoreHandle_t gSaveMux = nullptr;  // serialises save(); held across the SD write
-std::vector<Def> gDefs;
+Defs gDefs;
 ScenarioEngine::Engine* gEngine = nullptr;  // every run of every scenario (lib/scenario_engine)
 struct {
   bool sd = false;
@@ -132,7 +135,7 @@ bool readBool(JsonVariantConst v, const String& where, bool& out, String& err) {
 }
 
 // Parses the whole document; on success `out` holds the list, on failure `err` says why.
-bool parse(const String& raw, std::vector<Def>& out, String& err) {
+bool parse(const String& raw, Defs& out, String& err) {
   JsonDocument doc(PsramAllocator::instance());
   DeserializationError e = deserializeJson(doc, raw);
   if (e) {
@@ -153,7 +156,7 @@ bool parse(const String& raw, std::vector<Def>& out, String& err) {
     return false;
   }
 
-  std::vector<Def> list;
+  Defs list;
   size_t si = 0;
   for (JsonVariantConst item : arr.as<JsonArrayConst>()) {
     const String where = String("scenarios[") + String(static_cast<unsigned>(si++)) + "]";
@@ -305,7 +308,7 @@ void writeOnInterrupt(JsonObject o, const ScenarioEngine::OnInterrupt& p) {
   o["resume_within_min"] = p.resumeWithinMin;
 }
 
-String fileText(const std::vector<Def>& list, bool pretty) {
+String fileText(const Defs& list, bool pretty) {
   JsonDocument doc(PsramAllocator::instance());
   doc["version"] = 1;
   JsonArray arr = doc["scenarios"].to<JsonArray>();
@@ -343,7 +346,7 @@ String fileText(const std::vector<Def>& list, bool pretty) {
 }
 
 void load() {
-  std::vector<Def> list;
+  Defs list;
   String error;
   bool fileFound = false;
   bool replace = true;
@@ -361,7 +364,7 @@ void load() {
     // A save removes the old file before renaming the new one: a power cut in between leaves only the
     // complete temporary file. Never replace that with an empty template.
     String tmp, tmpErr;
-    std::vector<Def> tmpList;
+    Defs tmpList;
     if (Storage::sdReadAll(kTmp, tmp, maxFileBytes()) && parse(tmp, tmpList, tmpErr) && Storage::sdReplace(kTmp, kPath)) {
       list = tmpList;
       fileFound = true;
@@ -558,7 +561,7 @@ String runsTextLocked(uint32_t epoch, size_t& count) {
     JsonObject def = o["def"].to<JsonObject>();  // the steps the run works with: names and actions for the history
     def["default_pause_s"] = s.def.defaultPauseS;
     JsonArray devs = def["devices"].to<JsonArray>();
-    for (const std::string& n : s.def.devices) devs.add(n);
+    for (const ScenarioEngine::Text& n : s.def.devices) devs.add(n.c_str());
     JsonArray dsteps = def["steps"].to<JsonArray>();
     for (const ScenarioEngine::StepDef& st : s.def.steps) {
       JsonArray a = dsteps.add<JsonArray>();  // [dev, on, enabled, pause_after_s]
@@ -575,7 +578,7 @@ String runsTextLocked(uint32_t epoch, size_t& count) {
       a.add(sr.attempts);
       a.add(sr.pauseS);
       a.add(sr.atS);
-      a.add(clip(s.whys.get(i)));
+      a.add(clip(ScenarioEngine::str(s.whys.get(i))));
     }
   });
   JsonArray disarmed = doc["disarmed"].to<JsonArray>();  // the power rules that fired and wait for their condition to go
@@ -817,7 +820,7 @@ void refreshWatched() {
 }
 
 void watchTick() {
-  std::vector<Def> rules;
+  Defs rules;
   {
     Lock lock;
     for (const Def& d : gDefs) {
@@ -971,6 +974,7 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
 }  // namespace
 
 void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec) {
+  ScenarioEngine::setAllocator(&psramMalloc);  // the scenario list and the runs: PSRAM when the board has it
   if (!gMux) gMux = xSemaphoreCreateMutex();
   if (!gSaveMux) gSaveMux = xSemaphoreCreateMutex();
   {
@@ -1283,7 +1287,7 @@ SaveResult save(const String& json) {
     return r;
   }
 
-  std::vector<Def> next;
+  Defs next;
   if (!parse(json, next, r.error)) {
     r.invalid = true;
     return r;

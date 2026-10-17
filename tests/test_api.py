@@ -86,8 +86,13 @@ def test_status(dev):
 
 def test_status_memory(dev):
     m = dev.get("/api/status").json()["memory"]
-    assert set(m) == {"internal_free", "internal_min", "internal_largest", "psram_total", "psram_free", "psram_largest"}
+    assert set(m) == {"internal_free", "internal_min", "internal_largest", "dram_free", "dram_min", "dram_largest",
+                      "dma_free", "dma_min", "dma_largest", "psram_total", "psram_free", "psram_largest"}
     assert 20000 < m["internal_min"] <= m["internal_free"] and 0 < m["internal_largest"] <= m["internal_free"]
+    # 8-bit DRAM and DMA-capable RAM are part of the internal RAM (which also counts the 32-bit-only IRAM).
+    for k in ("dram", "dma"):
+        assert 0 < m[f"{k}_min"] <= m[f"{k}_free"] <= m["internal_free"] and 0 < m[f"{k}_largest"] <= m[f"{k}_free"], m
+    assert 10000 < m["dram_min"]
     assert m["psram_total"] == 0 or (m["psram_total"] > 1 << 20 and m["psram_largest"] <= m["psram_free"] <= m["psram_total"])
 
 

@@ -15,12 +15,40 @@
 // command is already on its way (then right after it).
 //
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
 namespace ScenarioEngine {
+
+// ---- where the runs live ---------------------------------------------------------------------------------------------
+// The steps, the device names and the reasons of the runs (and of the board's scenario list) are allocated through
+// Alloc. By default that is malloc(); the board points it at PSRAM (setAllocator): 24 runs x 24 steps would otherwise take
+// ~30 KB of the 8-bit internal RAM that the network and the SD card driver need, and when that runs out, writing to the
+// card fails. The function must return memory that free() releases, nullptr when there is none.
+using AllocFn = void* (*)(size_t bytes);
+void setAllocator(AllocFn fn);
+void* allocBytes(size_t bytes);  // through the function set; out of memory: std::bad_alloc (abort without exceptions)
+
+template <class T>
+struct Alloc {
+  using value_type = T;
+  Alloc() noexcept = default;
+  template <class U>
+  Alloc(const Alloc<U>&) noexcept {}
+  T* allocate(size_t n) { return static_cast<T*>(allocBytes(n * sizeof(T))); }
+  void deallocate(T* p, size_t) noexcept { std::free(p); }
+  template <class U>
+  bool operator==(const Alloc<U>&) const noexcept { return true; }
+  template <class U>
+  bool operator!=(const Alloc<U>&) const noexcept { return false; }
+};
+using Text = std::basic_string<char, std::char_traits<char>, Alloc<char>>;
+template <class T>
+using List = std::vector<T, Alloc<T>>;
+inline std::string str(const Text& t) { return std::string(t.data(), t.size()); }
 
 constexpr uint8_t kMaxInFlight = 4;           // engine jobs queued or running in the Tuya command lane at once
 constexpr uint8_t kAttempts = 3;              // tries per step
@@ -46,10 +74,10 @@ struct StepDef {
 struct Def {
   std::string name;
   uint16_t defaultPauseS = 30;
-  std::vector<std::string> devices;  // the distinct device names of the steps
-  std::vector<StepDef> steps;
+  List<Text> devices;  // the distinct device names of the steps
+  List<StepDef> steps;
 
-  const std::string& device(size_t step) const { return devices[steps[step].dev]; }
+  const Text& device(size_t step) const { return devices[steps[step].dev]; }
 };
 
 struct DeviceInfo {
@@ -105,14 +133,14 @@ struct StepRun {
 // have one, so they are kept apart from the steps instead of an empty string in every step.
 class Whys {
  public:
-  const std::string& get(size_t step) const {
-    static const std::string none;
+  const Text& get(size_t step) const {
+    static const Text none;
     for (const auto& w : v_) {
       if (w.first == step) return w.second;
     }
     return none;
   }
-  void set(size_t step, const std::string& text) {  // "" removes it
+  void set(size_t step, const Text& text) {  // "" removes it
     for (size_t i = 0; i < v_.size(); ++i) {
       if (v_[i].first != step) continue;
       if (text.empty()) {
@@ -126,7 +154,7 @@ class Whys {
   }
 
  private:
-  std::vector<std::pair<uint16_t, std::string>> v_;
+  List<std::pair<uint16_t, Text>> v_;
 };
 
 enum class Phase : uint8_t { WaitStart, WaitNet, Settle, NextStep, Pause, Command, Verify, Gap, Finished };
@@ -135,15 +163,15 @@ struct Run {
   // What the API shows.
   RunState state = RunState::Idle;
   std::string trigger;     // what started it: power-on | manual | power-below | power-above
-  std::string skipReason;  // state Skipped / Interrupted: why
+  Text skipReason;         // state Skipped / Interrupted: why
   std::string waitReason;  // while waiting for the network: "wifi"
   uint32_t startAtMs = 0;
   int current = -1;        // the step in progress; -1 in a pause or when none
-  std::vector<StepRun> steps;
+  List<StepRun> steps;
   Whys whys;
   bool alive = false;      // started and not finished
   bool stop = false;       // asked to stop
-  std::string resumed;     // the restarts this run went through and was continued after: "SW at step 2; PANIC at step 3"
+  Text resumed;            // the restarts this run went through and was continued after: "SW at step 2; PANIC at step 3"
   uint32_t startEpoch = 0; // Unix time the run began (0 unknown)
   uint32_t durationS = 0;  // an ended run: how long it went
 
@@ -162,7 +190,7 @@ struct Run {
   uint32_t askedMs = 0;          // when the current command/query asked for a place (kQueueWaitMs counts from here)
   uint32_t pauseS = 0;           // pause before the next enabled step
   size_t pauseFrom = 0;          // the step the pause belongs to
-  std::string lastWhy;
+  Text lastWhy;
   unsigned switched = 0, skipped = 0, failed = 0;
   uint32_t startedMs = 0;        // when it began running in this boot
   uint32_t carriedMs = 0;        // how long it had been going before a restart it was continued after
@@ -196,9 +224,9 @@ struct Snapshot {
   uint32_t leftMs = 0;      // until the deadline of WaitStart / Settle / Pause / Gap
   uint32_t runMs = 0;       // how long the run had been going
   uint32_t startEpoch = 0;
-  std::string resumed;
+  Text resumed;
   Def def;                  // the steps the run works with (empty while it waits for its start)
-  std::vector<StepRun> steps;
+  List<StepRun> steps;
   Whys whys;
   unsigned switched = 0, skipped = 0, failed = 0;
 };
@@ -293,7 +321,7 @@ class Engine {
   void logf(bool warn, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
 
   Env& env_;
-  std::map<std::string, Run> runs_;  // by scenario name
+  std::map<std::string, Run, std::less<std::string>, Alloc<std::pair<const std::string, Run>>> runs_;  // by scenario name
   Stats stats_;
   bool dirty_ = false;
   uint32_t lastSignature_ = 0;

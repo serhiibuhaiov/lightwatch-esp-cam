@@ -165,8 +165,8 @@ Def def(const std::string& name, std::vector<S> steps, uint16_t defaultPause = 0
   d.defaultPauseS = defaultPause;
   for (const S& s : steps) {
     StepDef st;
-    auto it = std::find(d.devices.begin(), d.devices.end(), s.device);
-    if (it == d.devices.end()) it = d.devices.insert(d.devices.end(), s.device);
+    auto it = std::find(d.devices.begin(), d.devices.end(), s.device.c_str());
+    if (it == d.devices.end()) it = d.devices.insert(d.devices.end(), Text(s.device.c_str()));
     st.dev = static_cast<uint16_t>(it - d.devices.begin());
     st.on = s.on;
     st.pauseAfterS = s.pause;
@@ -626,6 +626,34 @@ void test_the_start_time_is_counted_back_when_the_clock_comes_later() {
   TEST_ASSERT_TRUE(h.startEpoch >= 1800000000 - 51 && h.startEpoch <= 1800000000 - 49);
 }
 
+// ---- memory ---------------------------------------------------------------------------------------------------------
+
+size_t gCountedBytes = 0;
+void* countingAlloc(size_t n) {
+  gCountedBytes += n;
+  return std::malloc(n);
+}
+
+void test_the_steps_names_and_reasons_of_a_run_come_from_the_allocator_set() {
+  setAllocator(&countingAlloc);  // the board sets PSRAM
+  env->devices["a"].noEffect = true;
+  std::vector<decltype(step("a"))> steps{step("a")};  // (S is also a function here)
+  for (int k = 0; k < 23; ++k) steps.push_back(step("a-device-with-a-long-name-" + std::to_string(k)));
+  setDefs({def("s", steps)});
+  const size_t afterDefs = gCountedBytes;
+  eng->start("s", "manual", env->now);
+  runFor(20000);
+  assertState(RunState::Done, "s");
+  // The run's copy of the 24 steps and their names, its step states and the 24 reasons went through it.
+  TEST_ASSERT_GREATER_THAN(24 * (sizeof(StepDef) + sizeof(StepRun) + 30 + 20), gCountedBytes - afterDefs);
+  TEST_ASSERT_TRUE(contains(stepDetail(R("s"), 0), "the status does not show it on"));
+  TEST_ASSERT_EQUAL_STRING("no such device in /devices.json", stepDetail(R("s"), 23).c_str());
+  setAllocator(nullptr);  // back to malloc
+  const size_t before = gCountedBytes;
+  setDefs({def("t", {step("a")})});
+  TEST_ASSERT_EQUAL(before, gCountedBytes);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
@@ -652,5 +680,6 @@ int main(int, char**) {
   RUN_TEST(test_a_run_whose_scenario_is_gone_cannot_be_continued);
   RUN_TEST(test_dirty_marks_what_is_worth_saving_and_the_history_gets_every_end);
   RUN_TEST(test_the_start_time_is_counted_back_when_the_clock_comes_later);
+  RUN_TEST(test_the_steps_names_and_reasons_of_a_run_come_from_the_allocator_set);
   return UNITY_END();
 }

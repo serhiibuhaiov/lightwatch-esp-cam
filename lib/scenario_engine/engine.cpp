@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <new>
 
 namespace ScenarioEngine {
 namespace {
+
+AllocFn gAlloc = &std::malloc;
 
 bool due(uint32_t now, uint32_t at) { return static_cast<int32_t>(now - at) >= 0; }
 uint32_t until(uint32_t now, uint32_t at) {
@@ -15,6 +18,20 @@ uint32_t until(uint32_t now, uint32_t at) {
 const char* verb(bool on) { return on ? "on" : "off"; }
 
 }  // namespace
+
+void setAllocator(AllocFn fn) { gAlloc = fn ? fn : &std::malloc; }
+
+void* allocBytes(size_t bytes) {
+  void* p = gAlloc(bytes ? bytes : 1);
+  if (!p) {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    throw std::bad_alloc();
+#else
+    std::abort();
+#endif
+  }
+  return p;
+}
 
 const char* runStateName(RunState s) {
   switch (s) {
@@ -115,7 +132,7 @@ uint32_t defHash(const Def& d) {
       h *= 16777619u;
     }
   };
-  auto mixText = [&](const std::string& s) {
+  auto mixText = [&](const Text& s) {
     for (unsigned char c : s) {
       h ^= c;
       h *= 16777619u;
@@ -143,10 +160,10 @@ std::string stepDetail(const Run& r, size_t i) {
       if (s.pauseS) out += "; pause " + std::to_string(s.pauseS) + " s before the next step";
       return out;
     }
-    case StepState::Failed: return r.whys.get(i);
+    case StepState::Failed: return str(r.whys.get(i));
     case StepState::Skipped: return "the device is ignored (see the device settings)";
     case StepState::Stopped: return "stopped";
-    case StepState::Running: return s.attempts > 1 ? "previous attempt: " + r.whys.get(i) : std::string();
+    case StepState::Running: return s.attempts > 1 ? "previous attempt: " + str(r.whys.get(i)) : std::string();
     default: return std::string();
   }
 }
@@ -203,7 +220,7 @@ void Engine::skip(const std::string& name, const std::string& reason) {
   Run& r = runs_[name];
   r = Run();
   r.state = RunState::Skipped;
-  r.skipReason = reason;
+  r.skipReason.assign(reason.data(), reason.size());
 }
 
 void Engine::unskip(const std::string& name) {
@@ -367,7 +384,7 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
           continue;
         }
         const bool on = r.def.steps[r.step].on;
-        if (env_.device(r.def.device(r.step)).switchState != (on ? 1 : 0)) {
+        if (env_.device(str(r.def.device(r.step))).switchState != (on ? 1 : 0)) {
           attemptFailed(name, r, now, std::string("the command was accepted, but the status does not show it ") + verb(on));
           continue;
         }
@@ -443,8 +460,8 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
     }
   }
   r.current = static_cast<int>(r.step);
-  const std::string& device = r.def.device(r.step);
-  const DeviceInfo d = env_.device(device);
+  const Text& device = r.def.device(r.step);
+  const DeviceInfo d = env_.device(str(device));
   StepRun& sr = r.steps[r.step];
   if (!d.exists) {
     sr.state = StepState::Failed;
@@ -480,8 +497,8 @@ void Engine::startAttempt(const std::string& name, Run& r, uint32_t now) {
   StepRun& sr = r.steps[r.step];
   sr.state = StepState::Running;
   sr.attempts = r.attempt;
-  r.whys.set(r.step, r.attempt > 1 ? r.lastWhy : std::string());
-  r.offlineAttempt = env_.device(r.def.device(r.step)).offline;
+  r.whys.set(r.step, r.attempt > 1 ? r.lastWhy : Text());
+  r.offlineAttempt = env_.device(str(r.def.device(r.step))).offline;
   r.attemptJobMs = 0;
   r.phase = Phase::Command;
   r.wantsSlot = true;
@@ -500,8 +517,8 @@ void Engine::endAttemptMeasurement(Run& r, bool ok) {
 void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const std::string& why) {
   endAttemptMeasurement(r, false);
   const StepDef& st = r.def.steps[r.step];
-  const std::string& device = r.def.device(r.step);
-  r.lastWhy = why;
+  const Text& device = r.def.device(r.step);
+  r.lastWhy.assign(why.data(), why.size());
   logf(true, "[%s] step %u: %s %s attempt %u failed: %s", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str(), verb(st.on),
        static_cast<unsigned>(r.attempt), why.c_str());
   const uint32_t gap = r.patient ? kPatientGapMs : kRetryGapMs;
@@ -603,7 +620,7 @@ void Engine::grantSlots(uint32_t now) {
     }
     const StepDef& st = r.def.steps[r.step];
     const Op op = r.phase == Phase::Verify ? Op::Query : st.on ? Op::On : Op::Off;
-    const uint32_t id = env_.submit(op, r.def.device(r.step));
+    const uint32_t id = env_.submit(op, str(r.def.device(r.step)));
     if (!id) {  // the Tuya command list is full (buttons, the API): try again on the next look
       if (!r.queueFullCounted) {
         r.queueFullCounted = true;
@@ -718,7 +735,9 @@ Engine::StartResult Engine::resume(const Snapshot& s, uint32_t elapsedMs, const 
     r.carriedMs = s.runMs + elapsedMs;
     r.needNet = true;
     const std::string at = cause + " at step " + std::to_string(r.step + 1);
-    r.resumed = s.resumed.empty() ? at : s.resumed + "; " + at;
+    r.resumed = s.resumed;
+    if (!r.resumed.empty()) r.resumed += "; ";
+    r.resumed += at.c_str();
     if (s.phase == Phase::Pause) {
       r.phase = Phase::Pause;
       r.deadlineMs = now + left(s.leftMs);
@@ -739,7 +758,9 @@ Engine::StartResult Engine::resume(const Snapshot& s, uint32_t elapsedMs, const 
     r.state = RunState::Waiting;
     r.phase = Phase::WaitStart;
     r.startAtMs = now + (s.phase == Phase::WaitStart ? left(s.leftMs) : 0);
-    r.resumed = s.resumed.empty() ? cause + " while waiting" : s.resumed + "; " + cause + " while waiting";
+    r.resumed = s.resumed;
+    if (!r.resumed.empty()) r.resumed += "; ";
+    r.resumed += (cause + " while waiting").c_str();
     logf(false, "[%s] continued after a restart (%s): waits for its start", s.name.c_str(), cause.c_str());
   }
   dirty_ = true;
@@ -751,7 +772,7 @@ void Engine::interrupted(const Snapshot& s, const std::string& why) {
   r = Run();
   r.state = RunState::Interrupted;
   r.trigger = s.trigger;
-  r.skipReason = why;
+  r.skipReason.assign(why.data(), why.size());
   r.def = s.def;
   r.steps = s.steps;
   r.steps.resize(r.def.steps.size());

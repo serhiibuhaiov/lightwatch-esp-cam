@@ -72,7 +72,9 @@ def test_twelve_runs_share_four_places_and_a_button_still_gets_through(dev, guar
 
 def test_the_most_runs_with_the_most_steps_fit_in_memory(dev, guard, fakes):
     """All scenarios (24 with PSRAM) with 24 steps each, all alive at once (in a pause after their first step): the board
-    keeps enough internal RAM, and the big answers still come."""
+    keeps enough 8-bit internal RAM (DRAM: what the network and the SD card driver need; "internal" also counts IRAM
+    that only takes 32-bit access), and the big answers still come. With PSRAM the runs live there and cost next to no DRAM;
+    before they did (~1.4 KB a run), the second run of this test in a row ran DRAM out and writing to the card failed."""
     fakes.start()
     fakes.set(d1=True)
     limit = listing(dev)["max"]
@@ -96,11 +98,13 @@ def test_the_most_runs_with_the_most_steps_fit_in_memory(dev, guard, fakes):
         assert r.status_code == 200
         st = dev.get("/api/status").json()
         during, engine_ = st["memory"], st["scenario_engine"]
-        print(f"\n{len(names)} runs x 24 steps alive: runs_alive {engine_['runs_alive']}, internal free {before['internal_free']} -> "
-              f"{during['internal_free']}, minimum since boot {during['internal_min']}, largest block {during['internal_largest']}, "
-              f"GET /api/scenarios {len(r.content)} bytes")
+        print(f"\n{len(names)} runs x 24 steps alive: runs_alive {engine_['runs_alive']}, 8-bit DRAM free {before['dram_free']} -> "
+              f"{during['dram_free']}, minimum since boot {during['dram_min']}, largest block {during['dram_largest']} "
+              f"(internal with IRAM {during['internal_free']}), GET /api/scenarios {len(r.content)} bytes")
         assert engine_["runs_alive"] == len(names)
-        assert during["internal_free"] > 40000 and during["internal_largest"] > 20000
+        assert during["dram_free"] > 40000 and during["dram_largest"] > 20000
+        if during["psram_total"]:
+            assert before["dram_free"] - during["dram_free"] < 8000, (before, during)
     finally:
         for n in names:
             dev.request("POST", "/api/scenarios/stop", params={"name": n})
