@@ -520,6 +520,7 @@ class BoardEnv : public ScenarioEngine::Env {
 struct Watch {
   bool armed = true;
   bool restored = false;  // restored "fired" after a restart: armed again only by a sure "condition false"
+  bool pending = false;   // met while its scenario was running: starts when that run ends, if the condition still holds
   bool met = false;
   String reason = "no-data";
   uint32_t runS = 0;
@@ -848,6 +849,7 @@ void watchTick() {
       w.reason = pc.reason;
       w.runS = pc.runS;
       w.power = pc.lastPower;
+      if (!pc.met) w.pending = false;  // gone before the run ended: no repeat
       if (pc.met && w.armed) {
         fire = true;
       } else if (pc.met) {
@@ -860,14 +862,29 @@ void watchTick() {
     }
     if (!fire) continue;
     // Still running (an earlier run is not over): not started, the rule stays armed and is looked at again next time.
-    if (runWith(d.name, below ? "power-below" : "power-above") == RunResult::Started) {
-      {
-        Lock lock;
-        gWatch[d.name].armed = false;
+    const RunResult started = runWith(d.name, below ? "power-below" : "power-above");
+    bool wasPending = false;
+    bool nowPending = false;
+    {
+      Lock lock;
+      Watch& w = gWatch[d.name];
+      wasPending = w.pending;
+      if (started == RunResult::Started) {
+        w.armed = false;
+        w.pending = false;
         gRunsDirty = true;
+      } else if (started == RunResult::AlreadyRunning) {
+        w.pending = true;
+        nowPending = !wasPending;
       }
-      LOGI(TAG, "[%s] %s: %s held for %u s (>= %u s): started", d.name.c_str(), d.whenDevice.c_str(),
-           below ? "power below the threshold" : "power above the threshold", static_cast<unsigned>(pc.runS), static_cast<unsigned>(d.forS));
+    }
+    const char* what = below ? "power below the threshold" : "power above the threshold";
+    if (started == RunResult::Started) {
+      LOGI(TAG, "[%s] %s: %s held for %u s (>= %u s): started%s", d.name.c_str(), d.whenDevice.c_str(), what,
+           static_cast<unsigned>(pc.runS), static_cast<unsigned>(d.forS), wasPending ? " after the run that was going" : "");
+    } else if (nowPending) {
+      LOGI(TAG, "[%s] %s: %s held for %u s (>= %u s) while the scenario is running: starts again when the run ends, if it still holds",
+           d.name.c_str(), d.whenDevice.c_str(), what, static_cast<unsigned>(pc.runS), static_cast<unsigned>(d.forS));
     }
   }
 }
@@ -933,6 +950,7 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
     if (it != gWatch.end()) {
       JsonObject ws = o["watch"].to<JsonObject>();
       ws["armed"] = it->second.armed;
+      ws["pending"] = it->second.pending;  // met during a run of this scenario: starts when that run ends
       if (it->second.restored) ws["restored"] = true;  // fired before the restart; armed again only by a sure "condition false"
       ws["met"] = it->second.met;
       ws["reason"] = it->second.reason;

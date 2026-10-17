@@ -249,6 +249,32 @@ def test_it_fires_once_and_is_armed_again_only_after_the_condition_was_false(dev
     assert len(fake.commands) in (6, 7, 8, 9)
 
 
+def test_met_while_its_scenario_runs_it_waits_for_the_run_and_starts_once_more(dev, guard, fake):
+    """The condition comes true during a manual run: the rule stays armed and `pending`, and when that run ends (the
+    condition still holding) the scenario runs once more, by the rule."""
+    name = TEST + "busy"
+    steps = [{"device": FAKE_NAME, "action": "on", "pause_after_s": 40}, {"device": "zz-no-such-device"}]
+    fake.set(d19=HIGH)  # the condition is false while the manual run starts
+    assert put(dev, guard + [rule(name, steps=steps)]).status_code == 200
+    try:
+        with Sampler(dev):
+            assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+            assert wait_until(lambda: scn(dev, name).get("pause_left_s") is not None, 20), scn(dev, name)
+            assert len(fake.commands) == 1
+            fake.set(d19=LOW)  # "below 100 W for 10 s" comes true during the pause
+            assert wait_until(lambda: scn(dev, name)["watch"]["pending"] is True, 25), scn(dev, name)
+            s = scn(dev, name)
+            assert s["state"] == "running" and s["run_trigger"] == "manual" and s["watch"]["armed"] is True, s
+            assert len(fake.commands) == 1  # not started a second time while the first run goes on
+            assert wait_until(lambda: scn(dev, name)["run_trigger"] == "power-below", 50), scn(dev, name)
+            s = scn(dev, name)
+            assert s["state"] in ("waiting", "running"), s
+            assert s["watch"]["pending"] is False and s["watch"]["armed"] is False, s["watch"]
+            assert wait_until(lambda: len(fake.commands) == 2, 15), fake.commands
+    finally:
+        dev.request("POST", "/api/scenarios/stop", params={"name": name})
+
+
 def test_a_disabled_rule_never_fires(dev, guard, fake):
     with Sampler(dev):
         assert put(dev, guard + [rule(TEST + "dis", enabled=False)]).status_code == 200

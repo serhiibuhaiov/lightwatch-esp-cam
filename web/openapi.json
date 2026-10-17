@@ -1177,7 +1177,7 @@
      "Сценарії"
     ],
     "summary": "Сценарії та стан запусків",
-    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування). Запуск у паузі між кроками має `pause_left_s`. У кожного сценарію `on_interrupt`. Стан `interrupted` (запуск перервав перезапуск плати, `interrupt_reason`); `resumed`: перезапуски, після яких запуск продовжився; `wait_reason: \"wifi\"` і в стані `running` (продовжений запуск чекає мережу).",
+    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`; `watch.pending`: умова виконалась, поки сценарій уже виконувався, і він запуститься ще раз, коли запуск закінчиться, якщо умова ще триматиметься). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування). Запуск у паузі між кроками має `pause_left_s`. У кожного сценарію `on_interrupt`. Стан `interrupted` (запуск перервав перезапуск плати, `interrupt_reason`); `resumed`: перезапуски, після яких запуск продовжився; `wait_reason: \"wifi\"` і в стані `running` (продовжений запуск чекає мережу).",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."

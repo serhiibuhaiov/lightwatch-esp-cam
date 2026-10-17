@@ -416,7 +416,8 @@ function viewScenarios() {
       const w = s.watch;
       out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(w.met ? "ok" : "n", "умова"), " ",
         (w.power_w == null ? "потужність невідома" : "потужність " + w.power_w.toFixed(1) + " Вт"), " · ", WATCH_REASON[w.reason] || w.reason,
-        w.reason === "waiting" || w.reason === "met" ? " (" + w.run_s + " з " + s.when.for_s + " с)" : "", " · ", w.armed ? "готовий спрацювати" : "вже спрацював, чекає, поки умова зникне"));
+        w.reason === "waiting" || w.reason === "met" ? " (" + w.run_s + " з " + s.when.for_s + " с)" : "", " · ", w.pending ? "умова виконана під час запуску: сценарій запуститься ще раз, коли запуск закінчиться, якщо умова ще триматиметься"
+          : w.armed ? "готовий спрацювати" : "вже спрацював, чекає, поки умова зникне"));
     }
     const steps = s.run_steps || [];
     if (steps.length) {
