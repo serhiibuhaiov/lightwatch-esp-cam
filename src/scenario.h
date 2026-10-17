@@ -23,6 +23,12 @@
 //             becomes true and is armed again only after the condition has been false at a look (the relay off, the
 //             power on the other side, no data). While a scenario waits for such a rule, the monitor polls that device
 //             with UPDATEDPS so its readings are fresh; no other device gets UPDATEDPS.
+//   interval  starts every `when.every_s` seconds (10..86400; a healthcheck ping): the first time 10 s after Wi-Fi is up,
+//             then on a fixed rate from the previous start. A tick while the run is still going, or without Wi-Fi, is
+//             skipped (and counted). Its runs are quiet: not kept over a restart (no on_interrupt: the next tick comes
+//             anyway), their lines at DEBUG, one line in the usual log when it starts failing and when it works again;
+//             their history is a file of its own (/runs/interval/<name>.jsonl, a short line per run, successes
+//             written every kIntervalFlushS, a failure at once), apart from the history of the other scenarios.
 // Any scenario, enabled or not, can be started by hand (runNow) and stopped (stop).
 //
 // A step always sends its action (3 s timeout; the cached state is not trusted: it can be old or empty after a
@@ -60,6 +66,8 @@ constexpr uint16_t kMaxPauseS = 3600;      // pause after a step
 constexpr uint32_t kMaxWatts = 20000;      // power rule threshold
 constexpr uint32_t kMinForS = 10, kMaxForS = 900;
 constexpr uint32_t kMaxWarmupS = 3600;
+constexpr uint32_t kMinEveryS = 10, kMaxEveryS = 86400;  // trigger "interval": when.every_s
+constexpr uint32_t kIntervalFlushS = 300;  // the history of an interval scenario: successes reach the card this often
 constexpr size_t kHistoryFileBytes = 131072;  // the history of the runs: a file this big becomes the old one
 
 // for_s a power rule may have now: kMaxForS, or less when the history of the readings (Devices::kHistoryCapacity
@@ -96,8 +104,10 @@ StopResult stop(const String& name);
 String configJson(bool stateOnly = false);
 
 // GET /api/scenarios/history: the ended runs, newest first, as {"runs":[...], "more":bool, "sd":bool}: at most `limit`, only
-// those older than the run with id `before` (0: from the newest), only of scenario `name` ("": all). False without a card.
-bool history(const String& name, size_t limit, uint32_t before, String& out);
+// those older than the run with id `before` (0: from the newest), only of scenario `name` ("": all but the interval ones).
+// An interval scenario's `name` reads its own history (short lines, "interval": true, the lines not yet on the card too);
+// `failedOnly`: only its runs that failed. False without a card.
+bool history(const String& name, size_t limit, uint32_t before, bool failedOnly, String& out);
 
 // A short entry per scenario for GET /api/status.
 void summary(JsonArray out);

@@ -84,7 +84,11 @@ void Engine::logf(bool warn, const char* fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  env_.log(warn, buf);
+  if (quiet_) {
+    env_.logQuiet(buf);
+  } else {
+    env_.log(warn, buf);
+  }
 }
 
 // ---- outside requests ----------------------------------------------------------------------------
@@ -212,7 +216,7 @@ void Engine::defsChanged() {
   }
 }
 
-Engine::StartResult Engine::start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool waitNet) {
+Engine::StartResult Engine::start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool waitNet, bool quiet) {
   if (!env_.known(name)) return StartResult::NotFound;
   auto it = runs_.find(name);
   if (it != runs_.end() && it->second.alive) {
@@ -232,9 +236,12 @@ Engine::StartResult Engine::start(const std::string& name, const std::string& tr
   r.startAtMs = startAtMs;
   r.alive = true;
   r.needNet = waitNet;
+  r.quiet = quiet;
   r.phase = Phase::WaitStart;
-  dirty_ = true;
+  if (!quiet) dirty_ = true;
+  quiet_ = quiet;
   if (trigger != "power-on") logf(false, "[%s] start requested (%s)", name.c_str(), trigger.c_str());
+  quiet_ = false;
   return StartResult::Started;
 }
 
@@ -243,7 +250,7 @@ Engine::StopResult Engine::stop(const std::string& name) {
   auto it = runs_.find(name);
   if (it == runs_.end() || !it->second.alive) return StopResult::NotRunning;
   it->second.stop = true;
-  logf(false, "[%s] stop requested", name.c_str());
+  logf(false, "[%s] stop requested", name.c_str());  // asked for by hand: in the usual log even for a quiet run
   return StopResult::Stopping;
 }
 
@@ -275,7 +282,10 @@ size_t Engine::alive() const {
 uint32_t Engine::tick() {
   const uint32_t now = env_.nowMs();
   for (auto& kv : runs_) {
-    if (kv.second.alive) advance(kv.first, kv.second, now);
+    if (!kv.second.alive) continue;
+    quiet_ = kv.second.quiet;
+    advance(kv.first, kv.second, now);
+    quiet_ = false;
   }
   grantSlots(now);
   const uint32_t sig = signature();
@@ -635,7 +645,7 @@ void Engine::finish(const std::string& name, Run& r, RunState state) {
   r.wantsSlot = false;
   r.needNet = r.netGate = false;
   r.waitReason.clear();
-  dirty_ = true;
+  if (!r.quiet) dirty_ = true;
   env_.finished(name, r);
   if (ran) {
     logf(false, "[%s] %s: %u switched, %u skipped, %u failed", name.c_str(), state == RunState::Stopped ? "stopped" : "finished", r.switched,
@@ -721,6 +731,7 @@ uint32_t Engine::signature() const {
   uint32_t h = 2166136261u;
   for (const auto& kv : runs_) {
     const Run& r = kv.second;
+    if (r.quiet) continue;  // not kept in /runs.json: its steps are no reason to write it
     const uint32_t v = (r.alive ? 1u : 0u) | (static_cast<uint32_t>(r.phase) << 1) | (static_cast<uint32_t>(r.step) << 5) |
                        (static_cast<uint32_t>(r.attempt) << 13) | (static_cast<uint32_t>(r.state) << 21);
     h = (h ^ v) * 16777619u;
@@ -744,7 +755,7 @@ void Engine::forEachSnapshot(const std::function<void(const Snapshot&)>& fn) con
   const uint32_t now = env_.nowMs();
   for (const auto& kv : runs_) {
     const Run& r = kv.second;
-    if (!r.alive) continue;
+    if (!r.alive || r.quiet) continue;  // a quiet run is not continued after a restart: its next tick comes anyway
     Snapshot s;
     s.name = kv.first;
     s.trigger = r.trigger;

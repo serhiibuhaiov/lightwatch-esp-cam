@@ -360,7 +360,8 @@ void onScenariosPut(AsyncWebServerRequest* req) {
   sendJson(req, 200, out);
 }
 
-// GET /api/scenarios/history[?name=<scenario>][&limit=N][&before=<id>]: the ended runs with their steps, newest first.
+// GET /api/scenarios/history[?name=<scenario>][&limit=N][&before=<id>][&failed=1]: the ended runs with their steps, newest
+// first. An interval scenario's name reads its own history; failed=1 keeps its failed runs only.
 void onScenariosHistory(AsyncWebServerRequest* req) {
   if (!authorize(req)) return;
   String name;
@@ -386,8 +387,17 @@ void onScenariosHistory(AsyncWebServerRequest* req) {
     sendError(req, 400, "before must be a run id (1..4294967295)");
     return;
   }
+  bool failedOnly = false;
+  if (req->hasParam("failed")) {
+    const String v = req->getParam("failed")->value();
+    if (v != "0" && v != "1") {
+      sendError(req, 400, "failed must be 0 or 1");
+      return;
+    }
+    failedOnly = v == "1";
+  }
   String out;
-  Scenario::history(name, static_cast<size_t>(limit), static_cast<uint32_t>(before), out);
+  Scenario::history(name, static_cast<size_t>(limit), static_cast<uint32_t>(before), failedOnly, out);
   sendJson(req, 200, out);
 }
 

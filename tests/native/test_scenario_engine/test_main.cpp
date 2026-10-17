@@ -160,6 +160,8 @@ class FakeEnv : public Env {
     jobs.erase(it);
   }
   void log(bool, const std::string& line) override { logLines.push_back(line); }
+  std::vector<std::string> quietLines;
+  void logQuiet(const std::string& line) override { quietLines.push_back(line); }
 
   // The lanes: jobs finish in order; a finished job acts on the socket (and a query on the cache), a request reaches its server.
   void work() {
@@ -856,6 +858,34 @@ void test_an_edit_of_an_http_request_changes_the_hash_a_device_step_hashes_as_be
   TEST_ASSERT_EQUAL_UINT32(h, defHash(d));
 }
 
+// ---- quiet runs (interval scenarios) ----------------------------------------------------------------------------------
+
+void test_a_quiet_run_logs_quietly_is_not_kept_for_a_restart_and_marks_nothing_dirty() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("q", {http(kPing, false, "", 30), step("a")}), def("loud", {step("a", true, 600), step("a", false)})});
+  eng->start("loud", "manual", env->now);
+  runFor(3000);  // in its long pause: the only thing /runs.json would hold
+  eng->takeDirty();
+  const size_t logged = env->logLines.size();
+  TEST_ASSERT_TRUE(eng->start("q", "interval", env->now, false, true) == Engine::StartResult::Started);
+  runFor(2000);
+  TEST_ASSERT_TRUE(R("q").alive && R("q").quiet);
+  TEST_ASSERT_FALSE(eng->takeDirty());
+  std::vector<Snapshot> snaps = eng->snapshot();
+  TEST_ASSERT_EQUAL(1, snaps.size());
+  TEST_ASSERT_EQUAL_STRING("loud", snaps[0].name.c_str());
+  runFor(40000);
+  assertState(RunState::Done, "q");
+  TEST_ASSERT_FALSE(eng->takeDirty());
+  TEST_ASSERT_EQUAL(logged, env->logLines.size());  // nothing in the usual log
+  TEST_ASSERT_TRUE(env->quietLines.size() >= 4);     // requested, started, two steps, finished
+  TEST_ASSERT_TRUE(env->history.back().first == "q");  // the end still reaches the history
+  eng->start("q", "interval", env->now, false, true);
+  runFor(500);
+  eng->stop("q");  // asked for by hand: that one is in the usual log
+  TEST_ASSERT_TRUE(contains(env->logLines.back(), "[q] stop requested"));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
@@ -890,5 +920,6 @@ int main(int, char**) {
   RUN_TEST(test_many_runs_hold_at_most_two_places_in_the_http_lane_and_the_sockets_do_not_wait_for_it);
   RUN_TEST(test_a_full_http_list_makes_the_step_wait_and_a_stop_withdraws_nothing_that_went_out);
   RUN_TEST(test_an_edit_of_an_http_request_changes_the_hash_a_device_step_hashes_as_before);
+  RUN_TEST(test_a_quiet_run_logs_quietly_is_not_kept_for_a_restart_and_marks_nothing_dirty);
   return UNITY_END();
 }

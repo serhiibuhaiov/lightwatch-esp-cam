@@ -108,7 +108,8 @@ class Fake:
             def handle_any(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(n) if n else b""
-                fake.requests.append({"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body})
+                fake.requests.append({"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body,
+                                      "at": time.time()})
                 code, out = 200, b"hello"
                 if self.path.startswith("/status/"):
                     code, out = int(self.path.split("/")[2]), b"nope"

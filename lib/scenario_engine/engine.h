@@ -139,6 +139,8 @@ class Env {
   // The engine is done with the job. `withdraw`: it has not finished, drop it if it has not started yet.
   virtual void release(uint32_t job, bool withdraw) = 0;
   virtual void log(bool warn, const std::string& line) = 0;
+  // A line about a quiet run (see Engine::start): kept out of the usual log (the board writes it at DEBUG).
+  virtual void logQuiet(const std::string& line) { (void)line; }
   // A run has ended (done, stopped, interrupted, removed before it started): for the history of the runs.
   virtual void finished(const std::string& scenario, const Run& run) = 0;
 };
@@ -197,6 +199,8 @@ struct Run {
   List<StepRun> steps;
   Whys whys;
   bool alive = false;      // started and not finished
+  bool quiet = false;      // a frequent run (an interval scenario): its lines go to Env::logQuiet, it is not in the
+                           // snapshots (/runs.json) and does not mark the state dirty
   bool stop = false;       // asked to stop
   Text resumed;            // the restarts this run went through and was continued after: "SW at step 2; PANIC at step 3"
   uint32_t startEpoch = 0; // Unix time the run began (0 unknown)
@@ -306,7 +310,8 @@ class Engine {
   // Starts a run at `startAtMs`. A run that is still waiting for its start is started now instead (its trigger becomes
   // `trigger`); one that is running gives AlreadyRunning.
   // `waitNet`: wait for Wi-Fi before the first command (a run started again after a restart).
-  StartResult start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool waitNet = false);
+  // `quiet`: a run that comes back every few seconds (an interval scenario): see Run::quiet.
+  StartResult start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool waitNet = false, bool quiet = false);
   enum class StopResult { Stopping, NotFound, NotRunning };
   StopResult stop(const std::string& name);
   // A power_on scenario that does not start (not a power-up): shown as skipped with the reason.
@@ -353,6 +358,7 @@ class Engine {
   std::map<std::string, Run, std::less<std::string>, Alloc<std::pair<const std::string, Run>>> runs_;  // by scenario name
   Stats stats_;
   uint32_t httpInFlight_ = 0;  // engine requests in the HTTP lane now
+  bool quiet_ = false;         // the run being worked on is quiet: logf() goes to Env::logQuiet
   bool dirty_ = false;
   uint32_t lastSignature_ = 0;
 };

@@ -114,6 +114,7 @@ AI-Thinker ESP32-CAM; без PSRAM до 16), по 24 кроки, вони вик
 | `power_on` | через `startup.scenario_delay_s` після запуску, але лише після вмикання живлення; далі чекає на Wi-Fi й повторює кожен крок до 90 с |
 | `manual` | лише вручну |
 | `power_below`, `power_above` | потужність розетки довго по один бік порогу: `when: { device, watts, for_s, warmup_s }` |
+| `interval` | кожні `when.every_s` секунд (10..86400), наприклад пінг healthcheck; запуски «тихі» (у лозі лише початок і кінець серії невдач), історія окрема |
 
 ```json
 { "name": "heater-idle-off", "enabled": true, "trigger": "power_below",
