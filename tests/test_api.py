@@ -246,12 +246,18 @@ def test_log_tail_current(dev):
     assert_log_lines(r.text)
 
 
-@pytest.mark.parametrize("tail", [-5, 0, 1, 99999999])
+@pytest.mark.parametrize("tail", [0, 1, 99999999])
 def test_log_tail_edge_values(dev, tail):
     r = dev.get("/api/logs", params={"file": "current", "tail": tail})
     assert r.status_code == 200
     assert len(r.content) <= 32768 + 8192  # card tail cap plus the RAM buffer
     assert_log_lines(r.text)
+
+
+@pytest.mark.parametrize("tail", ["-5", "abc", "1e3", "99999999999"])
+def test_log_tail_rejects_what_is_not_a_number(dev, tail):
+    r = dev.get("/api/logs", params={"file": "current", "tail": tail})
+    assert r.status_code == 400, r.text
 
 
 def test_log_full_file_download_matches_listed_size(dev):

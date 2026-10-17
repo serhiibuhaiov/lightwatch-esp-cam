@@ -11,6 +11,7 @@
 #include <map>
 
 #include "logger.h"
+#include "power_rule.h"
 #include "storage.h"
 
 namespace Devices {
@@ -29,12 +30,8 @@ std::vector<Device> gList;
 LoadInfo gInfo;
 std::map<String, State> gStates;  // by device name
 
-// One finished status query. Values INT32_MIN = none. flags: 1 = ok, 2 = the switch state is known, 4 = it is on.
-struct Sample {
-  uint32_t t = 0;  // uptime seconds
-  int32_t v[4] = {INT32_MIN, INT32_MIN, INT32_MIN, INT32_MIN};  // power, current, voltage, energy
-  uint8_t flags = 0;
-};
+// One finished status query (see power_rule.h): values INT32_MIN = none, flags ok / relay known / relay on.
+using Sample = PowerRule::Sample;
 struct History {
   std::vector<Sample> buf;  // a ring once it is full
   size_t head = 0;          // the oldest sample when full
@@ -263,13 +260,19 @@ void load() {
   info.sd = Storage::sdMounted();
   std::vector<Device> list;
   bool replace = false;
+  // -1 also means "could not open": a card that has just come up can fail the first look (see Config::load).
+  long size = info.sd ? Storage::sdSize(kPath) : -1;
+  for (int i = 0; i < 2 && info.sd && size < 0; ++i) {
+    delay(200);
+    size = Storage::sdSize(kPath);
+  }
 
   if (!info.sd) {
     info.error = "no SD card: devices are stored only on the card";
     LOGW(TAG, "%s", info.error.c_str());
     // The list in memory stays: the card may only be remounting, and wiping the devices would stop the monitor and
     // fail every scenario step. At start the list is empty anyway.
-  } else if (Storage::sdSize(kPath) < 0) {
+  } else if (size < 0) {
     // A save removes the old file before renaming the new one: a power cut in between leaves only
     // the complete temporary file. Never replace that with an empty template.
     String tmp, tmpErr;
@@ -280,13 +283,14 @@ void load() {
       info.fileFound = true;
       LOGW(TAG, "promoted %s to %s after an interrupted save", kTmp, kPath);
     } else {
-      replace = true;
+      // sdCreate never overwrites: if the file is there after all (the card hid it), it and its keys stay.
       static const char kTemplate[] = "{\n  \"version\": 1,\n  \"devices\": []\n}\n";
-      if (Storage::sdWriteAtomic(kPath, kTmp, String(kTemplate))) {
+      if (Storage::sdCreate(kPath, kTmp, String(kTemplate))) {
+        replace = true;
         info.templateCreated = true;
         LOGW(TAG, "no %s, wrote an empty template: add the Tuya devices on the Devices page", kPath);
       } else {
-        info.error = String("no ") + kPath + " and could not create it";
+        info.error = String("cannot open ") + kPath + " and could not create it (card error?): the previous list stays";
         LOGE(TAG, "%s", info.error.c_str());
       }
     }
@@ -436,12 +440,12 @@ void appendSample(const Device& d, bool ok, JsonVariantConst dps) {
   Sample s;
   s.t = uptimeS();
   if (ok && !dps.isNull()) {
-    s.flags |= 1;
+    s.flags |= Sample::kOk;
     const int16_t standard[4] = {19, 18, 20, 17};  // power, current, voltage, energy
     const int16_t chosen[4] = {d.dpPower, d.dpCurrent, d.dpVoltage, d.dpEnergy};
     for (size_t i = 0; i < 4; ++i) s.v[i] = numberAt(dps, chosen[i] < 0 ? standard[i] : chosen[i]);
     JsonVariantConst sw = dps[String(d.dp)];
-    if (sw.is<bool>()) s.flags |= sw.as<bool>() ? 2 | 4 : 2;
+    if (sw.is<bool>()) s.flags |= sw.as<bool>() ? Sample::kRelayKnown | Sample::kRelayOn : Sample::kRelayKnown;
   }
   History& h = gHistory[d.name];
   if (h.buf.capacity() < kHistoryCapacity) h.buf.reserve(kHistoryCapacity);
@@ -621,6 +625,9 @@ void monitorTask(void* arg) {
         }
 
         Tuya::Result last;
+        // UPDATEDPS failed in a way that can mean "the device does not know it". "closed" is also what a device with all its
+        // connection slots taken answers, so the device is marked only if the plain query right after it does get through.
+        bool refreshRejected = false;
         for (int attempt = 0; attempt < attempts; ++attempt) {
           Tuya::RefreshOpts ro;
           ro.dpIds = meters;
@@ -639,21 +646,25 @@ void monitorTask(void* arg) {
             vTaskDelay(pdMS_TO_TICKS(50));
           }
           if (!job->done.load(std::memory_order_acquire)) {
+            job->cancelled.store(true);  // still queued: withdrawn, so it does not pile up behind the next attempt
             last.error = "busy";  // not started or still running: no information about the device, not a failure
             last.detail = "the query did not finish in time";
             continue;
           }
           last = job->result;
           if (useRefresh && !last.ok && (last.error == "closed" || last.error == "protocol" || last.error == "device")) {
-            LOGI(TAG, "[%s] does not take UPDATEDPS (%s): plain status queries for the next %u cycles", d.name.c_str(), last.error.c_str(),
-                 static_cast<unsigned>(kRefreshRetryCycles));
-            noRefresh[d.name] = kRefreshRetryCycles;
+            refreshRejected = true;
             useRefresh = false;
             --attempt;  // the same attempt again, with the plain query
             continue;
           }
           if (last.ok || last.error == "busy") break;  // "busy": a command had the device; try next cycle
           if (attempt + 1 < attempts) vTaskDelay(pdMS_TO_TICKS(300));
+        }
+        if (refreshRejected && last.ok) {
+          LOGI(TAG, "[%s] does not take UPDATEDPS: plain status queries for the next %u cycles", d.name.c_str(),
+               static_cast<unsigned>(kRefreshRetryCycles));
+          noRefresh[d.name] = kRefreshRetryCycles;
         }
         if (last.error == "busy") continue;
         {
@@ -736,51 +747,11 @@ PowerCheck checkPower(const String& name, bool below, uint32_t watts, uint32_t f
       for (size_t i = 0; i < n; ++i) s.push_back(h.buf[(start + i) % n]);
     }
   }
-  if (s.empty()) {
-    pc.reason = "no-data";
-    return pc;
-  }
-  const uint32_t interval = pollIntervalSec();
-  const uint32_t maxGap = std::max<uint32_t>(20, interval * 5 / 2);  // one missed poll is tolerated, two are not
-  const uint32_t now = uptimeS();
-  const Sample& last = s.back();
-  if (now - last.t > maxGap) {
-    pc.reason = "stale";
-    return pc;
-  }
-  if (!(last.flags & 1)) {
-    pc.reason = "unanswered";
-    return pc;
-  }
-  pc.lastPower = last.v[0];
-  if (!(last.flags & 2)) {
-    pc.reason = "relay-unknown";
-    return pc;
-  }
-  if (!(last.flags & 4)) {
-    pc.reason = "relay-off";
-    return pc;
-  }
-  if (last.v[0] == INT32_MIN) {
-    pc.reason = "no-power-dp";
-    return pc;
-  }
-  const int64_t limit = static_cast<int64_t>(watts) * 10;  // raw power is in 0.1 W
-  auto qualifies = [&](const Sample& x) {
-    return (x.flags & 1) && (x.flags & 2) && (x.flags & 4) && x.v[0] != INT32_MIN && (below ? x.v[0] < limit : x.v[0] > limit);
-  };
-  if (!qualifies(last)) {
-    pc.reason = "not-met";  // the power is on the other side of the threshold
-    return pc;
-  }
-  size_t i = s.size() - 1;  // the start of the current run: back while the answers qualify and follow each other closely
-  while (i > 0 && qualifies(s[i - 1]) && s[i].t - s[i - 1].t <= maxGap) --i;
-  uint32_t start = s[i].t;
-  // The relay was switched on just before the run began (the answer before it is a clean "off"): warm-up first.
-  if (i > 0 && (s[i - 1].flags & 1) && (s[i - 1].flags & 2) && !(s[i - 1].flags & 4) && s[i].t - s[i - 1].t <= maxGap) start += warmupS;
-  pc.runS = last.t > start ? last.t - start : 0;
-  pc.met = pc.runS >= forS;
-  pc.reason = pc.met ? "met" : last.t < start ? "warmup" : "waiting";
+  const PowerRule::Result r = PowerRule::evaluate(s, kHistoryCapacity, uptimeS(), pollIntervalSec(), below, watts, forS, warmupS);
+  pc.met = r.met;
+  pc.reason = r.reason;
+  pc.lastPower = r.lastPower;
+  pc.runS = r.runS;
   return pc;
 }
 
@@ -820,9 +791,9 @@ bool historyJson(const String& name, size_t limit, String& out) {
     } else {
       o["time"] = nullptr;
     }
-    o["ok"] = (s.flags & 1) != 0;
-    if (s.flags & 2) {
-      o["on"] = (s.flags & 4) != 0;
+    o["ok"] = (s.flags & Sample::kOk) != 0;
+    if (s.flags & Sample::kRelayKnown) {
+      o["on"] = (s.flags & Sample::kRelayOn) != 0;
     } else {
       o["on"] = nullptr;
     }

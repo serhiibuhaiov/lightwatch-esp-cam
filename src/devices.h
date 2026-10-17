@@ -19,8 +19,9 @@
 // name: 1..32 chars of a-z 0-9 _ - (used in URLs), unique. key: exactly 16 characters.
 // version: "3.4" or "3.5". dp: the on/off data point, default 1.
 // meters (optional): which data point carries the power / current / voltage / energy reading, 0..255;
-// 0 = the socket has none, absent = the usual Tuya socket numbers (19, 18, 20, 17). Only the web page
-// uses them, to label the readings; different socket models number them differently.
+// 0 = the socket has none, absent = the usual Tuya socket numbers (19, 18, 20, 17). They label the readings
+// on the page, fill the history, feed the power rules and say which data points UPDATEDPS re-reads;
+// different socket models number them differently.
 //
 // State and monitor: a background task polls every device each monitor.interval_s (up to
 // monitor.retries attempts of monitor.timeout_ms) and keeps the last answer here, so the web
@@ -132,7 +133,8 @@ bool isWatched(const String& name);
 
 // Does the power of `name` satisfy a rule for long enough? Read from the history (the answers of the status queries):
 // the newest answers must all be on the right side of `watts` (below or above), the relay on, with no unanswered query
-// and no gap between them, for `forS` seconds. A relay that was just switched on gets `warmupS` seconds before the
+// and no gap between them, for `forS` seconds. A relay that was just switched on (or found on when the history began,
+// e.g. after the power came back) gets `warmupS` seconds before the
 // time counts (a heater is still ramping up, and the first readings are old). Anything that breaks the run (an
 // unanswered query, the relay off, the power on the other side) restarts the count: no data never fires a rule.
 struct PowerCheck {

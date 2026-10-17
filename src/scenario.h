@@ -10,8 +10,10 @@
 // Triggers:
 //   power_on  starts `startup.scenario_delay_s` seconds after boot, but only after a real
 //             power-up (reset reason POWERON). Any other start (software restart, panic,
-//             watchdog, brown-out) does NOT start it, and a restart before the delay ends
-//             does not resume it. Only enabled scenarios start on a trigger.
+//             watchdog, brown-out) does NOT start it, with one exception: a software restart
+//             while the power-up's runs had not got Wi-Fi yet (the Wi-Fi watchdog in main.cpp,
+//             or a restart from the settings page) starts them again, as a power-up.
+//             Only enabled scenarios start on a trigger.
 //   manual    never starts by itself.
 //   power_below / power_above
 //             starts when the power of one socket stays below / above a threshold for a time, with `when`:
@@ -27,10 +29,10 @@
 // blackout, and "on" to a socket that is already on does no harm), then queries the state to see the new state,
 // up to 3 attempts 2 s apart. After the last failed attempt the step is "failed" and the scenario goes on.
 // A run started by the power-up is more patient, because the router and the sockets are still booting: it first waits
-// for Wi-Fi (at most 15 min, then 10 s more for the sockets), and each step is retried for up to 90 s, 5 s apart.
+// for Wi-Fi (as long as it takes, then 10 s more for the sockets), and each step is retried for up to 90 s, 5 s apart.
 // The pause after a step (its own, or the scenario's default) is kept only after a step that really
-// switched something on. The commands go into the user queue of the Tuya worker, so they are served
-// before the periodic polls.
+// switched something on. The commands go into the command lane of Tuya (with the buttons and the API),
+// which runs beside the monitor's polls and does not wait for them.
 //
 // Caveat: ESP32 reports every reset through the EN pin (RST button, flashing, opening a serial
 // port) as POWERON too, so on the debug base board those start power_on scenarios as well. On the

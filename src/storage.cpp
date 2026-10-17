@@ -186,7 +186,9 @@ bool sdAppend(const char* path, const uint8_t* data, size_t len) {
   return !gWriteFault;
 }
 
-static bool writeAtomicLocked(const char* path, const char* tmpPath, const String& data) {
+// `replace` = false: only creates `path`; an existing file (even one that a card error hid from an earlier look) is
+// never removed, and the FAT rename refuses to overwrite it.
+static bool writeAtomicLocked(const char* path, const char* tmpPath, const String& data, bool replace = true) {
   if (SD_MMC.exists(tmpPath)) SD_MMC.remove(tmpPath);
   File f = SD_MMC.open(tmpPath, FILE_WRITE);
   if (!f) return false;
@@ -201,9 +203,15 @@ static bool writeAtomicLocked(const char* path, const char* tmpPath, const Strin
   if (!sizeOk) return false;
 
   // Once the old file is removed below, a power cut leaves a complete, valid
-  // tmp file that Config::load() promotes at the next boot. A cut before that
+  // tmp file that Config::load() (and Devices/Scenario load()) promotes at the next boot. A cut before that
   // keeps the old file and the new tmp is discarded (the save was never acknowledged).
-  if (SD_MMC.exists(path) && !SD_MMC.remove(path)) return false;
+  if (SD_MMC.exists(path)) {
+    if (!replace) {
+      SD_MMC.remove(tmpPath);
+      return false;
+    }
+    if (!SD_MMC.remove(path)) return false;
+  }
   return SD_MMC.rename(tmpPath, path);
 }
 
@@ -213,6 +221,12 @@ bool sdWriteAtomic(const char* path, const char* tmpPath, const String& data) {
   bool ok = writeAtomicLocked(path, tmpPath, data);
   gWriteFault = !ok;
   return ok;
+}
+
+bool sdCreate(const char* path, const char* tmpPath, const String& data) {
+  Guard g;
+  if (!gSdMounted) return false;
+  return writeAtomicLocked(path, tmpPath, data, false);  // "already there" is not a write fault
 }
 
 bool sdReplace(const char* tmpPath, const char* path) {

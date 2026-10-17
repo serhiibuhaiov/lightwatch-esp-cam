@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -188,7 +189,7 @@ void onStatus(AsyncWebServerRequest* req) {
   if (!authorize(req)) return;
   const Storage::SdState sd = Storage::sdState();
   JsonDocument doc;
-  doc["uptime_s"] = millis() / 1000;
+  doc["uptime_s"] = static_cast<uint32_t>(esp_timer_get_time() / 1000000);  // millis() / 1000 would wrap after 49.7 days
   doc["heap_free"] = ESP.getFreeHeap();
   doc["time_valid"] = time(nullptr) > 1700000000;
   doc["config_source"] = Config::sourceName(Config::loadedFrom());
@@ -619,9 +620,15 @@ void trimToTail(String& text, size_t tail) {
   if (nl >= 0) text.remove(0, nl + 1);
 }
 
-size_t tailParam(AsyncWebServerRequest* req) {
-  size_t tail = static_cast<size_t>(req->getParam("tail")->value().toInt());
-  return tail == 0 ? kDefaultTail : tail;
+// false: not a non-negative integer (the 400 answer is sent). 0 means the default; larger values are capped by the reader.
+bool tailParam(AsyncWebServerRequest* req, size_t& tail) {
+  uint64_t v = 0;
+  if (!parseUnsigned(req->getParam("tail")->value(), 4294967295ULL, v)) {
+    sendError(req, 400, "tail must be a number of bytes (up to 32768)");
+    return false;
+  }
+  tail = v == 0 ? kDefaultTail : static_cast<size_t>(v);
+  return true;
 }
 
 void sendLogFile(AsyncWebServerRequest* req) {
@@ -633,9 +640,11 @@ void sendLogFile(AsyncWebServerRequest* req) {
       sendError(req, 503, "SD card is not mounted: only file=current (RAM log) is available");
       return;
     }
+    size_t tail = 0;
+    if (req->hasParam("tail") && !tailParam(req, tail)) return;
     String pending;
     Logger::copyPending(pending);
-    if (req->hasParam("tail")) trimToTail(pending, tailParam(req));
+    if (tail) trimToTail(pending, tail);
     req->send(200, "text/plain; charset=utf-8", pending);
     return;
   }
@@ -655,7 +664,8 @@ void sendLogFile(AsyncWebServerRequest* req) {
   }
 
   if (req->hasParam("tail")) {
-    size_t tail = tailParam(req);
+    size_t tail = 0;
+    if (!tailParam(req, tail)) return;
     String text;
     if (exists && !Storage::sdReadTail(path.c_str(), tail, text)) {
       sendError(req, 500, "read failed");

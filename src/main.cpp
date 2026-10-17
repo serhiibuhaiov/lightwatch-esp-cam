@@ -1,9 +1,9 @@
-// ESP32-CAM controller skeleton.
+// lightwatch: an ESP32-CAM controller for Tuya sockets that starts on its own after a blackout.
 //
-// What is here: thread-safe storage + logging on the SD card, config on SD with
-// a flash copy, Wi-Fi with auto-reconnect and NTP, and the web API for settings
-// and logs. What is not here yet: the device polling task, the start scenario,
-// LED indication (see the plan document).
+// setup() brings up, in order: the LEDs, the logger and the boot history, the storage (SD card + a
+// flash copy of the config), the config, the Tuya device list with its workers and monitor, Wi-Fi
+// and NTP, the web API, and the scenarios. loop() only watches: boot stages, the clock, a card that
+// shows up late, and the Wi-Fi watchdog (restart after wifi.restart_after_min without Wi-Fi).
 //
 // The camera is never initialised.
 
@@ -131,10 +131,8 @@ void setup() {
 
   WebApi::begin();
 
-  // Starts the scenario only after a power-up, never after a software restart.
+  // Starts the power_on scenarios after a power-up (and after the Wi-Fi watchdog's restart while they still waited, see scenario.h).
   Scenario::begin(esp_reset_reason(), resetReasonName(esp_reset_reason()), cfg.startup.scenarioDelaySec);
-
-  // TODO: device polling task goes here.
 }
 
 void loop() {

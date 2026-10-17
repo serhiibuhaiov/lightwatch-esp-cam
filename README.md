@@ -154,7 +154,8 @@ curl -u admin:PASS -X PUT -H "Content-Type: application/json" --data-binary @con
 | `src/` | прошивка: `tuya` (протокол), `devices` (список, монітор, історія), `scenario`, `web_api`, `config`, `storage`, `logger`, `bootlog`, `indicator` |
 | `web/` | `index.html` (сторінка) і `openapi.json` (опис API), обидва вбудовуються в прошивку |
 | `sdcard/` | шаблони `config.json` і `devices.json` |
-| `tests/` | автотести на пристрої, `fake_tuya.py` (фальшивий пристрій Tuya) |
+| `lib/power_rule/` | рішення тригера споживання: чистий C++ без Arduino, тестується на комп'ютері |
+| `tests/` | автотести на пристрої, `fake_tuya.py` (фальшивий пристрій Tuya); `tests/native/` тести на комп'ютері |
 | `docs/screenshots/` | знімки веб-інтерфейсу |
 
 Якщо змінюєте API, оновіть `web/openapi.json`: тест `tests/test_openapi.py` звіряє його з маршрутами в `web_api.cpp`.
@@ -172,6 +173,12 @@ tests/run.sh                      # ≈250 тестів, ≈11 хв
 
 Набори зі справжніми розетками (`-m tuya`, `-m tuya_switch`, `-m power_trigger`, `-m scenario`) і апаратні (`-m hardware`,
 `-m nosd`) за замовчуванням вимкнені.
+
+Логіку тригера споживання (`lib/power_rule`) перевіряють і тести на комп'ютері, без плати (за секунди):
+
+```bash
+pio test -e native
+```
 
 ## Обмеження
 

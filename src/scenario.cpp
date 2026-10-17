@@ -1,5 +1,6 @@
 #include "scenario.h"
 
+#include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -32,8 +33,8 @@ constexpr uint32_t kQueueWaitMs = 120000; // how long a command may wait in the 
 constexpr uint16_t kMaxPauseS = 3600;
 
 // A run started by the power-up trigger cannot count on the network: after a blackout the router (and the sockets) take
-// a minute or two to come back. So it waits for Wi-Fi first and then keeps trying each step for a longer window.
-constexpr uint32_t kNetWaitMaxMs = 15UL * 60 * 1000;  // how long it waits for Wi-Fi before it tries anyway
+// a minute or two to come back. So it waits for Wi-Fi first (as long as it takes: no command gets through without it)
+// and then keeps trying each step for a longer window.
 constexpr uint32_t kNetSettleMs = 10000;              // after Wi-Fi came up: let the sockets join the network
 constexpr uint32_t kPatientWindowMs = 90000;          // retry window of one step in such a run
 constexpr uint32_t kPatientGapMs = 5000;
@@ -102,7 +103,14 @@ struct Runtime {
   std::vector<StepRun> steps;
   bool alive = false;        // a task exists for this run
   bool stop = false;         // asked to stop
+  bool holdsPowerUp = false; // started by the power-up and has not got past the wait for the network yet
 };
+
+// A power-up whose power_on runs are still waiting for the network is carried over a software restart: the Wi-Fi watchdog
+// in main.cpp restarts the board (reset reason SW) when Wi-Fi stays away, and that must not lose the power-up. RTC memory
+// keeps its value over a software restart and loses it when the power goes.
+constexpr uint32_t kPowerUpPending = 0x50574F4E;  // "PWON"
+RTC_NOINIT_ATTR uint32_t gPowerUpPending;
 
 SemaphoreHandle_t gMux = nullptr;      // guards everything below
 SemaphoreHandle_t gSaveMux = nullptr;  // serialises save(); held across the SD write
@@ -328,10 +336,16 @@ void load() {
   bool fileFound = false;
   bool replace = true;
   const bool sd = Storage::sdMounted();
+  // -1 also means "could not open": a card that has just come up can fail the first look (see Config::load).
+  long size = sd ? Storage::sdSize(kPath) : -1;
+  for (int i = 0; i < 2 && sd && size < 0; ++i) {
+    delay(200);
+    size = Storage::sdSize(kPath);
+  }
   if (!sd) {
     error = "no SD card: scenarios are stored only on the card";
     LOGW(TAG, "%s", error.c_str());
-  } else if (Storage::sdSize(kPath) < 0) {
+  } else if (size < 0) {
     // A save removes the old file before renaming the new one: a power cut in between leaves only the
     // complete temporary file. Never replace that with an empty template.
     String tmp, tmpErr;
@@ -341,13 +355,15 @@ void load() {
       fileFound = true;
       LOGW(TAG, "promoted %s to %s after an interrupted save", kTmp, kPath);
     } else {
+      // sdCreate never overwrites: if the file is there after all (the card hid it), it stays.
       static const char kTemplate[] = "{\n  \"version\": 1,\n  \"scenarios\": []\n}\n";
-      if (Storage::sdWriteAtomic(kPath, kTmp, String(kTemplate))) {
+      if (Storage::sdCreate(kPath, kTmp, String(kTemplate))) {
         fileFound = true;
         LOGW(TAG, "no %s, wrote an empty template: add scenarios on the Scenarios page", kPath);
       } else {
-        error = String("no ") + kPath + " and could not create it";
+        error = String("cannot open ") + kPath + " and could not create it (card error?)";
         LOGE(TAG, "%s", error.c_str());
+        replace = false;
       }
     }
   } else {
@@ -399,7 +415,7 @@ bool sleepOrStop(const String& name, uint32_t ms) {
   return !stopRequested(name);
 }
 
-// Queues one command in the user queue (served before the periodic polls) and waits for it.
+// Queues one command in the command lane (beside the monitor's polls, see tuya.h) and waits for it.
 // nullptr: it could not be queued or did not finish in time.
 std::shared_ptr<Tuya::Job> runJob(Tuya::Op op, const Devices::Device& d) {
   std::shared_ptr<Tuya::Job> job;
@@ -521,14 +537,27 @@ void setWaitReason(const String& name, const char* reason) {
   if (it != gRun.end()) it->second.waitReason = reason;
 }
 
-// A run started by the power-up: waits until Wi-Fi is up (at most kNetWaitMaxMs), then kNetSettleMs for the sockets.
+// This run no longer waits for the network (it got it, was stopped or was started by hand): once no run of the power-up
+// waits any more, the power-up has been served and a software restart must not repeat it.
+void powerUpServed(const String& name) {
+  Lock lock;
+  auto it = gRun.find(name);
+  if (it == gRun.end() || !it->second.holdsPowerUp) return;
+  it->second.holdsPowerUp = false;
+  for (const auto& kv : gRun) {
+    if (kv.second.holdsPowerUp) return;
+  }
+  gPowerUpPending = 0;
+}
+
+// A run started by the power-up: waits until Wi-Fi is up, then kNetSettleMs for the sockets. There is no limit: if
+// Wi-Fi stays away, the watchdog in main.cpp restarts the board and the power-up is carried over (gPowerUpPending).
 // A run that was waiting and gets started by hand meanwhile (runNow changes its trigger) does not wait any more.
 // False: stopped meanwhile.
 bool waitForNetwork(const String& name) {
   if (WiFi.status() == WL_CONNECTED) return true;
-  LOGI(TAG, "[%s] waiting for Wi-Fi (at most %u s)", name.c_str(), static_cast<unsigned>(kNetWaitMaxMs / 1000));
+  LOGI(TAG, "[%s] waiting for Wi-Fi", name.c_str());
   setWaitReason(name, "wifi");
-  const uint32_t until = millis() + kNetWaitMaxMs;
   bool up = false;
   uint32_t settleUntil = 0;
   bool ok = true;
@@ -544,9 +573,6 @@ bool waitForNetwork(const String& name) {
         up = true;
         settleUntil = now + kNetSettleMs;
         LOGI(TAG, "[%s] Wi-Fi is up, %u s for the sockets to join", name.c_str(), static_cast<unsigned>(kNetSettleMs / 1000));
-      } else if (static_cast<int32_t>(until - now) <= 0) {
-        LOGW(TAG, "[%s] no Wi-Fi after %u s, starting anyway", name.c_str(), static_cast<unsigned>(kNetWaitMaxMs / 1000));
-        break;
       }
     } else if (static_cast<int32_t>(settleUntil - now) <= 0) {
       break;
@@ -569,6 +595,7 @@ void runScenario(const String& name) {
       stop = r.stop;
     }
     if (stop) {
+      powerUpServed(name);
       finish(name, State::Stopped);
       LOGI(TAG, "[%s] stopped while waiting", name.c_str());
       return;
@@ -578,7 +605,9 @@ void runScenario(const String& name) {
     vTaskDelay(pdMS_TO_TICKS(left > 200 ? 200 : left));
   }
 
-  if (triggerIs(name, "power-on") && !waitForNetwork(name)) {
+  const bool netOk = !triggerIs(name, "power-on") || waitForNetwork(name);
+  powerUpServed(name);
+  if (!netOk) {
     finish(name, State::Stopped);
     LOGI(TAG, "[%s] stopped while waiting for Wi-Fi", name.c_str());
     return;
@@ -878,10 +907,15 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
     xTaskCreate(watcherTask, "scn_watch", 4096, nullptr, 1, nullptr);
   }
 
+  // A software restart while the power-up's runs were still waiting for Wi-Fi (the watchdog in main.cpp): still a power-up.
+  const bool carried = reason == ESP_RST_SW && gPowerUpPending == kPowerUpPending;
+  const bool powerUp = reason == ESP_RST_POWERON || carried;
+  if (carried) LOGW(TAG, "restarted before the power-up's scenarios got the network: they start again");
+  bool pending = false;
   Lock lock;
   for (const Def& d : gDefs) {
     if (!d.enabled || d.trigger != kTriggerPowerOn) continue;
-    if (reason != ESP_RST_POWERON) {
+    if (!powerUp) {
       Runtime& r = gRun[d.name];
       r = Runtime();
       r.state = State::Skipped;
@@ -889,9 +923,13 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
       LOGI(TAG, "[%s] not started: %s", d.name.c_str(), r.skipReason.c_str());
     } else {
       LOGI(TAG, "[%s] power-up: starts %u s after boot", d.name.c_str(), static_cast<unsigned>(delaySec));
-      startRun(d.name, static_cast<uint32_t>(delaySec) * 1000UL, "power-on");  // counted from boot
+      if (startRun(d.name, static_cast<uint32_t>(delaySec) * 1000UL, "power-on")) {  // counted from boot
+        gRun[d.name].holdsPowerUp = true;
+        pending = true;
+      }
     }
   }
+  gPowerUpPending = pending ? kPowerUpPending : 0;
 }
 
 void sdAvailable() {

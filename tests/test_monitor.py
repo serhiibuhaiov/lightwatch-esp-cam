@@ -347,11 +347,9 @@ def test_removing_a_device_while_a_request_to_it_is_running_is_safe(dev, fake):
 
 
 def test_a_scenario_that_names_a_removed_device_fails_that_step_at_once(dev, fake):
-    from test_scenarios import TEST, listing, put, scenario, wait_state
+    from test_scenarios import TEST, editable, listing, put, scenario, wait_state
     ip = next(d["ip"] for d in device_list(dev) if d["name"] == FAKE_NAME)
-    existing = [{"name": s["name"], "enabled": s["enabled"], "trigger": s["trigger"], "default_pause_s": s["default_pause_s"],
-                 "steps": [{k: v for k, v in st.items() if not (k == "pause_after_s" and v is None)} for st in s["steps"]]}
-                for s in listing(dev)["scenarios"]]
+    existing = [editable(s) for s in listing(dev)["scenarios"]]
     _without(dev, FAKE_NAME)
     try:
         assert put(dev, existing + [scenario(TEST + "rm", [{"device": FAKE_NAME}])]).status_code == 200  # saved: no check at save time

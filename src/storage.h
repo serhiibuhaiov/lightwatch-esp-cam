@@ -48,6 +48,8 @@ long   sdSize(const char* path);                       // -1 if missing
 bool   sdAppend(const char* path, const uint8_t* data, size_t len);
 // tmpPath is written and verified first, then replaces path (remove + rename).
 bool   sdWriteAtomic(const char* path, const char* tmpPath, const String& data);
+// The same, but only if `path` does not exist: an existing file is never removed or overwritten (false then).
+bool   sdCreate(const char* path, const char* tmpPath, const String& data);
 // Replace path with an already complete tmpPath (remove + rename).
 bool   sdReplace(const char* tmpPath, const char* path);
 bool   sdRemove(const char* path);

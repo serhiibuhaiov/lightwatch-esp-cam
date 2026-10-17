@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 #include "storage.h"
@@ -26,6 +27,8 @@ constexpr const char* kDir = "/logs";
 char gBuf[kBufSize];
 size_t gLen = 0;
 uint32_t gDropped = 0;
+// Lines lost because gMux could not be taken in time (counted without it, added to gDropped at the next flush).
+std::atomic<uint32_t> gBusyDropped{0};
 // True while the card cannot take the log (missing or faulty): the buffer then
 // keeps the NEWEST lines (oldest are evicted) so the API still shows what happened.
 volatile bool gRing = false;
@@ -182,7 +185,7 @@ bool flushLocked(bool force) {
   uint32_t dropped = 0;
   if (xSemaphoreTake(gMux, portMAX_DELAY) == pdTRUE) {
     n = gLen;
-    dropped = gDropped;
+    dropped = gDropped + gBusyDropped.exchange(0);
     memcpy(gFlushBuf, gBuf, n);
     gLen = 0;
     gDropped = 0;
@@ -193,7 +196,7 @@ bool flushLocked(bool force) {
     char ts[32];
     formatTimestamp(ts, sizeof(ts));
     int m = snprintf(gFlushBuf + n, sizeof(gFlushBuf) - n,
-                     "%s W logger: %lu lines dropped (buffer full)\n", ts,
+                     "%s W logger: %lu lines dropped (buffer full or busy)\n", ts,
                      static_cast<unsigned long>(dropped));
     if (m > 0 && static_cast<size_t>(m) < sizeof(gFlushBuf) - n) n += m;
   }
@@ -291,7 +294,10 @@ void log(Level level, const char* tag, const char* fmt, ...) {
     Serial.write(reinterpret_cast<const uint8_t*>(line), n);
     return;
   }
-  if (xSemaphoreTake(gMux, pdMS_TO_TICKS(100)) != pdTRUE) return;
+  if (xSemaphoreTake(gMux, pdMS_TO_TICKS(100)) != pdTRUE) {
+    gBusyDropped.fetch_add(1);
+    return;
+  }
 
   Serial.write(reinterpret_cast<const uint8_t*>(line), n);
 
