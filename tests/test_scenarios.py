@@ -151,7 +151,7 @@ def test_broken_json_and_wrong_content_type(dev, guard):
     assert r.status_code == 400
     r = dev.request("PUT", "/api/scenarios", data="scenarios=1")  # a form post: not JSON
     assert r.status_code in (400, 415)
-    r = dev.request("PUT", "/api/scenarios", data="x" * 70000, headers={"Content-Type": "application/json"})  # over 65536 (and 49152)
+    r = dev.request("PUT", "/api/scenarios", data="x" * 270000, headers={"Content-Type": "application/json"})  # over 262144 (and 49152)
     assert r.status_code == 413
 
 

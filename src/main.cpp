@@ -1,8 +1,8 @@
 // lightwatch: an ESP32-CAM controller for Tuya sockets that starts on its own after a blackout.
 //
 // setup() brings up, in order: the LEDs, the logger and the boot history, the storage (SD card + a
-// flash copy of the config), the config, the Tuya device list with its workers and monitor, Wi-Fi
-// and NTP, the web API, and the scenarios. loop() only watches: boot stages, the clock, a card that
+// flash copy of the config), the config, the Tuya device list with its workers and monitor, the worker
+// of the outgoing HTTP requests, Wi-Fi and NTP, the web API, and the scenarios. loop() only watches: boot stages, the clock, a card that
 // shows up late, and the Wi-Fi watchdog (restart after wifi.restart_after_min without Wi-Fi).
 //
 // The camera is never initialised.
@@ -15,6 +15,7 @@
 #include "bootlog.h"
 #include "config.h"
 #include "devices.h"
+#include "http_out.h"
 #include "indicator.h"
 #include "logger.h"
 #include "scenario.h"
@@ -73,6 +74,7 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
 
 void setup() {
   Serial.begin(115200);
+  HttpOut::installTlsAllocator();  // before anything (Wi-Fi included) takes memory from mbedTLS
   Indicator::begin();  // red LED blinks from the very start
   Logger::begin();  // from here on LOGx() is safe from any task
   BootLog::begin(esp_reset_reason());  // before anything that could hang or reset
@@ -103,6 +105,7 @@ void setup() {
   Devices::load();  // /devices.json on the SD card only; no card = no devices
   Tuya::begin();
   Tuya::setObserver(Devices::onJobDone);
+  HttpOut::begin();
   Devices::startMonitor(cfg.monitor.intervalSec, cfg.monitor.timeoutMs, cfg.monitor.retries);
 
   Indicator::wifiConfigured(!cfg.wifi.ssid.isEmpty());  // before WiFi.begin: its events must not be dropped

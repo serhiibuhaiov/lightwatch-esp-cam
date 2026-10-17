@@ -138,6 +138,7 @@ AI-Thinker ESP32-CAM; без PSRAM до 16), по 24 кроки, вони вик
 | `POST /api/devices/status`, `on`, `off`, `refresh` | запит стану, увімкнути, вимкнути, оновити показники (`?name=`) |
 | `GET`, `PUT /api/scenarios` | сценарії й стан запусків (повна заміна) |
 | `POST /api/scenarios/run`, `stop` | запустити чи зупинити сценарій (`?name=`) |
+| `POST /api/http/test` | пробний вихідний HTTP(S)-запит (GET чи POST): код, час, пам'ять TLS |
 
 ```bash
 curl -u admin:PASS http://IP/api/status

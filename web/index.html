@@ -176,6 +176,8 @@ function limitsCard(l) {
     ["Пристрої", "до " + dv.max + " пристроїв; файл devices.json до " + fmtKb(dv.max_file_bytes)],
     ["Історія показників", dv.history_capacity + " останніх запитів на пристрій (≈" + fmtDur(dv.history_span_s) + " при опитуванні кожні " + dv.poll_interval_s + " с); у пам'яті, скидається при перезапуску"],
     ["Черги запитів до розеток", "команди (кнопки, API, сценарії): " + l.tuya_queues.commands + " місць; опитування: " + l.tuya_queues.monitor + " місця"],
+    ...(l.http ? [["Вихідні HTTP-запити", "URL до " + fmtKb(l.http.max_url_bytes) + ", тіло POST до " + fmtKb(l.http.max_body_bytes) + "; таймаут " + l.http.min_timeout_ms / 1000 + "–" +
+      l.http.max_timeout_ms / 1000 + " с (за замовчуванням " + l.http.timeout_ms / 1000 + "); черга " + l.http.queue + " місця; з відповіді зберігаються перші " + l.http.response_bytes + " байт"]] : []),
     ["Розмір запиту PUT", "налаштування " + fmtKb(l.put_body_bytes.config) + ", пристрої " + fmtKb(l.put_body_bytes.devices) + ", сценарії " + fmtKb(l.put_body_bytes.scenarios)],
     ["Логи", "журнал у пам'яті " + fmtKb(l.logs.ram_bytes) + " (без картки це все, що є); останні рядки файла до " + fmtKb(l.logs.tail_max_bytes)],
     ["Історія запусків плати", "останні " + l.boot_history + " запусків"],

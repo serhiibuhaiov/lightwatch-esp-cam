@@ -105,7 +105,9 @@ def baseline(dev):
         pass
 
 
-FAKE_NAME = "zz-fake"
+# A new name on every run: the board remembers some things about a device by its name (a device that refused UPDATEDPS
+# gets plain queries for 20 polling cycles, ~5 min), and a run right after another must not inherit them.
+FAKE_NAME = "zz-fake-" + os.urandom(3).hex()
 FAKE_KEY = "0123456789abcdef"
 DEAD_NAME = "zz-dead"
 DEAD_IP = "192.168.8.251"  # nobody answers there: a socket that is off
@@ -126,12 +128,13 @@ def put_devices(dev, devices):
 
 @contextlib.contextmanager
 def fake_registered(dev, with_dead=False):
-    """Starts a fake Tuya 3.4 device on this computer and registers it on the board as `zz-fake` (and, with
+    """Starts a fake Tuya 3.4 device on this computer and registers it on the board as `zz-fake-<hex>` (and, with
     `with_dead`, a device that nobody answers as `zz-dead`). The device list is put back at the end. Skips the
     test if the board cannot reach this computer (firewall)."""
     from fake_tuya import FakeTuya, lan_ip_towards
     original = device_list(dev)
-    assert not any(d["name"] in (FAKE_NAME, DEAD_NAME) for d in original), "leftover test devices in /devices.json"
+    leftovers = [d["name"] for d in original if d["name"].startswith("zz-fake") or d["name"] == DEAD_NAME]
+    assert not leftovers, f"leftover test devices in /devices.json: {leftovers}"
     fake = FakeTuya(key=FAKE_KEY.encode())
     try:
         fake.start()

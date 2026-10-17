@@ -39,7 +39,7 @@
      "Стан"
     ],
     "summary": "Стан пристрою",
-    "description": "SD, Wi-Fi, пам'ять (`memory`: `internal_*` уся внутрішня RAM разом з IRAM, придатною лише для 32-бітного доступу; `dram_*` 8-бітна внутрішня RAM, потрібна майже всім виділенням; `dma_*` RAM для DMA, з якої драйвер SD бере буфери, коли вона скінчиться, запис на карту не вдається; `psram_*`; `*_min` мінімум від старту, `*_largest` найбільший вільний блок), годинник, запити до розеток (`tuya`), короткий список сценаріїв, історія запусків і всі фіксовані ліміти прошивки (`limits`). `scenario_engine`: рушій сценаріїв від запуску (запусків зараз; місця в черзі команд: `max_in_flight`, `in_flight`, `max_in_flight_seen`, `slot_waits`, `slot_wait_max_ms`, `queue_full`; спроби з розетками, які монітор вважав офлайн: `offline_attempts`, `offline_attempts_ok`, `offline_attempt_ms`). Ліміти сценаріїв залежать від пам'яті плати (`limits.scenarios.basis`): з PSRAM до 24 сценаріїв, файл до 96 КБ, тіло PUT до 64 КБ; без неї до 16, 48 КБ і 48 КБ.",
+    "description": "SD, Wi-Fi, пам'ять (`memory`: `internal_*` уся внутрішня RAM разом з IRAM, придатною лише для 32-бітного доступу; `dram_*` 8-бітна внутрішня RAM, потрібна майже всім виділенням; `dma_*` RAM для DMA, з якої драйвер SD бере буфери, коли вона скінчиться, запис на карту не вдається; `psram_*`; `*_min` мінімум від старту, `*_largest` найбільший вільний блок), годинник, запити до розеток (`tuya`), короткий список сценаріїв, історія запусків і всі фіксовані ліміти прошивки (`limits`). `scenario_engine`: рушій сценаріїв від запуску (запусків зараз; місця в черзі команд: `max_in_flight`, `in_flight`, `max_in_flight_seen`, `slot_waits`, `slot_wait_max_ms`, `queue_full`; спроби з розетками, які монітор вважав офлайн: `offline_attempts`, `offline_attempts_ok`, `offline_attempt_ms`). Ліміти сценаріїв залежать від пам'яті плати (`limits.scenarios.basis`): з PSRAM до 24 сценаріїв, файл до 384 КБ, тіло PUT до 256 КБ; без неї до 16, 48 КБ і 48 КБ.",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -91,10 +91,10 @@
            "max": 24,
            "max_with_psram": 24,
            "max_without_psram": 16,
-           "max_body_bytes": 65536,
+           "max_body_bytes": 262144,
            "max_steps": 24,
            "max_pause_s": 3600,
-           "max_file_bytes": 98304,
+           "max_file_bytes": 393216,
            "power_rule": {
             "max_watts": 20000,
             "min_for_s": 10,
@@ -119,13 +119,24 @@
           "put_body_bytes": {
            "config": 8192,
            "devices": 8192,
-           "scenarios": 65536
+           "scenarios": 262144,
+           "http_test": 49152
           },
           "logs": {
            "ram_bytes": 8192,
            "tail_max_bytes": 32768
           },
-          "boot_history": 16
+          "boot_history": 16,
+          "http": {
+           "max_url_bytes": 2048,
+           "max_body_bytes": 16384,
+           "max_content_type_bytes": 100,
+           "queue": 4,
+           "timeout_ms": 10000,
+           "min_timeout_ms": 1000,
+           "max_timeout_ms": 30000,
+           "response_bytes": 256
+          }
          },
          "scenario_engine": {
           "runs_alive": 2,
@@ -1203,7 +1214,7 @@
      "Сценарії"
     ],
     "summary": "Замінити список сценаріїв",
-    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). До 24 сценаріїв по 24 кроки й тіло до 65536 байт, якщо на платі є PSRAM; без неї до 16 сценаріїв і 49152 байт (див. `GET /api/status` → `limits.scenarios`). `on_interrupt` (необов'язково): що робить перезапуск плати із запуском цього сценарію, окремо для `power` (світло зникало), `software` (програмний перезапуск), `crash` (збій, watchdog) і `brownout` (просідання напруги): `resume` (продовжити з того самого кроку й рештою паузи), `restart` (почати спочатку) або `drop` (не продовжувати); `resume_within_min` 0..1440 (довша перерва: почати спочатку). За замовчуванням power=restart, решта resume, 120 хв.",
+    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). До 24 сценаріїв по 24 кроки й тіло до 262144 байт, якщо на платі є PSRAM; без неї до 16 сценаріїв і 49152 байт (див. `GET /api/status` → `limits.scenarios`). `on_interrupt` (необов'язково): що робить перезапуск плати із запуском цього сценарію, окремо для `power` (світло зникало), `software` (програмний перезапуск), `crash` (збій, watchdog) і `brownout` (просідання напруги): `resume` (продовжити з того самого кроку й рештою паузи), `restart` (почати спочатку) або `drop` (не продовжувати); `resume_within_min` 0..1440 (довша перерва: почати спочатку). За замовчуванням power=restart, решта resume, 120 хв.",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -1240,7 +1251,7 @@
       }
      },
      "413": {
-      "description": "Тіло більше за ліміт (65536 байт з PSRAM, 49152 без неї).",
+      "description": "Тіло більше за ліміт (262144 байт з PSRAM, 49152 без неї).",
       "content": {
        "application/json": {
         "schema": {
@@ -1587,6 +1598,120 @@
      },
      "200": {
       "description": "Специфікація."
+     }
+    }
+   }
+  },
+  "/api/http/test": {
+   "post": {
+    "tags": [
+     "Сценарії"
+    ],
+    "summary": "Пробний HTTP-запит",
+    "description": "Надсилає один запит так, як це зробить крок сценарію `http`, і показує, як він пройшов: код відповіді, час фаз (`connect` це DNS, TCP і TLS-рукостискання), перші 256 байт відповіді, скільки пам'яті взяв TLS (`tls.peak_internal`, `tls.peak_psram`; з PSRAM TLS бере пам'ять лише там, ≈48 КБ на запит) і як низько опускалась 8-бітна внутрішня RAM (`memory.dram_low`). Успіх це код 2xx; інакше `ok: false`, `error` (`url`, `dns`, `connect`, `tls`, `timeout`, `send`, `http`) і `detail`. HTTPS перевіряє сертифікат сервера вбудованим набором кореневих сертифікатів. Переспрямування (3xx) не виконуються. Відповідь HTTP 200 приходить, коли запит закінчився (до кількох секунд). У лог пишеться лише метод, хост і код, без шляху й параметрів (там може бути токен).",
+    "x-danger": "Надіслати HTTP-запит з пристрою на вказану адресу?",
+    "requestBody": {
+     "required": true,
+     "description": "`method`: `GET` (за замовчуванням) або `POST`; `url`: http:// або https://, до 2048 байт, без пробілів і не-ASCII (кодуйте через %XX); `content_type` (лише POST, за замовчуванням `application/json`) і `body` (лише POST, рядок до 16384 байт); `timeout_ms` 1000..30000 (за замовчуванням 10000).",
+     "content": {
+      "application/json": {
+       "example": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot<token>/sendMessage",
+        "content_type": "application/json",
+        "body": "{\"chat_id\":123456789,\"text\":\"Перевірка\"}",
+        "timeout_ms": 10000
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Результат запиту.",
+      "content": {
+       "application/json": {
+        "example": {
+         "ok": true,
+         "method": "POST",
+         "host": "api.telegram.org",
+         "status": 200,
+         "ms": 1450,
+         "phases_ms": {
+          "queued": 0,
+          "connect": 1180,
+          "send": 20,
+          "wait": 250
+         },
+         "request_bytes": 48,
+         "response_bytes": 312,
+         "response": "{\"ok\":true,\"result\":{...}}",
+         "tls": {
+          "psram": true,
+          "peak_internal": 0,
+          "peak_psram": 41200
+         },
+         "memory": {
+          "dram_before": 68900,
+          "dram_low": 64100,
+          "dram_after": 68700,
+          "stack_free_min": 2900
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустиме поле або тіло не JSON.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Потрібна авторизація (HTTP Basic)."
+     },
+     "403": {
+      "description": "web_password порожній: API закрите.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "413": {
+      "description": "Тіло більше за 49152 байти.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "415": {
+      "description": "Тіло без Content-Type: application/json.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Черга HTTP-запитів (4 місця) повна.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     }
    }

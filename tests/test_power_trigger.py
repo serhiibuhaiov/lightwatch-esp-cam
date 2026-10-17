@@ -255,8 +255,12 @@ def test_met_while_its_scenario_runs_it_waits_for_the_run_and_starts_once_more(d
     name = TEST + "busy"
     steps = [{"device": FAKE_NAME, "action": "on", "pause_after_s": 40}, {"device": "zz-no-such-device"}]
     fake.set(d19=HIGH)  # the condition is false while the manual run starts
+    # One high answer in the history first: the low answers an earlier test left there would fire the rule at once.
+    assert dev.request("POST", "/api/devices/status", params={"name": FAKE_NAME}, timeout=20).json()["ok"]
     assert put(dev, guard + [rule(name, steps=steps)]).status_code == 200
     try:
+        # A saved rule has no `watch` until the board first looks at it (every 3 s); the run reaches its pause sooner.
+        assert wait_until(lambda: scn(dev, name).get("watch", {}).get("reason") == "not-met", 10), scn(dev, name)
         with Sampler(dev):
             assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
             assert wait_until(lambda: scn(dev, name).get("pause_left_s") is not None, 20), scn(dev, name)

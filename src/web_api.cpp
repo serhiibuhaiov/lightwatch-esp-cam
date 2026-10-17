@@ -15,6 +15,7 @@
 #include "bootlog.h"
 #include "config.h"
 #include "devices.h"
+#include "http_out.h"
 #include "logger.h"
 #include "psram_alloc.h"
 #include "scenario.h"
@@ -33,6 +34,7 @@ namespace {
 
 const char* TAG = "web";
 constexpr size_t kMaxBody = 8192;
+constexpr size_t kMaxHttpTestBody = 49152;  // POST /api/http/test: a 16 KB body, JSON-escaped, with room to spare
 constexpr size_t kDefaultTail = 4096;
 
 AsyncWebServer server(80);
@@ -41,7 +43,11 @@ AsyncWebServer server(80);
 // through Storage (mutex, short operations) and big files are streamed in chunks.
 
 // The largest PUT body the route accepts.
-size_t maxBodyFor(AsyncWebServerRequest* req) { return req->url() == "/api/scenarios" ? Scenario::maxBodyBytes() : kMaxBody; }
+size_t maxBodyFor(AsyncWebServerRequest* req) {
+  if (req->url() == "/api/scenarios") return Scenario::maxBodyBytes();
+  if (req->url() == "/api/http/test") return kMaxHttpTestBody;
+  return kMaxBody;
+}
 
 // A body of 4 KB and more lives in PSRAM (malloc puts it there). Handed to the library as it is, lwIP copies the packets
 // straight out of PSRAM, and under load (20+ scenario runs alive, little internal RAM left) a few hundred bytes of a big
@@ -246,7 +252,17 @@ void onStatus(AsyncWebServerRequest* req) {
     JsonObject b = l["put_body_bytes"].to<JsonObject>();
     b["config"] = kMaxBody;
     b["devices"] = kMaxBody;
-    b["scenarios"] = Scenario::maxBodyBytes();  // 64 KB with PSRAM, 48 KB without
+    b["scenarios"] = Scenario::maxBodyBytes();  // 256 KB with PSRAM, 48 KB without
+    b["http_test"] = kMaxHttpTestBody;
+    JsonObject h = l["http"].to<JsonObject>();
+    h["max_url_bytes"] = HttpOut::kMaxUrlBytes;
+    h["max_body_bytes"] = HttpOut::kMaxBodyBytes;
+    h["max_content_type_bytes"] = HttpOut::kMaxContentTypeBytes;
+    h["queue"] = HttpOut::kQueueSize;
+    h["timeout_ms"] = HttpOut::kDefaultTimeoutMs;
+    h["min_timeout_ms"] = HttpOut::kMinTimeoutMs;
+    h["max_timeout_ms"] = HttpOut::kMaxTimeoutMs;
+    h["response_bytes"] = HttpOut::kMaxResponseBytes;
     JsonObject lg = l["logs"].to<JsonObject>();
     lg["ram_bytes"] = Logger::kRamBufferBytes;
     lg["tail_max_bytes"] = Storage::kMaxTailBytes;
@@ -704,6 +720,80 @@ void onDeviceOp(AsyncWebServerRequest* req, Tuya::Op op) {
   req->send(r);
 }
 
+// ---- POST /api/http/test ---------------------------------------------------------------------
+// Sends one request the way an HTTP step would ({method, url, content_type, body, timeout_ms}) and tells how it went,
+// with the memory it took: the "test" button of the step editor, and the measurement of TLS on this board.
+
+String httpResultJson(const HttpOut::Job& job) {
+  const HttpOut::Result& r = job.result;
+  JsonDocument doc;
+  doc["ok"] = r.ok;
+  doc["method"] = HttpOut::methodName(job.method);
+  doc["host"] = HttpOut::hostOf(job.url.c_str());
+  if (r.status >= 0) {
+    doc["status"] = r.status;
+  } else {
+    doc["status"] = nullptr;  // no answer
+  }
+  doc["ms"] = r.ms;
+  JsonObject ph = doc["phases_ms"].to<JsonObject>();
+  ph["queued"] = r.queuedMs;
+  ph["connect"] = r.connectMs;  // DNS, TCP and the TLS handshake
+  ph["send"] = r.sendMs;
+  ph["wait"] = r.waitMs;        // the answer's headers and body
+  if (!r.ok) {
+    doc["error"] = r.error;
+    doc["detail"] = r.detail;
+  }
+  doc["request_bytes"] = job.body.size();
+  if (r.responseBytes >= 0) doc["response_bytes"] = r.responseBytes;
+  doc["response"] = r.response;
+  JsonObject t = doc["tls"].to<JsonObject>();
+  t["psram"] = r.tlsPsram;
+  t["peak_internal"] = r.tlsPeakInternal;
+  t["peak_psram"] = r.tlsPeakPsram;
+  JsonObject m = doc["memory"].to<JsonObject>();
+  m["dram_before"] = r.dramBefore;
+  m["dram_low"] = r.dramLow;
+  m["dram_after"] = r.dramAfter;
+  m["stack_free_min"] = r.stackFreeMin;
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+void onHttpTest(AsyncWebServerRequest* req) {
+  if (!authorize(req)) return;
+  String body;
+  if (!takeJsonBody(req, body)) return;
+  JsonDocument in(PsramAllocator::instance());
+  if (deserializeJson(in, body) || !in.is<JsonObject>()) {
+    sendError(req, 400, "the body must be a JSON object: {\"method\", \"url\", \"content_type\", \"body\", \"timeout_ms\"}");
+    return;
+  }
+  auto job = std::make_shared<HttpOut::Job>();
+  String err;
+  if (!HttpOut::parse(in.as<JsonVariantConst>(), *job, err)) {
+    sendError(req, 400, err);
+    return;
+  }
+  if (!HttpOut::submit(job)) {
+    sendError(req, 503, "the list of HTTP requests is full, try again");
+    return;
+  }
+  auto out = std::make_shared<String>();
+  AsyncWebServerResponse* r = req->beginChunkedResponse(
+      "application/json", [job, out](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+        if (!job->done.load(std::memory_order_acquire)) return RESPONSE_TRY_AGAIN;
+        if (out->isEmpty()) *out = httpResultJson(*job);
+        if (index >= out->length()) return 0;
+        const size_t n = std::min(maxLen, out->length() - index);
+        memcpy(buffer, out->c_str() + index, n);
+        return n;
+      });
+  req->send(r);
+}
+
 // ---- GET /api/logs ------------------------------------------------------------------
 
 // Keeps the last `tail` bytes and drops the partial first line.
@@ -840,6 +930,7 @@ void begin() {
   server.on("/api/devices/refresh", HTTP_POST, [](AsyncWebServerRequest* req) { onDeviceOp(req, Tuya::Op::Refresh); });
   server.on("/api/devices/on", HTTP_POST, [](AsyncWebServerRequest* req) { onDeviceOp(req, Tuya::Op::On); });
   server.on("/api/devices/off", HTTP_POST, [](AsyncWebServerRequest* req) { onDeviceOp(req, Tuya::Op::Off); });
+  server.on("/api/http/test", HTTP_POST, onHttpTest, nullptr, onConfigBody);
   server.onNotFound([](AsyncWebServerRequest* req) { sendError(req, 404, "not found"); });
   server.begin();
   LOGI(TAG, "web API listening on port 80");
