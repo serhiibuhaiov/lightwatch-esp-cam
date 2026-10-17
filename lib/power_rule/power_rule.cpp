@@ -1,6 +1,7 @@
 #include "power_rule.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace PowerRule {
 
@@ -58,6 +59,10 @@ Result evaluate(const std::vector<Sample>& s, size_t capacity, uint32_t now, uin
   pc.met = pc.runS >= forS;
   pc.reason = pc.met ? "met" : last.t < start ? "warmup" : "waiting";
   return pc;
+}
+
+bool rearmsAfterRestart(const char* reason) {
+  return reason && (std::strcmp(reason, "not-met") == 0 || std::strcmp(reason, "relay-off") == 0);
 }
 
 }  // namespace PowerRule

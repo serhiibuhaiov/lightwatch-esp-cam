@@ -34,4 +34,11 @@ struct Result {
 Result evaluate(const std::vector<Sample>& samples, size_t capacity, uint32_t now, uint32_t intervalS, bool below,
                 uint32_t watts, uint32_t forS, uint32_t warmupS);
 
+// A rule that had fired before a restart is restored "fired" (not armed). The board cannot know whether its condition
+// went away meanwhile, so it is armed again only by a look that shows the condition false for sure: the power on the
+// other side of the threshold ("not-met") or the relay off ("relay-off"). Right after a boot the history is empty: "no-data",
+// then "warmup"/"waiting" while it fills say nothing about the condition, and arming on them would fire the rule a second
+// time for the same condition. Once the condition is seen holding again, the usual rule applies (any "not met" arms it).
+bool rearmsAfterRestart(const char* reason);
+
 }  // namespace PowerRule

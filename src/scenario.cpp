@@ -17,6 +17,7 @@
 #include "devices.h"
 #include "engine.h"
 #include "logger.h"
+#include "power_rule.h"
 #include "psram_alloc.h"
 #include "storage.h"
 #include "tuya.h"
@@ -508,11 +509,27 @@ class BoardEnv : public ScenarioEngine::Env {
 };
 
 
-// ---- /runs.json: the alive runs ---------------------------------------------------------------------------------------
+// ---- the state of the power rules ---------------------------------------------------------------------------------------
+
+// The state of a power rule, for the page and for "fire once": it fires when the condition becomes true and is armed
+// again only after the condition has been false at a look. Whether it has fired is kept in /runs.json ("disarmed"), so a
+// restart does not fire it a second time for the same condition (see PowerRule::rearmsAfterRestart).
+struct Watch {
+  bool armed = true;
+  bool restored = false;  // restored "fired" after a restart: armed again only by a sure "condition false"
+  bool met = false;
+  String reason = "no-data";
+  uint32_t runS = 0;
+  int32_t power = INT32_MIN;  // raw, 0.1 W
+};
+std::map<String, Watch> gWatch;  // by scenario name
+
+// ---- /runs.json: the alive runs and the rules that have fired ------------------------------------------------------------
 
 std::string clip(const std::string& s) { return s.size() > kWhyMaxChars ? s.substr(0, kWhyMaxChars) : s; }
 
-// /runs.json for the alive runs; `count` = how many. Caller holds gMux (the engine hands the runs over one at a time, the
+// /runs.json for the alive runs and the power rules that have fired; `count` = how many of both (0: no file is needed).
+// Caller holds gMux (the engine hands the runs over one at a time, the
 // document lives in PSRAM: no copy of all runs in internal RAM, which the SD card's DMA needs at the same moment).
 String runsTextLocked(uint32_t epoch, size_t& count) {
   JsonDocument doc(PsramAllocator::instance());
@@ -561,6 +578,12 @@ String runsTextLocked(uint32_t epoch, size_t& count) {
       a.add(clip(s.whys.get(i)));
     }
   });
+  JsonArray disarmed = doc["disarmed"].to<JsonArray>();  // the power rules that fired and wait for their condition to go
+  for (const auto& kv : gWatch) {
+    if (kv.second.armed) continue;
+    disarmed.add(kv.first);
+    ++count;
+  }
   String out;
   serializeJson(doc, out);
   return out;
@@ -568,7 +591,8 @@ String runsTextLocked(uint32_t epoch, size_t& count) {
 
 // Reads the runs a restart interrupted and hands them to `fn` one at a time (with the time they were saved, 0 if unknown):
 // 24 runs at once would be ~35 KB of internal RAM at boot. Nothing (and no error) when there is no card or no file.
-void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine::Snapshot&)>& fn) {
+void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine::Snapshot&)>& fn, std::vector<String>& disarmed) {
+  disarmed.clear();
   if (!Storage::sdMounted()) return;
   String raw;
   // A save removes the old file before renaming the new one: a power cut in between leaves only the temporary file.
@@ -579,6 +603,9 @@ void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine
     return;
   }
   const uint32_t savedEpoch = doc["saved_epoch"] | 0u;
+  for (JsonVariantConst n : doc["disarmed"].as<JsonArrayConst>()) {
+    if (n.is<const char*>()) disarmed.push_back(n.as<const char*>());
+  }
   for (JsonObjectConst o : doc["runs"].as<JsonArrayConst>()) {
     ScenarioEngine::Snapshot s;
     s.name = o["name"] | "";
@@ -771,16 +798,6 @@ void engineTask(void*) {
 
 // ---- power triggers ----------------------------------------------------------------------------
 
-// The state of a power rule, for the page and for "fire once": it fires when the condition becomes true and is armed
-// again only after the condition has been false at a look.
-struct Watch {
-  bool armed = true;
-  bool met = false;
-  String reason = "no-data";
-  uint32_t runS = 0;
-  int32_t power = INT32_MIN;  // raw, 0.1 W
-};
-std::map<String, Watch> gWatch;  // by scenario name
 
 RunResult runWith(const String& name, const char* trigger);  // below
 
@@ -809,6 +826,7 @@ void watchTick() {
     for (auto it = gWatch.begin(); it != gWatch.end();) {  // forget the rules that are gone or switched off
       bool present = false;
       for (const Def& d : rules) present = present || d.name == it->first;
+      if (!present && !it->second.armed) gRunsDirty = true;
       it = present ? std::next(it) : gWatch.erase(it);
     }
   }
@@ -829,8 +847,12 @@ void watchTick() {
       w.power = pc.lastPower;
       if (pc.met && w.armed) {
         fire = true;
-      } else if (!pc.met) {
+      } else if (pc.met) {
+        w.restored = false;  // fired, and the condition still holds: the usual "wait for it to go"
+      } else if (!w.restored || PowerRule::rearmsAfterRestart(w.reason.c_str())) {
+        if (!w.armed) gRunsDirty = true;  // /runs.json keeps the rules that fired
         w.armed = true;
+        w.restored = false;
       }
     }
     if (!fire) continue;
@@ -839,6 +861,7 @@ void watchTick() {
       {
         Lock lock;
         gWatch[d.name].armed = false;
+        gRunsDirty = true;
       }
       LOGI(TAG, "[%s] %s: %s held for %u s (>= %u s): started", d.name.c_str(), d.whenDevice.c_str(),
            below ? "power below the threshold" : "power above the threshold", static_cast<unsigned>(pc.runS), static_cast<unsigned>(d.forS));
@@ -907,6 +930,7 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
     if (it != gWatch.end()) {
       JsonObject ws = o["watch"].to<JsonObject>();
       ws["armed"] = it->second.armed;
+      if (it->second.restored) ws["restored"] = true;  // fired before the restart; armed again only by a sure "condition false"
       ws["met"] = it->second.met;
       ws["reason"] = it->second.reason;
       ws["run_s"] = it->second.runS;
@@ -971,6 +995,17 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
     // The runs this restart interrupted, and how long the board was away (known when the clock was set before and after:
     // it survives a software restart, a panic and a watchdog, not a power cut).
     const time_t now = time(nullptr);
+    // A power rule whose run is continued or started again has fired for this condition already: restored "fired".
+    auto disarm = [&](const String& name) {
+      for (const Def& x : gDefs) {
+        if (x.name != name || !x.enabled || !x.isPower()) continue;
+        Watch& w = gWatch[name];
+        w.armed = false;
+        w.restored = true;
+        LOGI(TAG, "[%s] the power rule had fired before the restart: it fires again only after its condition was seen false", name.c_str());
+      }
+    };
+    std::vector<String> disarmed;
     readRuns([&](uint32_t savedEpoch, const ScenarioEngine::Snapshot& s) {
       gRunsFileThere = true;
       const bool gapKnown = savedEpoch && now > 1700000000;
@@ -1000,14 +1035,19 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
       } else if (dec.action == Policy::Resume) {
         if (gEngine->resume(s, elapsedMs, reasonName) != ScenarioEngine::Engine::StartResult::Started) {
           gEngine->interrupted(s, why + "; could not be continued");
+        } else if (s.trigger == "power-below" || s.trigger == "power-above") {
+          disarm(d->name);
         }
       } else if (dec.action == Policy::Restart) {
         gEngine->interrupted(s, why);
         gEngine->start(s.name, s.trigger, millis(), true);
+        if (s.trigger == "power-below" || s.trigger == "power-above") disarm(d->name);
       } else {
         gEngine->interrupted(s, why);
       }
-    });
+    }, disarmed);
+    if (!disarmed.empty()) gRunsFileThere = true;
+    for (const String& name : disarmed) disarm(name);
     for (const Def& d : gDefs) {
       if (!d.enabled || d.trigger != kTriggerPowerOn) continue;
       const ScenarioEngine::Run* r = gEngine->run(d.name.c_str());

@@ -217,3 +217,74 @@ def test_a_scenario_edited_during_the_run_is_started_again(dev, guard, fake):
     rec = history(dev, name=TEST + "edit", limit=1)["runs"][0]
     assert rec["result"] == "interrupted" and "edited" in rec["reason"], rec
     assert dev.request("POST", "/api/scenarios/stop", params={"name": TEST + "edit"}).status_code == 200
+
+
+# ---- a power rule that fired before a restart does not fire again for the same condition (-m restart) -----------------
+
+def _watch(dev, name):
+    return scn(dev, name).get("watch", {})
+
+
+def _runs(dev, name):
+    return len(history(dev, name=name, limit=50)["runs"])
+
+
+@pytest.mark.restart
+def test_a_power_rule_whose_run_is_continued_fires_again_only_after_its_condition_went_away(dev, guard, fake):
+    from test_power_trigger import HIGH, LOW, Sampler, rule, wait_until
+    fake.start()
+    fake.set(d1=True, d19=LOW)  # 30 W: "below 100 W" holds
+    name = TEST + "rule1"
+    steps = [{"device": FAKE_NAME, "action": "on", "pause_after_s": 40}, {"device": "zz-no-such-device"}]
+    assert put(dev, guard + [rule(name, steps=steps)]).status_code == 200
+    try:
+        with Sampler(dev):
+            in_pause(dev, name, timeout=60)
+        s = scn(dev, name)
+        assert s["run_trigger"] == "power-below" and s["watch"]["armed"] is False, s
+        time.sleep(5)  # /runs.json written
+        reboot(dev)
+        s = scn(dev, name)
+        assert s["state"] == "running" and s["resumed"], s
+        assert s["watch"]["armed"] is False and s["watch"].get("restored") is True, s["watch"]
+        before = _runs(dev, name)
+        with Sampler(dev):
+            wait_state(dev, name, ("done",), timeout=70)  # the continued run ends; the condition still holds
+            time.sleep(30)  # long enough for "below 100 W for 10 s" to be met again from the fresh history
+            s = scn(dev, name)
+            assert s["state"] == "done" and s["watch"]["armed"] is False and s["watch"]["met"] is True, s
+            assert _runs(dev, name) == before + 1  # only the continued run ended: no second one
+            fake.set(d19=HIGH)  # the condition goes away: armed again
+            assert wait_until(lambda: _watch(dev, name).get("armed") is True, 40), _watch(dev, name)
+            assert "restored" not in _watch(dev, name)
+            fake.set(d19=LOW)  # and it comes back: it fires again
+            assert wait_until(lambda: scn(dev, name)["state"] in ("waiting", "running"), 40), scn(dev, name)
+    finally:
+        dev.request("POST", "/api/scenarios/stop", params={"name": name})
+        fake.set(d19=LOW)
+
+
+@pytest.mark.restart
+def test_a_power_rule_whose_run_had_ended_stays_fired_over_a_restart(dev, guard, fake):
+    from test_power_trigger import LOW, Sampler, rule
+    fake.start()
+    fake.set(d1=True, d19=LOW)
+    name = TEST + "rule2"
+    assert put(dev, guard + [rule(name, steps=[{"device": "zz-no-such-device"}])]).status_code == 200
+    with Sampler(dev):
+        end = time.time() + 60
+        while time.time() < end and scn(dev, name)["state"] != "done":
+            time.sleep(1)
+    s = scn(dev, name)
+    assert s["state"] == "done" and s["watch"]["armed"] is False, s
+    time.sleep(5)  # /runs.json keeps the fired rule although no run is alive
+    reboot(dev)
+    s = scn(dev, name)
+    assert s["watch"]["armed"] is False and s["watch"].get("restored") is True, s.get("watch")
+    before = _runs(dev, name)
+    with Sampler(dev):
+        time.sleep(35)  # the condition holds the whole time
+    s = scn(dev, name)
+    assert s["state"] == "idle" and s["watch"]["armed"] is False and s["watch"]["met"] is True, s
+    assert _runs(dev, name) == before
+

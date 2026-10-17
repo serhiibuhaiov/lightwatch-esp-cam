@@ -167,6 +167,24 @@ void test_a_gap_longer_than_two_and_a_half_intervals_breaks_the_run() {
   TEST_ASSERT_EQUAL_UINT32(71 * kInterval + 37, below(s, 100, 10, 0, 73).runS);
 }
 
+void test_after_a_restart_only_a_false_condition_arms_a_fired_rule() {
+  TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart("not-met"));
+  TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart("relay-off"));
+  for (const char* r : {"no-data", "warmup", "waiting", "stale", "unanswered", "relay-unknown", "no-power-dp", "met"}) {
+    TEST_ASSERT_FALSE_MESSAGE(PowerRule::rearmsAfterRestart(r), r);
+  }
+  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(nullptr));
+  // The reasons the history gives right after a boot, while the socket keeps consuming below the threshold, never arm it.
+  std::vector<Sample> s;
+  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));  // no-data
+  s.push_back(on(10, 300));
+  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));  // warmup
+  addOn(s, 25, 2, 300);
+  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));  // waiting
+  s.push_back(on(55, 2000));
+  TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));   // not-met: it went away
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_no_history_never_fires);
@@ -179,5 +197,6 @@ int main(int, char**) {
   RUN_TEST(test_a_full_ring_needs_no_warm_up);
   RUN_TEST(test_a_failed_answer_restarts_the_count);
   RUN_TEST(test_a_gap_longer_than_two_and_a_half_intervals_breaks_the_run);
+  RUN_TEST(test_after_a_restart_only_a_false_condition_arms_a_fired_rule);
   return UNITY_END();
 }
