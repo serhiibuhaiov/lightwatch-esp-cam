@@ -32,7 +32,7 @@ namespace {
 
 const char* TAG = "web";
 constexpr size_t kMaxBody = 8192;
-constexpr size_t kMaxScenariosBody = 24576;  // 8 scenarios x 24 steps with long names are ~19 KB
+constexpr size_t kMaxScenariosBody = 49152;  // 16 scenarios x 24 steps with long names are ~38 KB (kept in PSRAM when there is one)
 constexpr size_t kDefaultTail = 4096;
 
 AsyncWebServer server(80);
@@ -241,6 +241,7 @@ void onStatus(AsyncWebServerRequest* req) {
     }
   }
   Scenario::summary(doc["scenarios"].to<JsonArray>());  // name, trigger, state, progress of every scenario
+  Scenario::engineStats(doc["scenario_engine"].to<JsonObject>());
 
   // Earlier boots, oldest first, the last one is the current boot.
   JsonArray hist = doc["boot_history"].to<JsonArray>();

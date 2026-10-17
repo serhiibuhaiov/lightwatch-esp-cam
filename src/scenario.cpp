@@ -7,12 +7,16 @@
 
 #include <WiFi.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "devices.h"
+#include "engine.h"
 #include "logger.h"
+#include "psram_alloc.h"
 #include "storage.h"
 #include "tuya.h"
 
@@ -25,17 +29,8 @@ const char* kTmp = "/scenarios.tmp";
 const char* kBak = "/scenarios.bak";
 const char* kBakTmp = "/scenarios.bak.tmp";
 
-constexpr uint8_t kAttempts = 3;          // tries per step
+// A step's command or status query (the engine retries; its timing is in lib/scenario_engine/engine.h).
 constexpr uint32_t kCommandTimeoutMs = 3000;
-constexpr uint32_t kRetryGapMs = 2000;
-constexpr uint32_t kQueueWaitMs = 120000; // how long a command may wait in the Tuya queue before the attempt is given up
-
-// A run started by the power-up trigger cannot count on the network: after a blackout the router (and the sockets) take
-// a minute or two to come back. So it waits for Wi-Fi first (as long as it takes: no command gets through without it)
-// and then keeps trying each step for a longer window.
-constexpr uint32_t kNetSettleMs = 10000;              // after Wi-Fi came up: let the sockets join the network
-constexpr uint32_t kPatientWindowMs = 90000;          // retry window of one step in such a run
-constexpr uint32_t kPatientGapMs = 5000;
 
 const char* kTriggerPowerOn = "power_on";
 const char* kTriggerManual = "manual";
@@ -46,21 +41,8 @@ const char* kTriggerPowerAbove = "power_above";
 constexpr uint32_t kDefaultWarmupS = 60;
 constexpr uint32_t kWatchTickMs = 3000;  // how often the conditions are looked at
 
-enum class State : uint8_t { Idle, Skipped, Waiting, Running, Done, Stopped };
-
-const char* stateName(State s) {
-  switch (s) {
-    case State::Skipped: return "skipped";
-    case State::Waiting: return "waiting";
-    case State::Running: return "running";
-    case State::Done: return "done";
-    case State::Stopped: return "stopped";
-    default: return "idle";
-  }
-}
-
 struct Step {
-  String device;
+  uint16_t dev = 0;          // index into Def::devices
   bool on = true;            // the action: switch the device on (default) or off
   bool enabled = true;
   int32_t pauseAfterS = -1;  // -1: the scenario's default
@@ -71,6 +53,7 @@ struct Def {
   bool enabled = true;
   String trigger = kTriggerPowerOn;
   uint16_t defaultPauseS = 30;
+  std::vector<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
   std::vector<Step> steps;
   // power_below / power_above only:
   String whenDevice;
@@ -79,27 +62,7 @@ struct Def {
   uint32_t warmupS = kDefaultWarmupS;
 
   bool isPower() const { return trigger == kTriggerPowerBelow || trigger == kTriggerPowerAbove; }
-};
-
-// pending | disabled | running | ok | skipped | failed | stopped
-struct StepRun {
-  String device;
-  String state = "pending";
-  uint8_t attempts = 0;
-  String detail;
-};
-
-struct Runtime {
-  State state = State::Idle;
-  String trigger;            // what started this run: "power-on" | "manual"
-  String skipReason;
-  uint32_t startAtMs = 0;    // millis() at which a waiting run starts
-  String waitReason;         // while waiting past startAtMs: what for ("wifi")
-  int current = -1;         // index of the step in progress
-  std::vector<StepRun> steps;
-  bool alive = false;        // a task exists for this run
-  bool stop = false;         // asked to stop
-  bool holdsPowerUp = false; // started by the power-up and has not got past the wait for the network yet
+  const String& device(const Step& s) const { return devices[s.dev]; }
 };
 
 // A power-up whose power_on runs are still waiting for the network is carried over a software restart: the Wi-Fi watchdog
@@ -111,7 +74,7 @@ RTC_NOINIT_ATTR uint32_t gPowerUpPending;
 SemaphoreHandle_t gMux = nullptr;      // guards everything below
 SemaphoreHandle_t gSaveMux = nullptr;  // serialises save(); held across the SD write
 std::vector<Def> gDefs;
-std::map<String, Runtime> gRun;        // by scenario name; the std::map nodes stay in place
+ScenarioEngine::Engine* gEngine = nullptr;  // every run of every scenario (lib/scenario_engine)
 struct {
   bool sd = false;
   bool fileFound = false;
@@ -127,6 +90,11 @@ struct SaveLock {
   SaveLock() { xSemaphoreTake(gSaveMux, portMAX_DELAY); }
   ~SaveLock() { xSemaphoreGive(gSaveMux); }
 };
+
+// The definitions changed: the engine stops the runs of scenarios that are gone. Caller holds gMux.
+void pushDefs() {
+  if (gEngine) gEngine->defsChanged();
+}
 
 bool validName(const String& s) {
   if (s.isEmpty() || s.length() > 32) return false;
@@ -156,7 +124,7 @@ bool readBool(JsonVariantConst v, const String& where, bool& out, String& err) {
 
 // Parses the whole document; on success `out` holds the list, on failure `err` says why.
 bool parse(const String& raw, std::vector<Def>& out, String& err) {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   DeserializationError e = deserializeJson(doc, raw);
   if (e) {
     err = String("invalid JSON: ") + e.c_str();
@@ -265,7 +233,11 @@ bool parse(const String& raw, std::vector<Def>& out, String& err) {
         err = at + ".device must be a device name (1..32 chars of a-z 0-9 _ -)";
         return false;
       }
-      st.device = sv["device"].as<const char*>();
+      const String device = sv["device"].as<const char*>();
+      size_t k = 0;
+      while (k < d.devices.size() && d.devices[k] != device) ++k;
+      if (k == d.devices.size()) d.devices.push_back(device);
+      st.dev = static_cast<uint16_t>(k);
       if (!sv["action"].isNull()) {
         const String a = sv["action"].is<const char*>() ? String(sv["action"].as<const char*>()) : String("");
         if (a != "on" && a != "off") {
@@ -291,7 +263,7 @@ bool parse(const String& raw, std::vector<Def>& out, String& err) {
 }
 
 String fileText(const std::vector<Def>& list, bool pretty) {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["version"] = 1;
   JsonArray arr = doc["scenarios"].to<JsonArray>();
   for (const Def& d : list) {
@@ -310,7 +282,7 @@ String fileText(const std::vector<Def>& list, bool pretty) {
     JsonArray steps = o["steps"].to<JsonArray>();
     for (const Step& s : d.steps) {
       JsonObject so = steps.add<JsonObject>();
-      so["device"] = s.device;
+      so["device"] = d.device(s);
       so["action"] = s.on ? "on" : "off";
       so["enabled"] = s.enabled;
       if (s.pauseAfterS >= 0) so["pause_after_s"] = s.pauseAfterS;
@@ -376,345 +348,146 @@ void load() {
   }
   Lock lock;
   if (replace) gDefs = list;
+  if (replace) pushDefs();
   gInfo.sd = sd;
   gInfo.fileFound = fileFound;
   gInfo.error = error;
   if (error.isEmpty()) LOGI(TAG, "%u scenario(s) loaded from %s", static_cast<unsigned>(gDefs.size()), kPath);
 }
 
-// ---- running -------------------------------------------------------------------------------
+// ---- running: the engine and the board's side of it ------------------------------------------------------------------
 
-void setStep(const String& name, size_t idx, const char* state, uint8_t attempts, const String& detail) {
-  Lock lock;
-  auto it = gRun.find(name);
-  if (it == gRun.end() || idx >= it->second.steps.size()) return;
-  StepRun& s = it->second.steps[idx];
-  s.state = state;
-  s.attempts = attempts;
-  s.detail = detail;
-}
-
-bool stopRequested(const String& name) {
-  Lock lock;
-  auto it = gRun.find(name);
-  return it == gRun.end() || it->second.stop;
-}
-
-// Sleeps `ms`; false if the scenario was asked to stop meanwhile.
-bool sleepOrStop(const String& name, uint32_t ms) {
-  const uint32_t until = millis() + ms;
-  while (static_cast<int32_t>(until - millis()) > 0) {
-    if (stopRequested(name)) return false;
-    const int32_t left = static_cast<int32_t>(until - millis());
-    vTaskDelay(pdMS_TO_TICKS(left > 200 ? 200 : left));
-  }
-  return !stopRequested(name);
-}
-
-// Queues one command in the command lane (beside the monitor's polls, see tuya.h) and waits for it.
-// nullptr: it could not be queued or did not finish in time.
-std::shared_ptr<Tuya::Job> runJob(Tuya::Op op, const Devices::Device& d) {
-  std::shared_ptr<Tuya::Job> job;
-  for (int i = 0; i < 40 && !job; ++i) {
-    job = Tuya::submit(op, d.name, d.target(), d.dp, kCommandTimeoutMs, false);
-    if (!job) vTaskDelay(pdMS_TO_TICKS(500));  // the queue is full: other scenarios or the user are using it
-  }
-  if (!job) return nullptr;
-  const uint32_t until = millis() + kQueueWaitMs;
-  while (!job->done.load(std::memory_order_acquire)) {
-    if (static_cast<int32_t>(until - millis()) <= 0) {
-      // Giving up: a command that is still waiting in the queue is withdrawn, so that it does not reach the socket
-      // minutes later, after the scenario has moved on (or was stopped). One that is already running cannot be recalled.
-      job->cancelled.store(true);
-      return nullptr;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-  return job;
-}
-
-// One attempt: the command (on or off), then a status query that must show the new state. `why` says what went wrong.
-bool attemptSwitch(const Devices::Device& d, bool on, String& why) {
-  std::shared_ptr<Tuya::Job> cmd = runJob(on ? Tuya::Op::On : Tuya::Op::Off, d);
-  if (!cmd) {
-    why = "the command did not get through the device queue in time";
-    return false;
-  }
-  if (!cmd->result.ok) {
-    why = cmd->result.error + ": " + cmd->result.detail;
-    return false;
-  }
-  // The query's own answer updates the cached state (the observer runs before the job is done).
-  std::shared_ptr<Tuya::Job> q = runJob(Tuya::Op::Query, d);
-  if (!q) {
-    why = "the command was accepted, but the status query did not get through in time";
-    return false;
-  }
-  if (!q->result.ok) {
-    why = "the command was accepted, but the status query failed: " + q->result.error;
-    return false;
-  }
-  if (Devices::switchState(d.name) != (on ? 1 : 0)) {
-    why = String("the command was accepted, but the status does not show it ") + (on ? "on" : "off");
-    return false;
-  }
-  return true;
-}
-
-enum class Outcome { Switched, Skipped, Failed, Stopped };
-
-// `patient`: keep trying for kPatientWindowMs (a run started by the power-up) instead of kAttempts times.
-Outcome runStep(const String& scn, size_t idx, const Step& step, bool patient) {
-  const char* verb = step.on ? "on" : "off";
-  Devices::Device d;
-  if (!Devices::find(step.device, d)) {
-    setStep(scn, idx, "failed", 0, "no such device in /devices.json");
-    LOGW(TAG, "[%s] step %u: no device '%s' in /devices.json", scn.c_str(), static_cast<unsigned>(idx + 1), step.device.c_str());
-    return Outcome::Failed;
-  }
-  if (d.ignore) {
-    setStep(scn, idx, "skipped", 0, "the device is ignored (see the device settings)");
-    LOGI(TAG, "[%s] step %u: %s is ignored, skipped", scn.c_str(), static_cast<unsigned>(idx + 1), d.name.c_str());
-    return Outcome::Skipped;
-  }
-  String last;
-  const uint32_t windowEnd = millis() + kPatientWindowMs;
-  const uint32_t gapMs = patient ? kPatientGapMs : kRetryGapMs;
-  uint8_t attempt = 0;
-  for (;;) {
-    ++attempt;
-    if (stopRequested(scn)) {
-      setStep(scn, idx, "stopped", attempt - 1, "stopped");
-      return Outcome::Stopped;
-    }
-    setStep(scn, idx, "running", attempt, attempt > 1 ? "previous attempt: " + last : String());
-    String why;
-    if (attemptSwitch(d, step.on, why)) {
-      setStep(scn, idx, "ok", attempt,
-              String("switched ") + verb + (attempt > 1 ? " after " + String(static_cast<unsigned>(attempt)) + " attempts" : String()));
-      LOGI(TAG, "[%s] step %u: %s is %s (attempt %u)", scn.c_str(), static_cast<unsigned>(idx + 1), d.name.c_str(), verb,
-           static_cast<unsigned>(attempt));
-      return Outcome::Switched;
-    }
-    last = why;
-    LOGW(TAG, "[%s] step %u: %s %s attempt %u failed: %s", scn.c_str(), static_cast<unsigned>(idx + 1), d.name.c_str(), verb,
-         static_cast<unsigned>(attempt), why.c_str());
-    const bool more = patient ? (static_cast<int32_t>(windowEnd - millis()) > static_cast<int32_t>(gapMs) && attempt < 255) : attempt < kAttempts;
-    if (!more) break;
-    if (!sleepOrStop(scn, gapMs)) {
-      setStep(scn, idx, "stopped", attempt, "stopped");
-      return Outcome::Stopped;
-    }
-  }
-  setStep(scn, idx, "failed", attempt, last);
-  LOGW(TAG, "[%s] step %u: %s FAILED after %u attempts, going on", scn.c_str(), static_cast<unsigned>(idx + 1), d.name.c_str(),
-       static_cast<unsigned>(attempt));
-  return Outcome::Failed;
-}
-
-void finish(const String& name, State state, const char* skipReason = "") {
-  Lock lock;
-  auto it = gRun.find(name);
-  if (it == gRun.end()) return;
-  it->second.state = state;
-  it->second.current = -1;
-  it->second.skipReason = skipReason;
-}
-
-bool triggerIs(const String& name, const char* trigger) {
-  Lock lock;
-  auto it = gRun.find(name);
-  return it != gRun.end() && it->second.trigger == trigger;
-}
-
-void setWaitReason(const String& name, const char* reason) {
-  Lock lock;
-  auto it = gRun.find(name);
-  if (it != gRun.end()) it->second.waitReason = reason;
-}
-
-// This run no longer waits for the network (it got it, was stopped or was started by hand): once no run of the power-up
-// waits any more, the power-up has been served and a software restart must not repeat it.
-void powerUpServed(const String& name) {
-  Lock lock;
-  auto it = gRun.find(name);
-  if (it == gRun.end() || !it->second.holdsPowerUp) return;
-  it->second.holdsPowerUp = false;
-  for (const auto& kv : gRun) {
-    if (kv.second.holdsPowerUp) return;
-  }
-  gPowerUpPending = 0;
-}
-
-// A run started by the power-up: waits until Wi-Fi is up, then kNetSettleMs for the sockets. There is no limit: if
-// Wi-Fi stays away, the watchdog in main.cpp restarts the board and the power-up is carried over (gPowerUpPending).
-// A run that was waiting and gets started by hand meanwhile (runNow changes its trigger) does not wait any more.
-// False: stopped meanwhile.
-bool waitForNetwork(const String& name) {
-  if (WiFi.status() == WL_CONNECTED) return true;
-  LOGI(TAG, "[%s] waiting for Wi-Fi", name.c_str());
-  setWaitReason(name, "wifi");
-  bool up = false;
-  uint32_t settleUntil = 0;
-  bool ok = true;
-  for (;;) {
-    if (stopRequested(name)) {
-      ok = false;
-      break;
-    }
-    if (!triggerIs(name, "power-on")) break;  // started by hand
-    const uint32_t now = millis();
-    if (!up) {
-      if (WiFi.status() == WL_CONNECTED) {
-        up = true;
-        settleUntil = now + kNetSettleMs;
-        LOGI(TAG, "[%s] Wi-Fi is up, %u s for the sockets to join", name.c_str(), static_cast<unsigned>(kNetSettleMs / 1000));
-      }
-    } else if (static_cast<int32_t>(settleUntil - now) <= 0) {
-      break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(250));
-  }
-  setWaitReason(name, "");
-  return ok;
-}
-
-void runScenario(const String& name) {
-  // Wait for the start time (short steps: runNow() and stop() act at once).
-  for (;;) {
-    uint32_t startAt;
-    bool stop;
-    {
-      Lock lock;
-      Runtime& r = gRun[name];
-      startAt = r.startAtMs;
-      stop = r.stop;
-    }
-    if (stop) {
-      powerUpServed(name);
-      finish(name, State::Stopped);
-      LOGI(TAG, "[%s] stopped while waiting", name.c_str());
-      return;
-    }
-    const int32_t left = static_cast<int32_t>(startAt - millis());
-    if (left <= 0) break;
-    vTaskDelay(pdMS_TO_TICKS(left > 200 ? 200 : left));
-  }
-
-  const bool netOk = !triggerIs(name, "power-on") || waitForNetwork(name);
-  powerUpServed(name);
-  if (!netOk) {
-    finish(name, State::Stopped);
-    LOGI(TAG, "[%s] stopped while waiting for Wi-Fi", name.c_str());
-    return;
-  }
-
-  // The steps as they are now (an edit made while the run was waiting counts).
-  Def def;
-  bool found = false;
-  {
-    Lock lock;
+// What the engine sees of the board. Called by the engine task with gMux held: all of it is short, nothing waits for
+// the network (Tuya::submit only queues; the jobs run in the Tuya workers).
+class BoardEnv : public ScenarioEngine::Env {
+ public:
+  bool known(const std::string& name) override {
     for (const Def& d : gDefs) {
-      if (d.name == name) {
-        def = d;
-        found = true;
-      }
+      if (d.name == name.c_str()) return true;
     }
-    if (found) {
-      Runtime& r = gRun[name];
-      r.state = State::Running;
-      r.steps.assign(def.steps.size(), StepRun());
-      for (size_t i = 0; i < def.steps.size(); ++i) {
-        r.steps[i].device = def.steps[i].device;
-        if (!def.steps[i].enabled) r.steps[i].state = "disabled";
-      }
-    }
-  }
-  if (!found) {
-    finish(name, State::Skipped, "the scenario was removed before it started");
-    LOGW(TAG, "[%s] removed before it started", name.c_str());
-    return;
-  }
-
-  String how;
-  {
-    Lock lock;
-    how = gRun[name].trigger;
-  }
-  const bool patient = how == "power-on";
-  LOGI(TAG, "[%s] started (%s), %u step(s)", name.c_str(), how.c_str(), static_cast<unsigned>(def.steps.size()));
-
-  unsigned switched = 0, skipped = 0, failed = 0;
-  bool stopped = false;
-  uint32_t pauseS = 0;
-  size_t pauseFrom = 0;
-  for (size_t i = 0; i < def.steps.size() && !stopped; ++i) {
-    const Step& st = def.steps[i];
-    if (!st.enabled) continue;
-    if (pauseS > 0) {
-      LOGI(TAG, "[%s] pause %u s before step %u", name.c_str(), static_cast<unsigned>(pauseS), static_cast<unsigned>(i + 1));
-      {
-        Lock lock;
-        auto it = gRun.find(name);
-        if (it != gRun.end() && pauseFrom < it->second.steps.size()) {
-          it->second.steps[pauseFrom].detail += "; pause " + String(static_cast<unsigned>(pauseS)) + " s before the next step";
-          it->second.current = -1;
-        }
-      }
-      if (!sleepOrStop(name, pauseS * 1000UL)) {
-        stopped = true;
-        break;
-      }
-      pauseS = 0;
-    }
-    {
-      Lock lock;
-      auto it = gRun.find(name);
-      if (it != gRun.end()) it->second.current = static_cast<int>(i);
-    }
-    switch (runStep(name, i, st, patient)) {
-      case Outcome::Switched:
-        ++switched;
-        pauseS = st.pauseAfterS >= 0 ? static_cast<uint32_t>(st.pauseAfterS) : def.defaultPauseS;  // only after a step that switched something
-        pauseFrom = i;
-        break;
-      case Outcome::Skipped: ++skipped; break;
-      case Outcome::Failed: ++failed; break;
-      case Outcome::Stopped: stopped = true; break;
-    }
-  }
-  finish(name, stopped ? State::Stopped : State::Done);
-  LOGI(TAG, "[%s] %s: %u switched, %u skipped, %u failed", name.c_str(), stopped ? "stopped" : "finished", switched, skipped, failed);
-}
-
-void taskMain(void* arg) {
-  String* p = static_cast<String*>(arg);
-  const String name = *p;
-  delete p;
-  runScenario(name);
-  {
-    Lock lock;
-    auto it = gRun.find(name);
-    if (it != gRun.end()) it->second.alive = false;
-  }
-  vTaskDelete(nullptr);
-}
-
-// Caller holds the lock; no task is alive for `name`.
-bool startRun(const String& name, uint32_t startAtMs, const char* trigger) {
-  Runtime& r = gRun[name];
-  r = Runtime();
-  r.state = State::Waiting;
-  r.trigger = trigger;
-  r.startAtMs = startAtMs;
-  r.alive = true;
-  if (xTaskCreate(taskMain, "scenario", 6144, new String(name), 1, nullptr) != pdPASS) {
-    r.alive = false;
-    r.state = State::Idle;
-    LOGE(TAG, "[%s] could not create the task", name.c_str());
     return false;
   }
-  return true;
+
+  // The steps of a scenario as they are now, for a run that starts (the engine keeps no copy of the definitions).
+  bool def(const std::string& name, ScenarioEngine::Def& out) override {
+    for (const Def& d : gDefs) {
+      if (d.name != name.c_str()) continue;
+      out = ScenarioEngine::Def();
+      out.name = name;
+      out.defaultPauseS = d.defaultPauseS;
+      out.devices.reserve(d.devices.size());
+      for (const String& n : d.devices) out.devices.push_back(n.c_str());
+      out.steps.reserve(d.steps.size());
+      for (const Step& s : d.steps) {
+        ScenarioEngine::StepDef st;
+        st.dev = s.dev;
+        st.on = s.on;
+        st.enabled = s.enabled;
+        st.pauseAfterS = s.pauseAfterS;
+        out.steps.push_back(st);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  uint32_t nowMs() override { return millis(); }
+  bool wifiUp() override { return WiFi.status() == WL_CONNECTED; }
+
+  ScenarioEngine::DeviceInfo device(const std::string& name) override {
+    ScenarioEngine::DeviceInfo info;
+    Devices::Device d;
+    if (!Devices::find(String(name.c_str()), d)) return info;
+    info.exists = true;
+    info.ignored = d.ignore;
+    Devices::State st;
+    if (Devices::state(d.name, st)) info.offline = st.known && !st.online;
+    info.switchState = Devices::switchState(d.name);
+    return info;
+  }
+
+  uint32_t submit(ScenarioEngine::Op op, const std::string& name) override {
+    std::shared_ptr<Tuya::Job> job;
+    Devices::Device d;
+    if (Devices::find(String(name.c_str()), d)) {
+      const Tuya::Op top = op == ScenarioEngine::Op::On ? Tuya::Op::On : op == ScenarioEngine::Op::Off ? Tuya::Op::Off : Tuya::Op::Query;
+      job = Tuya::submit(top, d.name, d.target(), d.dp, kCommandTimeoutMs, false);
+      if (!job) return 0;  // the command list is full
+    } else {  // removed from the list since the step began: a job that has failed already
+      job = std::make_shared<Tuya::Job>();
+      job->result.error = "device";
+      job->result.detail = "the device is no longer in /devices.json";
+      job->done.store(true, std::memory_order_release);
+    }
+    if (++nextId_ == 0) ++nextId_;  // 0 means "none"
+    jobs_[nextId_] = job;
+    return nextId_;
+  }
+
+  ScenarioEngine::JobStatus poll(uint32_t id) override {
+    ScenarioEngine::JobStatus s;
+    auto it = jobs_.find(id);
+    if (it == jobs_.end()) {
+      s.done = true;
+      s.error = "protocol";
+      s.detail = "unknown job";
+      return s;
+    }
+    const Tuya::Job& job = *it->second;
+    s.done = job.done.load(std::memory_order_acquire);
+    if (!s.done) return s;
+    s.ok = job.result.ok;
+    s.ms = job.result.ms;
+    s.error = job.result.error.c_str();
+    s.detail = job.result.detail.c_str();
+    return s;
+  }
+
+  void release(uint32_t id, bool withdraw) override {
+    auto it = jobs_.find(id);
+    if (it == jobs_.end()) return;
+    if (withdraw) it->second->cancelled.store(true);  // still queued: dropped, never reaches the socket
+    jobs_.erase(it);
+  }
+
+  void log(bool warn, const std::string& line) override {
+    Logger::log(warn ? Logger::Level::Warn : Logger::Level::Info, TAG, "%s", line.c_str());
+  }
+
+ private:
+  std::map<uint32_t, std::shared_ptr<Tuya::Job>> jobs_;
+  uint32_t nextId_ = 0;
+};
+
+BoardEnv* gEnv = nullptr;
+TaskHandle_t gEngineTask = nullptr;
+
+void wake() {
+  if (gEngineTask) xTaskNotifyGive(gEngineTask);
+}
+
+void watchTick();  // the power rules, below
+
+// One task drives every run (the engine) and looks at the power rules every kWatchTickMs.
+void engineTask(void*) {
+  uint32_t nextWatch = millis() + kWatchTickMs;
+  for (;;) {
+    uint32_t sleepMs;
+    {
+      Lock lock;
+      sleepMs = gEngine->tick();
+      // The power-up has been served once none of its runs waits for the network any more: a software restart from now on
+      // must not repeat it.
+      if (gPowerUpPending == kPowerUpPending && !gEngine->holdsPowerUp()) gPowerUpPending = 0;
+    }
+    const int32_t toWatch = static_cast<int32_t>(nextWatch - millis());
+    if (toWatch <= 0) {
+      nextWatch = millis() + kWatchTickMs;
+      watchTick();  // takes the lock itself; reads the history without it
+      continue;
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::min<uint32_t>(sleepMs, static_cast<uint32_t>(toWatch))));
+  }
 }
 
 // ---- power triggers ----------------------------------------------------------------------------
@@ -794,53 +567,48 @@ void watchTick() {
   }
 }
 
-void watcherTask(void*) {
-  for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(kWatchTickMs));
-    watchTick();
-  }
-}
-
 // ---- JSON ------------------------------------------------------------------------------------
 
-unsigned doneSteps(const Runtime& r) {
+unsigned doneSteps(const ScenarioEngine::Run& r) {
   unsigned n = 0;
-  for (const StepRun& s : r.steps) {
-    if (s.state == "ok" || s.state == "skipped" || s.state == "failed" || s.state == "stopped") ++n;
+  for (const ScenarioEngine::StepRun& s : r.steps) {
+    n += (s.state == ScenarioEngine::StepState::Ok || s.state == ScenarioEngine::StepState::Skipped ||
+          s.state == ScenarioEngine::StepState::Failed || s.state == ScenarioEngine::StepState::Stopped) ? 1 : 0;
   }
   return n;
 }
 
-unsigned totalSteps(const Runtime& r) {
+unsigned totalSteps(const ScenarioEngine::Run& r) {
   unsigned n = 0;
-  for (const StepRun& s : r.steps) {
-    if (s.state != "disabled") ++n;
-  }
+  for (const ScenarioEngine::StepRun& s : r.steps) n += s.state != ScenarioEngine::StepState::Disabled ? 1 : 0;
   return n;
 }
 
-uint32_t startsIn(const Runtime& r) {
-  const int32_t left = static_cast<int32_t>(r.startAtMs - millis());
+uint32_t secondsUntil(uint32_t atMs) {
+  const int32_t left = static_cast<int32_t>(atMs - millis());
   return left > 0 ? static_cast<uint32_t>(left) / 1000UL + 1 : 0;
 }
 
-void describe(JsonObject o, const Def& d, const Runtime* r, bool full) {
+// The caller holds the lock. Strings go in as std::string, so ArduinoJson copies them.
+void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool full) {
+  using ScenarioEngine::RunState;
   o["name"] = d.name;
   o["enabled"] = d.enabled;
   o["trigger"] = d.trigger;
-  const State st = r ? r->state : State::Idle;
-  o["state"] = stateName(st);
+  const RunState st = r ? r->state : RunState::Idle;
+  o["state"] = ScenarioEngine::runStateName(st);
   if (r) {
-    if (st == State::Waiting) {
-      o["starts_in_s"] = startsIn(*r);
-      if (!r->waitReason.isEmpty()) o["wait_reason"] = r->waitReason;
+    if (st == RunState::Waiting) {
+      o["starts_in_s"] = secondsUntil(r->startAtMs);
+      if (!r->waitReason.empty()) o["wait_reason"] = r->waitReason;
     }
-    if (st == State::Skipped) o["skip_reason"] = r->skipReason;
-    if (st == State::Waiting || st == State::Running || st == State::Done || st == State::Stopped) o["run_trigger"] = r->trigger;
+    if (st == RunState::Skipped) o["skip_reason"] = r->skipReason;
+    if (st == RunState::Waiting || st == RunState::Running || st == RunState::Done || st == RunState::Stopped) o["run_trigger"] = r->trigger;
     if (!r->steps.empty()) {
       o["progress_done"] = doneSteps(*r);
       o["progress_total"] = totalSteps(*r);
     }
+    if (r->alive && r->phase == ScenarioEngine::Phase::Pause) o["pause_left_s"] = secondsUntil(r->deadlineMs);
   }
   if (!full) return;
   o["default_pause_s"] = d.defaultPauseS;
@@ -850,7 +618,7 @@ void describe(JsonObject o, const Def& d, const Runtime* r, bool full) {
     w["watts"] = d.watts;
     w["for_s"] = d.forS;
     w["warmup_s"] = d.warmupS;
-    auto it = gWatch.find(d.name);  // the caller holds the lock
+    auto it = gWatch.find(d.name);
     if (it != gWatch.end()) {
       JsonObject ws = o["watch"].to<JsonObject>();
       ws["armed"] = it->second.armed;
@@ -867,7 +635,7 @@ void describe(JsonObject o, const Def& d, const Runtime* r, bool full) {
   JsonArray steps = o["steps"].to<JsonArray>();
   for (const Step& s : d.steps) {
     JsonObject so = steps.add<JsonObject>();
-    so["device"] = s.device;
+    so["device"] = d.device(s);
     so["action"] = s.on ? "on" : "off";
     so["enabled"] = s.enabled;
     if (s.pauseAfterS >= 0) {
@@ -879,12 +647,13 @@ void describe(JsonObject o, const Def& d, const Runtime* r, bool full) {
   if (r && !r->steps.empty()) {
     JsonArray run = o["run_steps"].to<JsonArray>();
     for (size_t i = 0; i < r->steps.size(); ++i) {
-      const StepRun& s = r->steps[i];
+      const ScenarioEngine::StepRun& s = r->steps[i];
       JsonObject ro = run.add<JsonObject>();
-      ro["device"] = s.device;
-      ro["state"] = s.state;
+      ro["device"] = r->def.device(i);
+      ro["state"] = ScenarioEngine::stepStateName(s.state);
       ro["attempts"] = s.attempts;
-      if (!s.detail.isEmpty()) ro["detail"] = s.detail;
+      const std::string detail = ScenarioEngine::stepDetail(*r, i);
+      if (!detail.empty()) ro["detail"] = detail;
       if (static_cast<int>(i) == r->current) ro["current"] = true;
     }
   }
@@ -895,37 +664,41 @@ void describe(JsonObject o, const Def& d, const Runtime* r, bool full) {
 void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec) {
   if (!gMux) gMux = xSemaphoreCreateMutex();
   if (!gSaveMux) gSaveMux = xSemaphoreCreateMutex();
+  {
+    Lock lock;
+    if (!gEngine) {
+      gEnv = new BoardEnv();
+      gEngine = new ScenarioEngine::Engine(*gEnv);
+    }
+  }
   load();
   refreshWatched();
-  static bool watcherStarted = false;
-  if (!watcherStarted) {
-    watcherStarted = true;
-    xTaskCreate(watcherTask, "scn_watch", 4096, nullptr, 1, nullptr);
-  }
 
   // A software restart while the power-up's runs were still waiting for Wi-Fi (the watchdog in main.cpp): still a power-up.
   const bool carried = reason == ESP_RST_SW && gPowerUpPending == kPowerUpPending;
   const bool powerUp = reason == ESP_RST_POWERON || carried;
   if (carried) LOGW(TAG, "restarted before the power-up's scenarios got the network: they start again");
-  bool pending = false;
-  Lock lock;
-  for (const Def& d : gDefs) {
-    if (!d.enabled || d.trigger != kTriggerPowerOn) continue;
-    if (!powerUp) {
-      Runtime& r = gRun[d.name];
-      r = Runtime();
-      r.state = State::Skipped;
-      r.skipReason = String("not a power-up (reset reason: ") + reasonName + ")";
-      LOGI(TAG, "[%s] not started: %s", d.name.c_str(), r.skipReason.c_str());
-    } else {
-      LOGI(TAG, "[%s] power-up: starts %u s after boot", d.name.c_str(), static_cast<unsigned>(delaySec));
-      if (startRun(d.name, static_cast<uint32_t>(delaySec) * 1000UL, "power-on")) {  // counted from boot
-        gRun[d.name].holdsPowerUp = true;
-        pending = true;
+  {
+    Lock lock;
+    bool pending = false;
+    for (const Def& d : gDefs) {
+      if (!d.enabled || d.trigger != kTriggerPowerOn) continue;
+      if (!powerUp) {
+        const String why = String("not a power-up (reset reason: ") + reasonName + ")";
+        gEngine->skip(d.name.c_str(), why.c_str());
+        LOGI(TAG, "[%s] not started: %s", d.name.c_str(), why.c_str());
+      } else {
+        LOGI(TAG, "[%s] power-up: starts %u s after boot", d.name.c_str(), static_cast<unsigned>(delaySec));
+        // counted from boot
+        if (gEngine->start(d.name.c_str(), "power-on", static_cast<uint32_t>(delaySec) * 1000UL, true) ==
+            ScenarioEngine::Engine::StartResult::Started) {
+          pending = true;
+        }
       }
     }
+    gPowerUpPending = pending ? kPowerUpPending : 0;
   }
-  gPowerUpPending = pending ? kPowerUpPending : 0;
+  if (!gEngineTask) xTaskCreate(engineTask, "scn_engine", 8192, nullptr, 1, &gEngineTask);
 }
 
 void sdAvailable() {
@@ -954,8 +727,8 @@ std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
       out.push_back(String("scenario '") + d.name + "', trigger: device '" + d.whenDevice + "' is not in the list");
     }
     for (size_t i = 0; i < d.steps.size(); ++i) {
-      if (d.steps[i].enabled && !known(d.steps[i].device)) {
-        out.push_back(String("scenario '") + d.name + "', step " + String(static_cast<unsigned>(i + 1)) + ": device '" + d.steps[i].device +
+      if (d.steps[i].enabled && !known(d.device(d.steps[i]))) {
+        out.push_back(String("scenario '") + d.name + "', step " + String(static_cast<unsigned>(i + 1)) + ": device '" + d.device(d.steps[i]) +
                       "' is not in the list");
       }
     }
@@ -965,39 +738,53 @@ std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
 
 namespace {
 RunResult runWith(const String& name, const char* trigger) {
-  if (!gMux) return RunResult::NotFound;
-  Lock lock;
-  bool known = false;
-  for (const Def& d : gDefs) known = known || d.name == name;
-  if (!known) return RunResult::NotFound;
-  auto it = gRun.find(name);
-  if (it != gRun.end() && it->second.alive) {
-    if (it->second.state == State::Waiting) {  // cut the wait short; the existing task carries on
-      it->second.startAtMs = millis();
-      it->second.trigger = trigger;
-      LOGI(TAG, "[%s] %s start: the waiting run starts now", name.c_str(), trigger);
-      return RunResult::Started;
-    }
-    return RunResult::AlreadyRunning;
+  if (!gMux || !gEngine) return RunResult::NotFound;
+  ScenarioEngine::Engine::StartResult r;
+  {
+    Lock lock;
+    r = gEngine->start(name.c_str(), trigger, millis());
   }
-  LOGI(TAG, "[%s] start requested (%s)", name.c_str(), trigger);
-  return startRun(name, millis(), trigger) ? RunResult::Started : RunResult::AlreadyRunning;
+  wake();
+  switch (r) {
+    case ScenarioEngine::Engine::StartResult::Started: return RunResult::Started;
+    case ScenarioEngine::Engine::StartResult::AlreadyRunning: return RunResult::AlreadyRunning;
+    default: return RunResult::NotFound;
+  }
 }
 }  // namespace
 
 RunResult runNow(const String& name) { return runWith(name, "manual"); }
 
 StopResult stop(const String& name) {
-  if (!gMux) return StopResult::NotFound;
+  if (!gMux || !gEngine) return StopResult::NotFound;
+  ScenarioEngine::Engine::StopResult r;
+  {
+    Lock lock;
+    r = gEngine->stop(name.c_str());
+  }
+  wake();
+  switch (r) {
+    case ScenarioEngine::Engine::StopResult::Stopping: return StopResult::Stopping;
+    case ScenarioEngine::Engine::StopResult::NotRunning: return StopResult::NotRunning;
+    default: return StopResult::NotFound;
+  }
+}
+
+void engineStats(JsonObject out) {
+  if (!gMux || !gEngine) return;
   Lock lock;
-  bool known = false;
-  for (const Def& d : gDefs) known = known || d.name == name;
-  if (!known) return StopResult::NotFound;
-  auto it = gRun.find(name);
-  if (it == gRun.end() || !it->second.alive) return StopResult::NotRunning;
-  it->second.stop = true;
-  LOGI(TAG, "[%s] stop requested", name.c_str());
-  return StopResult::Stopping;
+  const ScenarioEngine::Stats& s = gEngine->stats();
+  out["runs_alive"] = gEngine->alive();
+  out["max_in_flight"] = ScenarioEngine::kMaxInFlight;
+  out["in_flight"] = s.inFlight;
+  out["max_in_flight_seen"] = s.maxInFlightSeen;
+  out["jobs"] = s.jobs;
+  out["slot_waits"] = s.slotWaits;
+  out["slot_wait_max_ms"] = s.slotWaitMaxMs;
+  out["queue_full"] = s.queueFull;
+  out["offline_attempts"] = s.offlineAttempts;
+  out["offline_attempts_ok"] = s.offlineAttemptsOk;
+  out["offline_attempt_ms"] = s.offlineAttemptMs;
 }
 
 uint32_t maxForS() {
@@ -1019,7 +806,7 @@ void limits(JsonObject out) {
 }
 
 String configJson() {
-  JsonDocument doc;
+  JsonDocument doc(PsramAllocator::instance());
   doc["max"] = kMaxScenarios;
   doc["max_steps"] = kMaxSteps;
   doc["max_pause_s"] = kMaxPauseS;
@@ -1035,10 +822,7 @@ String configJson() {
     doc["file_found"] = gInfo.fileFound;
     if (!gInfo.error.isEmpty()) doc["error"] = gInfo.error;
     JsonArray arr = doc["scenarios"].to<JsonArray>();
-    for (const Def& d : gDefs) {
-      auto it = gRun.find(d.name);
-      describe(arr.add<JsonObject>(), d, it == gRun.end() ? nullptr : &it->second, true);
-    }
+    for (const Def& d : gDefs) describe(arr.add<JsonObject>(), d, gEngine ? gEngine->run(d.name.c_str()) : nullptr, true);
   }
   String out;
   serializeJson(doc, out);
@@ -1048,10 +832,7 @@ String configJson() {
 void summary(JsonArray out) {
   if (!gMux) return;
   Lock lock;
-  for (const Def& d : gDefs) {
-    auto it = gRun.find(d.name);
-    describe(out.add<JsonObject>(), d, it == gRun.end() ? nullptr : &it->second, false);
-  }
+  for (const Def& d : gDefs) describe(out.add<JsonObject>(), d, gEngine ? gEngine->run(d.name.c_str()) : nullptr, false);
 }
 
 SaveResult save(const String& json) {
@@ -1102,28 +883,16 @@ SaveResult save(const String& json) {
 
   {
     Lock lock;
-    for (auto it = gRun.begin(); it != gRun.end();) {
-      const Def* now = nullptr;
-      for (const Def& d : next) {
-        if (d.name == it->first) now = &d;
-      }
-      if (!now) {  // removed: stop a live run, forget a finished one
-        if (it->second.alive) {
-          it->second.stop = true;
-          ++it;
-        } else {
-          it = gRun.erase(it);
-        }
-        continue;
-      }
-      if (it->second.state == State::Skipped && (!now->enabled || now->trigger != kTriggerPowerOn)) it->second.state = State::Idle;
-      ++it;
-    }
     gDefs = next;
+    for (const Def& d : gDefs) {  // "not started: not a power-up" no longer fits a scenario that is not an enabled power_on one
+      if (!d.enabled || d.trigger != kTriggerPowerOn) gEngine->unskip(d.name.c_str());
+    }
+    pushDefs();  // runs of the scenarios that are gone are stopped (alive) or forgotten
     gInfo.sd = true;
     gInfo.fileFound = true;
     gInfo.error = "";
   }
+  wake();
   refreshWatched();  // which devices need UPDATEDPS may have changed
   r.ok = true;
   r.count = next.size();

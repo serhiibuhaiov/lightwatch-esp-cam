@@ -46,10 +46,10 @@
 
 namespace Scenario {
 
-constexpr size_t kMaxScenarios = 8;
+constexpr size_t kMaxScenarios = 16;
 constexpr size_t kMaxSteps = 24;
 constexpr uint16_t kMaxPauseS = 3600;      // pause after a step
-constexpr size_t kMaxFileBytes = 32768;    // /scenarios.json
+constexpr size_t kMaxFileBytes = 65536;    // /scenarios.json (16 x 24 steps with long names is ~40 KB)
 constexpr uint32_t kMaxWatts = 20000;      // power rule threshold
 constexpr uint32_t kMinForS = 10, kMaxForS = 900;
 constexpr uint32_t kMaxWarmupS = 3600;
@@ -88,6 +88,11 @@ String configJson();
 
 // A short entry per scenario for GET /api/status.
 void summary(JsonArray out);
+
+// The engine's counters for GET /api/status: runs alive, the places in the command lane (max_in_flight, in_flight,
+// max_in_flight_seen, slot_waits, slot_wait_max_ms, queue_full) and the attempts on devices the monitor counted offline
+// (offline_attempts, offline_attempts_ok, offline_attempt_ms).
+void engineStats(JsonObject out);
 
 struct SaveResult {
   bool ok = false;

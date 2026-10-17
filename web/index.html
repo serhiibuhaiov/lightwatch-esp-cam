@@ -237,6 +237,19 @@ function viewStatus() {
           E("p", { class: "mut", style: "margin:8px 0 0" }, "Очікування це час від постановки запиту в чергу до початку роботи з розеткою (разом з очікуванням її замка). " +
             "Команди й опитування йдуть окремо й одночасно, але до однієї розетки одночасно лише один запит. Великі значення «Довше 1 с» означають, що розетки (зокрема недоступні) затримують команди.")));
       }
+      if (s.scenario_engine) {  // the scenario engine: its places in the command lane and the attempts on offline sockets
+        const g = s.scenario_engine;
+        const kvs = (k, v, title) => E("div", { class: "kv", title: title || "" }, E("span", {}, k), E("b", {}, v));
+        out.push(E("div", { class: "card" }, E("h2", {}, "Рушій сценаріїв (від запуску)"), E("div", { class: "grid" },
+          kvs("Запусків зараз", String(g.runs_alive)),
+          kvs("Команд у черзі до розеток", g.in_flight + " з " + g.max_in_flight + " (найбільше було " + g.max_in_flight_seen + ")", "скільки команд і запитів стану від сценаріїв одночасно стоять у черзі до розеток або виконуються"),
+          kvs("Чекали вільного місця", g.slot_waits + " раз, найдовше " + (g.slot_wait_max_ms / 1000).toFixed(1) + " с", "кроки, яким довелося чекати, бо всі місця були зайняті іншими сценаріями"),
+          kvs("Черга розеток була повна", g.queue_full + " раз", "кнопки й API зайняли всі місця в черзі команд"),
+          kvs("Спроби з офлайн-розетками", g.offline_attempts + " (вдалих " + g.offline_attempts_ok + "), " + (g.offline_attempt_ms / 1000).toFixed(1) + " с черги",
+            "спроби кроків до розеток, які монітор у той момент вважав офлайн: скільки їх було, скільки все ж вдалося і скільки часу вони зайняли в черзі команд")),
+          E("p", { class: "mut", style: "margin:8px 0 0" }, "Усі запуски веде одне завдання; паузи між кроками не займають пам'яті під окреме завдання. Від сценаріїв одночасно не більше " +
+            g.max_in_flight + " команд у черзі до розеток, решта кроків чекає своєї черги (кнопки на сторінці не стоять за ними).")));
+      }
       const bad = e => ["BROWNOUT", "PANIC", "INT_WDT", "TASK_WDT", "WDT"].includes(e.reason);
       const done = e => ["got-ip", "alive-60s"].includes(e.stage);
       const fmtMin = m => (m < 1 ? "менше хвилини" : m < 60 ? "≥ " + m + " хв" : "≥ " + Math.floor(m / 60) + " г " + (m % 60) + " хв");
@@ -310,7 +323,8 @@ function scenarioStateText(s) {
   if (s.state === "skipped") return "не запускався: запуск не від вмикання живлення" + (why ? " (" + (REASON[why] || why) + ")" : "");
   const how = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу" }[s.run_trigger];
   const prog = s.progress_total != null ? ", кроків " + s.progress_done + " з " + s.progress_total : "";
-  return (SC_STATE[s.state] || ["n", s.state])[1] + (how && s.state !== "idle" ? " (запуск: " + how + ")" : "") + prog;
+  const pause = s.pause_left_s != null ? ", пауза ще " + fmtDur(s.pause_left_s) : "";
+  return (SC_STATE[s.state] || ["n", s.state])[1] + (how && s.state !== "idle" ? " (запуск: " + how + ")" : "") + prog + pause;
 }
 
 function scenariosCard(list, st) {
@@ -521,7 +535,7 @@ function viewScenarios() {
     if (msg) out.push(note(msg.cls, msg.text));
     if (info.error) out.push(note("err", info.error));
     out.push(E("div", { class: "row" },
-      E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими. " +
+      E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими; від усіх разом у черзі до розеток одночасно не більше 4 команд. " +
         "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж.")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +

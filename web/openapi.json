@@ -39,7 +39,7 @@
      "Стан"
     ],
     "summary": "Стан пристрою",
-    "description": "SD, Wi-Fi, пам'ять (`memory`: внутрішня RAM і PSRAM), годинник, запити до розеток (`tuya`), короткий список сценаріїв, історія запусків і всі фіксовані ліміти прошивки (`limits`).",
+    "description": "SD, Wi-Fi, пам'ять (`memory`: внутрішня RAM і PSRAM), годинник, запити до розеток (`tuya`), короткий список сценаріїв, історія запусків і всі фіксовані ліміти прошивки (`limits`). `scenario_engine`: рушій сценаріїв від запуску (запусків зараз; місця в черзі команд: `max_in_flight`, `in_flight`, `max_in_flight_seen`, `slot_waits`, `slot_wait_max_ms`, `queue_full`; спроби з розетками, які монітор вважав офлайн: `offline_attempts`, `offline_attempts_ok`, `offline_attempt_ms`).",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -81,10 +81,10 @@
          },
          "limits": {
           "scenarios": {
-           "max": 8,
+           "max": 16,
            "max_steps": 24,
            "max_pause_s": 3600,
-           "max_file_bytes": 32768,
+           "max_file_bytes": 65536,
            "power_rule": {
             "max_watts": 20000,
             "min_for_s": 10,
@@ -107,13 +107,26 @@
           "put_body_bytes": {
            "config": 8192,
            "devices": 8192,
-           "scenarios": 24576
+           "scenarios": 49152
           },
           "logs": {
            "ram_bytes": 8192,
            "tail_max_bytes": 32768
           },
           "boot_history": 16
+         },
+         "scenario_engine": {
+          "runs_alive": 2,
+          "max_in_flight": 4,
+          "in_flight": 1,
+          "max_in_flight_seen": 4,
+          "jobs": 38,
+          "slot_waits": 3,
+          "slot_wait_max_ms": 1840,
+          "queue_full": 0,
+          "offline_attempts": 14,
+          "offline_attempts_ok": 0,
+          "offline_attempt_ms": 21030
          }
         }
        }
@@ -1152,7 +1165,7 @@
      "Сценарії"
     ],
     "summary": "Сценарії та стан запусків",
-    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування).",
+    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування). Запуск у паузі між кроками має `pause_left_s`.",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -1178,7 +1191,7 @@
      "Сценарії"
     ],
     "summary": "Замінити список сценаріїв",
-    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). Тіло до 24576 байт, до 8 сценаріїв по 24 кроки.",
+    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). Тіло до 49152 байт, до 16 сценаріїв по 24 кроки.",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -1215,7 +1228,7 @@
       }
      },
      "413": {
-      "description": "Тіло більше 24576 байт.",
+      "description": "Тіло більше 49152 байт.",
       "content": {
        "application/json": {
         "schema": {
