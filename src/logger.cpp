@@ -12,19 +12,23 @@
 #include <atomic>
 #include <vector>
 
+#include "psram_alloc.h"
 #include "storage.h"
 
 namespace Logger {
 namespace {
 
-constexpr size_t kBufSize = kRamBufferBytes;
 constexpr size_t kLineMax = 384;  // one line: timestamp + tag + message (device payloads are ~300 chars)
-constexpr size_t kWakeAt = kBufSize * 3 / 4;
 constexpr uint32_t kMaxIndex = 9999;
 constexpr const char* kDir = "/logs";
 
+constexpr size_t kFlushExtra = 128;  // room for the "lines dropped" line after a full buffer
+
 // ---- RAM buffer: guarded by gMux ------------------------------------------
-char gBuf[kBufSize];
+// gBuf (gBufSize bytes) and gFlushBuf (gBufSize + kFlushExtra) are allocated once by begin() and never freed.
+char* gBuf = nullptr;
+size_t gBufSize = 0;
+size_t gWakeAt = 0;  // 3/4 full: wake the flush task
 size_t gLen = 0;
 uint32_t gDropped = 0;
 // Lines lost because gMux could not be taken in time (counted without it, added to gDropped at the next flush).
@@ -36,7 +40,7 @@ SemaphoreHandle_t gMux = nullptr;  // also keeps Serial lines from interleaving
 
 // ---- Flush state: guarded by gFlushMux ------------------------------------
 SemaphoreHandle_t gFlushMux = nullptr;
-char gFlushBuf[kBufSize + 128];
+char* gFlushBuf = nullptr;
 bool gInit = false;       // card scanned, current file chosen
 uint32_t gIndex = 1;      // current file number
 size_t gCurSize = 0;      // bytes in the current file
@@ -164,7 +168,7 @@ void rotateIfNeeded(size_t incoming) {
 
 void requeue(size_t n) {
   if (xSemaphoreTake(gMux, portMAX_DELAY) != pdTRUE) return;
-  if (gLen + n <= kBufSize) {
+  if (gLen + n <= gBufSize) {
     memmove(gBuf + n, gBuf, gLen);
     memcpy(gBuf, gFlushBuf, n);
     gLen += n;
@@ -177,6 +181,7 @@ void requeue(size_t n) {
 }
 
 bool flushLocked(bool force) {
+  if (!gBuf) return false;
   if (!force && millis() < static_cast<uint32_t>(gSet.quietSec) * 1000UL) return true;
   if (!ensureCard()) return false;
   if (!gInit && !initFromCard()) return false;
@@ -195,10 +200,11 @@ bool flushLocked(bool force) {
   if (dropped) {
     char ts[32];
     formatTimestamp(ts, sizeof(ts));
-    int m = snprintf(gFlushBuf + n, sizeof(gFlushBuf) - n,
+    const size_t room = gBufSize + kFlushExtra - n;
+    int m = snprintf(gFlushBuf + n, room,
                      "%s W logger: %lu lines dropped (buffer full or busy)\n", ts,
                      static_cast<unsigned long>(dropped));
-    if (m > 0 && static_cast<size_t>(m) < sizeof(gFlushBuf) - n) n += m;
+    if (m > 0 && static_cast<size_t>(m) < room) n += m;
   }
   if (n == 0) return true;
 
@@ -250,14 +256,36 @@ void flushTask(void*) {
   }
 }
 
+// Both buffers of `size` bytes from the memory `caps` describe; false (nothing kept) if either does not fit.
+bool allocBuffers(size_t size, uint32_t caps) {
+  char* buf = static_cast<char*>(heap_caps_malloc(size, caps));
+  char* flush = static_cast<char*>(heap_caps_malloc(size + kFlushExtra, caps));
+  if (!buf || !flush) {
+    free(buf);
+    free(flush);
+    return false;
+  }
+  gBuf = buf;
+  gFlushBuf = flush;
+  gBufSize = size;
+  gWakeAt = size * 3 / 4;
+  return true;
+}
+
 }  // namespace
 
 // ---- Public API ---------------------------------------------------------------
 
 void begin() {
+  // PSRAM when the board has it; else (or if it could not give them) 8 KB of the internal RAM; failing that, Serial only.
+  if (!gBuf && !(psramAvailable() && allocBuffers(kRamBufferBytesPsram, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))) {
+    allocBuffers(kRamBufferBytesInternal, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
   if (!gMux) gMux = xSemaphoreCreateMutex();
   if (!gFlushMux) gFlushMux = xSemaphoreCreateMutex();
 }
+
+size_t ramBufferBytes() { return gBufSize; }
 
 void start(const Settings& settings) {
   if (gTask) return;
@@ -290,7 +318,7 @@ void log(Level level, const char* tag, const char* fmt, ...) {
   line[n++] = '\n';
   line[n] = '\0';
 
-  if (!gMux) {  // before begin(): Serial only
+  if (!gMux || !gBuf) {  // before begin() (or no memory for the buffer): Serial only
     Serial.write(reinterpret_cast<const uint8_t*>(line), n);
     return;
   }
@@ -302,19 +330,19 @@ void log(Level level, const char* tag, const char* fmt, ...) {
   Serial.write(reinterpret_cast<const uint8_t*>(line), n);
 
   bool wake = false;
-  if (gLen + n > kBufSize && gRing) {
+  if (gLen + n > gBufSize && gRing) {
     // Evict whole oldest lines until the new one fits.
-    size_t need = gLen + n - kBufSize;
+    size_t need = gLen + n - gBufSize;
     const char* nl = static_cast<const char*>(memchr(gBuf + need - 1, '\n', gLen - need + 1));
     size_t cut = nl ? static_cast<size_t>(nl - gBuf) + 1 : gLen;
     memmove(gBuf, gBuf + cut, gLen - cut);
     gLen -= cut;
   }
-  if (gLen + n <= kBufSize) {
+  if (gLen + n <= gBufSize) {
     size_t before = gLen;
     memcpy(gBuf + gLen, line, n);
     gLen += n;
-    wake = before < kWakeAt && gLen >= kWakeAt;
+    wake = before < gWakeAt && gLen >= gWakeAt;
   } else {
     gDropped++;
   }

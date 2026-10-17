@@ -3,8 +3,8 @@
 // Logger: thread-safe, power-cut-friendly logging to Serial and to the SD card.
 //
 //   * Any task may call Logger::log()/LOGx() concurrently. Not for ISRs.
-//   * log() only formats a line and copies it into an 8 KB RAM buffer under a
-//     short mutex. It never touches the SD card, so it is fast and cannot block
+//   * log() only formats a line and copies it into a RAM buffer (32 KB in PSRAM,
+//     8 KB of internal RAM on a board without it) under a short mutex. It never touches the SD card, so it is fast and cannot block
 //     on storage.
 //   * One background task ("logflush") writes the buffer to the card in batches
 //     (open, append, close) every flushSec, or when the buffer is 3/4 full.
@@ -24,8 +24,10 @@
 
 namespace Logger {
 
-// The RAM buffer of log lines: flushed to the card, or (no card) a ring of the newest lines.
-constexpr size_t kRamBufferBytes = 8192;
+// The RAM buffer of log lines: flushed to the card, or (no card) a ring of the newest lines. In PSRAM when the board has
+// it (it then takes no internal RAM, which the network and the SD card driver need), else in the internal RAM.
+constexpr size_t kRamBufferBytesPsram = 32768;
+constexpr size_t kRamBufferBytesInternal = 8192;
 
 enum class Level : uint8_t { Debug = 0, Info = 1, Warn = 2, Error = 3 };
 
@@ -37,9 +39,12 @@ struct Settings {
   Level minLevel = Level::Info;
 };
 
-// Creates the mutexes. Call first thing in setup(); log() works (Serial only)
+// Allocates the buffers and creates the mutexes. Call first thing in setup(); log() works (Serial only)
 // even before this.
 void begin();
+
+// The size of the RAM buffer chosen by begin() (kRamBufferBytesPsram or kRamBufferBytesInternal), 0 before it.
+size_t ramBufferBytes();
 
 // Applies settings and starts the flush task. Call once, after Config::load().
 void start(const Settings& settings);

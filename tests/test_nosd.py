@@ -52,16 +52,17 @@ def test_old_log_files_are_503(dev):
 
 
 def test_ram_log_keeps_the_newest_lines(dev):
-    """Fill the 8 KB buffer several times over; the newest lines must survive."""
+    """Fill the RAM buffer (32 KB in PSRAM, 8 KB without it) 1.5 times over; the newest lines must survive."""
+    ram = dev.get("/api/status").json()["limits"]["logs"]["ram_bytes"]
     cur = dev.config()
     try:
-        for i in range(250):  # each save logs a ~60 byte line, 15 KB in total
+        for i in range(ram // 40):  # each save logs a ~60 byte line: 1.5 times the buffer
             v = 100 + i
             assert dev.put(with_value(cur, "startup.scenario_delay_s", v)).status_code == 200
         text = dev.get("/api/logs", params={"file": "current"}).text
         assert "config saved (sd=0 flash=1)" in text
         assert text.count("config saved") > 20          # plenty of recent lines kept
-        assert len(text.encode()) <= 8192
+        assert len(text.encode()) <= ram
         assert "boot, reset reason" not in text          # the oldest (boot) lines were evicted
     finally:
         dev.put(cur)

@@ -118,7 +118,7 @@ def test_status_limits_match_what_the_other_routes_say(dev):
     assert lim["put_body_bytes"] == {"config": 8192, "devices": 8192, "scenarios": sc["max_body_bytes"], "http_test": 49152}
     assert lim["http"] == {"max_url_bytes": 2048, "max_body_bytes": 16384, "max_content_type_bytes": 100, "queue": 4,
                            "timeout_ms": 10000, "min_timeout_ms": 1000, "max_timeout_ms": 30000, "response_bytes": 256}
-    assert lim["logs"] == {"ram_bytes": 8192, "tail_max_bytes": 32768}
+    assert lim["logs"] == {"ram_bytes": 32768 if psram else 8192, "tail_max_bytes": 32768}  # the log buffer is in PSRAM when there is some
     assert 1 <= len(dev.get("/api/status").json()["boot_history"]) <= lim["boot_history"]
 
 
@@ -286,9 +286,10 @@ def test_log_tail_current(dev):
 
 @pytest.mark.parametrize("tail", [0, 1, 99999999])
 def test_log_tail_edge_values(dev, tail):
+    ram = dev.get("/api/status").json()["limits"]["logs"]["ram_bytes"]
     r = dev.get("/api/logs", params={"file": "current", "tail": tail})
     assert r.status_code == 200
-    assert len(r.content) <= 32768 + 8192  # card tail cap plus the RAM buffer
+    assert len(r.content) <= 32768 + ram  # card tail cap plus the RAM buffer
     assert_log_lines(r.text)
 
 

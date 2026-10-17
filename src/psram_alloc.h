@@ -1,14 +1,16 @@
 #pragma once
 //
-// An ArduinoJson allocator that puts a document in PSRAM when the board has it, and falls back to the normal heap when
-// it has not (or PSRAM is full). For the big documents (scenarios up to ~60 KB, /runs.json, the device list and its
-// state, /api/status, the history of the readings, the config); the small ones stay as they are. Never used for
-// anything a task stack, an interrupt or DMA touches.
+// PSRAM allocators. PsramAllocator, for ArduinoJson, puts a document in PSRAM when the board has it, and falls back to
+// the normal heap when it has not (or PSRAM is full). For the big documents (scenarios up to ~60 KB, /runs.json, the
+// device list and its state, /api/status, the history of the readings, the config); the small ones stay as they are.
+// Never used for anything a task stack, an interrupt or DMA touches. PsramStdAllocator does the same for std::
+// containers whose blocks are under 4 KB and so would stay in the internal RAM.
 //
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 
 #include <cstdlib>
+#include <new>
 
 // True when the board has PSRAM (an AI-Thinker ESP32-CAM has 4 MB): the limits that need memory for big documents depend on it.
 inline bool psramAvailable() {
@@ -34,4 +36,31 @@ class PsramAllocator : public ArduinoJson::Allocator {
     static PsramAllocator a;
     return &a;
   }
+};
+
+// A std:: container allocator over psramMalloc() (normal heap without PSRAM): for data that would otherwise take the
+// 8-bit internal RAM the network and the SD card driver need (blocks under 4 KB stay there), like the history of the
+// readings. Out of memory: std::bad_alloc (abort without exceptions), as with the standard allocator.
+template <class T>
+struct PsramStdAllocator {
+  using value_type = T;
+  PsramStdAllocator() noexcept = default;
+  template <class U>
+  PsramStdAllocator(const PsramStdAllocator<U>&) noexcept {}
+  T* allocate(size_t n) {
+    void* p = psramMalloc(n ? n * sizeof(T) : 1);
+    if (!p) {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+      throw std::bad_alloc();
+#else
+      abort();
+#endif
+    }
+    return static_cast<T*>(p);
+  }
+  void deallocate(T* p, size_t) noexcept { free(p); }
+  template <class U>
+  bool operator==(const PsramStdAllocator<U>&) const noexcept { return true; }
+  template <class U>
+  bool operator!=(const PsramStdAllocator<U>&) const noexcept { return false; }
 };

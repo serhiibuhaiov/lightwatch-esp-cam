@@ -33,7 +33,7 @@ std::map<String, State> gStates;  // by device name
 // One finished status query (see power_rule.h): values INT32_MIN = none, flags ok / relay known / relay on.
 using Sample = PowerRule::Sample;
 struct History {
-  std::vector<Sample> buf;  // a ring once it is full
+  std::vector<Sample, PsramStdAllocator<Sample>> buf;  // a ring once it is full; ~1.9 KB, in PSRAM when there is some
   size_t head = 0;          // the oldest sample when full
 };
 std::map<String, History> gHistory;  // by device name; lives and dies with the state

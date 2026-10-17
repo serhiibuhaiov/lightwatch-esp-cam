@@ -264,7 +264,7 @@ void onStatus(AsyncWebServerRequest* req) {
     h["max_timeout_ms"] = HttpOut::kMaxTimeoutMs;
     h["response_bytes"] = HttpOut::kMaxResponseBytes;
     JsonObject lg = l["logs"].to<JsonObject>();
-    lg["ram_bytes"] = Logger::kRamBufferBytes;
+    lg["ram_bytes"] = Logger::ramBufferBytes();  // 32 KB in PSRAM, 8 KB without it
     lg["tail_max_bytes"] = Storage::kMaxTailBytes;
     l["boot_history"] = BootLog::kMaxEntries;
   }

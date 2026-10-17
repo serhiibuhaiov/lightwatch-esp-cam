@@ -123,11 +123,11 @@ def bad_rules():
 
 @pytest.mark.parametrize("label,doc", list(bad_rules()), ids=[l for l, _ in bad_rules()])
 def test_invalid_rules_are_rejected(dev, guard, label, doc):
-    before = listing(dev)["scenarios"]
+    before = [editable(s) for s in listing(dev)["scenarios"]]  # the definitions (an interval scenario's state moves on its own)
     r = put(dev, guard + [doc])
     assert r.status_code == 400, (label, r.text)
     assert "error" in r.json()
-    assert listing(dev)["scenarios"] == before
+    assert [editable(s) for s in listing(dev)["scenarios"]] == before
 
 
 def test_a_rule_round_trips_and_the_warmup_has_a_default(dev, guard):
