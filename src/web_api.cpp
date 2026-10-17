@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -192,6 +193,35 @@ void onStatus(AsyncWebServerRequest* req) {
   doc["uptime_s"] = static_cast<uint32_t>(esp_timer_get_time() / 1000000);  // millis() / 1000 would wrap after 49.7 days
   doc["heap_free"] = ESP.getFreeHeap();
   doc["time_valid"] = time(nullptr) > 1700000000;
+  {
+    // Internal RAM (task stacks, network, most of the firmware) and PSRAM (allocations of 4 KB and more go there when
+    // the board has it). "min" is the lowest free internal RAM since boot; "largest" the biggest block that can still
+    // be allocated in one piece (fragmentation).
+    JsonObject m = doc["memory"].to<JsonObject>();
+    m["internal_free"] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    m["internal_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    m["internal_largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    m["psram_total"] = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    m["psram_free"] = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    m["psram_largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  }
+  {
+    // Every fixed limit in one place, so the page can show them.
+    JsonObject l = doc["limits"].to<JsonObject>();
+    Scenario::limits(l["scenarios"].to<JsonObject>());
+    Devices::limits(l["devices"].to<JsonObject>());
+    JsonObject q = l["tuya_queues"].to<JsonObject>();
+    q["commands"] = Tuya::kCommandQueueSize;
+    q["monitor"] = Tuya::kMonitorQueueSize;
+    JsonObject b = l["put_body_bytes"].to<JsonObject>();
+    b["config"] = kMaxBody;
+    b["devices"] = kMaxBody;
+    b["scenarios"] = kMaxScenariosBody;
+    JsonObject lg = l["logs"].to<JsonObject>();
+    lg["ram_bytes"] = Logger::kRamBufferBytes;
+    lg["tail_max_bytes"] = Storage::kMaxTailBytes;
+    l["boot_history"] = BootLog::kMaxEntries;
+  }
   doc["config_source"] = Config::sourceName(Config::loadedFrom());
   doc["restart_pending"] = Config::restartPending();
   doc["sd"] = sdStateName(sd);
@@ -214,8 +244,8 @@ void onStatus(AsyncWebServerRequest* req) {
 
   // Earlier boots, oldest first, the last one is the current boot.
   JsonArray hist = doc["boot_history"].to<JsonArray>();
-  BootLog::Entry be[16];
-  size_t bn = BootLog::entries(be, 16);
+  BootLog::Entry be[BootLog::kMaxEntries];
+  size_t bn = BootLog::entries(be, BootLog::kMaxEntries);
   for (size_t i = 0; i < bn; ++i) {
     JsonObject e = hist.add<JsonObject>();
     e["reason"] = BootLog::reasonName(be[i].reason);
@@ -359,6 +389,8 @@ JsonDocument devicesSummary() {
   doc["file_found"] = info.fileFound;
   doc["count"] = info.count;
   doc["poll_interval_s"] = Devices::pollIntervalSec();
+  doc["max"] = Devices::kMaxDevices;
+  doc["history_capacity"] = Devices::kHistoryCapacity;
   if (!info.error.isEmpty()) doc["error"] = info.error;
   JsonArray arr = doc["devices"].to<JsonArray>();
   const uint32_t now = millis();

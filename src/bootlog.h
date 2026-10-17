@@ -23,6 +23,8 @@
 
 namespace BootLog {
 
+constexpr size_t kMaxEntries = 16;  // boots kept in NVS
+
 enum class Quality : uint8_t { Unknown = 0, Estimated = 1, Synced = 2 };
 
 struct Entry {

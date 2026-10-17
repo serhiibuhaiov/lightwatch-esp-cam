@@ -151,6 +151,31 @@ function fmtUp(s) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return (d ? d + " д " : "") + (h || d ? h + " г " : "") + m + " хв " + (s % 60) + " с";
 }
+const fmtKb = b => (b / 1024).toFixed(0) + " КБ";
+// A duration in whole units: "45 с", "20 хв", "1 г 30 хв".
+function fmtDur(s) {
+  if (s < 60) return s + " с";
+  if (s < 3600) return Math.round(s / 60) + " хв";
+  const h = Math.floor(s / 3600), m = Math.round(s % 3600 / 60);
+  return h + " г" + (m ? " " + m + " хв" : "");
+}
+
+// Every fixed limit of the firmware (GET /api/status -> limits), as a table.
+function limitsCard(l) {
+  const sc = l.scenarios, pr = sc.power_rule, dv = l.devices;
+  const rows = [
+    ["Сценарії", "до " + sc.max + " сценаріїв, до " + sc.max_steps + " кроків у кожному; пауза після кроку 0–" + sc.max_pause_s + " с (" + fmtDur(sc.max_pause_s) + "); файл scenarios.json до " + fmtKb(sc.max_file_bytes)],
+    ["Тригер споживання", "поріг 0–" + pr.max_watts + " Вт; тривалість " + pr.min_for_s + "–" + pr.max_for_s + " с (не довше за історію показників); розігрів 0–" + pr.max_warmup_s + " с; умова перевіряється кожні " + pr.check_every_s + " с"],
+    ["Пристрої", "до " + dv.max + " пристроїв; файл devices.json до " + fmtKb(dv.max_file_bytes)],
+    ["Історія показників", dv.history_capacity + " останніх запитів на пристрій (≈" + fmtDur(dv.history_span_s) + " при опитуванні кожні " + dv.poll_interval_s + " с); у пам'яті, скидається при перезапуску"],
+    ["Черги запитів до розеток", "команди (кнопки, API, сценарії): " + l.tuya_queues.commands + " місць; опитування: " + l.tuya_queues.monitor + " місця"],
+    ["Розмір запиту PUT", "налаштування " + fmtKb(l.put_body_bytes.config) + ", пристрої " + fmtKb(l.put_body_bytes.devices) + ", сценарії " + fmtKb(l.put_body_bytes.scenarios)],
+    ["Логи", "журнал у пам'яті " + fmtKb(l.logs.ram_bytes) + " (без картки це все, що є); останні рядки файла до " + fmtKb(l.logs.tail_max_bytes)],
+    ["Історія запусків плати", "останні " + l.boot_history + " запусків"],
+  ];
+  return E("div", { class: "card" }, E("h2", {}, "Ліміти"),
+    E("div", { class: "tw" }, E("table", { class: "h" }, E("tbody", {}, rows.map(([k, v]) => E("tr", {}, E("td", {}, E("b", {}, k)), E("td", {}, v)))))));
+}
 
 // ---------------------------------------------------------------- status
 const REASON = { POWERON: "увімкнення живлення", EXT: "скидання (RST)", SW: "програмний перезапуск", PANIC: "збій (panic)",
@@ -184,6 +209,16 @@ function viewStatus() {
       out.push(E("div", { class: "card" }, E("h2", {}, "Wi-Fi"), E("div", { class: "grid" },
         E("div", { class: "kv" }, E("span", {}, "Підключення"), badge(s.wifi.connected ? "ok" : "err", s.wifi.connected ? "є" : "немає")),
         kv("IP", s.wifi.ip), E("div", { class: "kv" }, E("span", {}, "Сигнал"), badge(rssiCls, s.wifi.rssi + " дБм")))));
+      if (s.memory) {
+        const m = s.memory;
+        out.push(E("div", { class: "card" }, E("h2", {}, "Пам'ять"), E("div", { class: "grid" },
+          kv("Внутрішня: вільно", fmtKb(m.internal_free)),
+          kv("Внутрішня: мінімум від старту", fmtKb(m.internal_min)),
+          kv("Найбільший вільний блок", fmtKb(m.internal_largest)),
+          kv("PSRAM", m.psram_total ? fmtKb(m.psram_free) + " вільно з " + (m.psram_total / 1048576).toFixed(1) + " МБ" : "немає")),
+          E("p", { class: "mut", style: "margin:8px 0 0" }, "Внутрішня пам'ять тримає стеки завдань, мережу й більшість даних прошивки; «мінімум від старту» показує, наскільки близько вона підходила до межі. " +
+            "У PSRAM ідуть великі виділення (від 4 КБ), якщо вона є на платі.")));
+      }
       if (s.tuya) {  // how long the requests to the sockets waited since boot (see README: two lanes, one lock per socket)
         const lanes = [["commands", "Команди", "кнопки, API, сценарії"], ["monitor", "Опитування", "фоновий монітор"]];
         const ms = v => v + " мс";
@@ -228,6 +263,7 @@ function viewStatus() {
         E("div", { class: "tw" }, E("table", { class: "h" },
           E("thead", {}, E("tr", {}, ["Запуск", "Час", "Причина", "Дійшов до", "Працював"].map(h => E("th", {}, h)))),
           E("tbody", {}, rows)))));
+      if (s.limits) out.push(limitsCard(s.limits));
       const dot = c => E("span", { class: "dot", style: "background:var(--" + c + ")" });
       out.push(E("div", { class: "card" }, E("h2", {}, "Легенда"), E("div", { class: "lg" },
         E("div", {}, E("h3", {}, "Номер запуску"), E("dl", {},
@@ -291,7 +327,8 @@ function viewScenarios() {
   const box = E("div");
   main.replaceChildren(box);
   const NAME_RE = /^[a-z0-9_-]{1,32}$/;
-  let rows = [], devNames = [], ignored = new Set(), limits = { max: 8, steps: 24, pause: 3600 }, live = {}, info = {}, msg = null, saving = false;
+  let rows = [], devNames = [], ignored = new Set(), limits = { max: 8, steps: 24, pause: 3600, watts: 20000, forMin: 10, forMax: 900, warmup: 3600, fileBytes: 32768 },
+    live = {}, info = {}, msg = null, saving = false;
   const runBoxes = new Map();
 
   const blankStep = () => ({ device: devNames[0] || "", action: "on", enabled: true, pause: "" });
@@ -306,7 +343,9 @@ function viewScenarios() {
       const [{ j }, { j: dj }] = await Promise.all([getJson("/api/scenarios"), getJson("/api/devices/config")]);
       devNames = dj.devices.map(d => d.name);
       ignored = new Set(dj.devices.filter(d => d.ignore).map(d => d.name));
-      limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s };
+      const l = j.limits || {}, pr = l.power_rule || {};
+      limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s, watts: pr.max_watts || 20000, forMin: pr.min_for_s || 10,
+        forMax: pr.max_for_s || 900, warmup: pr.max_warmup_s || 3600, fileBytes: l.max_file_bytes || 32768 };
       info = { sd: j.sd, error: j.error };
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
       if (!keepEdits) rows = j.scenarios.map(fromServer);
@@ -369,9 +408,10 @@ function viewScenarios() {
       if (r.trigger === "power_below" || r.trigger === "power_above") {
         const w = r.when;
         if (!NAME_RE.test(w.device)) return at + "оберіть розетку, за якою стежить тригер.";
-        if (!/^\d{1,5}$/.test(w.watts) || Number(w.watts) > 20000) return at + "поріг має бути цілим числом ват 0–20000.";
-        if (!/^\d{1,3}$/.test(w.for_s) || Number(w.for_s) < 10 || Number(w.for_s) > 900) return at + "тривалість має бути цілим числом секунд 10–900.";
-        if (!/^\d{1,4}$/.test(w.warmup_s) || Number(w.warmup_s) > 3600) return at + "розігрів має бути цілим числом секунд 0–3600.";
+        if (!/^\d{1,5}$/.test(w.watts) || Number(w.watts) > limits.watts) return at + "поріг має бути цілим числом ват 0–" + limits.watts + ".";
+        if (!/^\d{1,4}$/.test(w.for_s) || Number(w.for_s) < limits.forMin || Number(w.for_s) > limits.forMax)
+          return at + "тривалість має бути цілим числом секунд " + limits.forMin + "–" + limits.forMax + " (не довше за історію показників).";
+        if (!/^\d{1,4}$/.test(w.warmup_s) || Number(w.warmup_s) > limits.warmup) return at + "розігрів має бути цілим числом секунд 0–" + limits.warmup + ".";
       }
       if (r.steps.length > limits.steps) return at + "забагато кроків (максимум " + limits.steps + ").";
       for (const [k, st] of r.steps.entries()) {
@@ -435,9 +475,9 @@ function viewScenarios() {
       E("h2", { style: "margin-top:14px" }, "Умова спрацьовування"),
       E("div", { class: "fields" },
         field("Розетка", dev, "за її потужністю стежить тригер"),
-        field(below ? "Потужність нижче, Вт" : "Потужність вище, Вт", num("watts", 0, 20000), "поріг"),
-        field("Протягом, с", num("for_s", 10, 900), "усі записи за цей час мають бути по правильний бік порогу"),
-        field("Розігрів, с", num("warmup_s", 0, 3600), "скільки чекати після вмикання розетки, перш ніж рахувати час")),
+        field(below ? "Потужність нижче, Вт" : "Потужність вище, Вт", num("watts", 0, limits.watts), "поріг, 0–" + limits.watts + " Вт"),
+        field("Протягом, с", num("for_s", limits.forMin, limits.forMax), limits.forMin + "–" + limits.forMax + " с; усі записи за цей час мають бути по правильний бік порогу"),
+        field("Розігрів, с", num("warmup_s", 0, limits.warmup), "0–" + limits.warmup + " с; скільки чекати після вмикання розетки, перш ніж рахувати час")),
       E("p", { class: "mut", style: "margin:8px 0 0" }, "Тригер дивиться на історію показників розетки: усі записи за останні N секунд успішні, реле ввімкнене, потужність " +
         (below ? "нижча" : "вища") + " за поріг, без пропущених опитувань. Будь-який збій, вимкнене реле чи потужність по інший бік порогу починає відлік заново. Спрацьовує один раз і знову готовий, коли умова перестала виконуватись. " +
         "Поки такий сценарій увімкнений, монітор опитує цю розетку з UPDATEDPS, щоб показники були свіжими."));
@@ -483,6 +523,9 @@ function viewScenarios() {
     out.push(E("div", { class: "row" },
       E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими. " +
         "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж.")));
+    out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
+      limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
+      limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Усі ліміти: вкладка «Статус»."));
     if (!rows.length) out.push(note("warn", "Сценаріїв ще немає. Натисніть «Додати сценарій»."));
     rows.forEach((r, i) => out.push(card(r, i)));
     out.push(E("div", { class: "row" },
@@ -680,7 +723,9 @@ function viewDevices() {
     }
     out.push(E("div", { class: "row" }, E("a", { class: "btn", href: "#devconfig" }, "Налаштувати пристрої")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" },
-      "Стан оновлюється фоновим опитуванням кожні " + data.poll_interval_s + " с. Кожен запит і відповідь пристрою записуються в журнал (вкладка «Логи», фільтр «tuya»): команди користувача на рівні info, фонове опитування на рівні debug."));
+      "Стан оновлюється фоновим опитуванням кожні " + data.poll_interval_s + " с. Кожен запит і відповідь пристрою записуються в журнал (вкладка «Логи», фільтр «tuya»): команди користувача на рівні info, фонове опитування на рівні debug. " +
+      "Ліміти: до " + (data.max || 16) + " пристроїв; історія показників: " + (data.history_capacity || 80) + " останніх запитів на пристрій (≈" + fmtDur((data.history_capacity || 80) * data.poll_interval_s) +
+      "), у пам'яті, скидається при перезапуску."));
     for (const d of data.devices) out.push(card(d));
     box.replaceChildren(...out);
   }

@@ -513,7 +513,7 @@ class Session {
 // state after it. So every operation takes the lock of the device's IP. A command waits for it (a poll holds it for
 // one operation only); a poll does not wait: it ends as "busy" and the monitor leaves the device alone this cycle.
 constexpr size_t kCommandLane = 0, kMonitorLane = 1;
-constexpr size_t kCapacity[2] = {16, 4};
+constexpr size_t kCapacity[2] = {kCommandQueueSize, kMonitorQueueSize};
 constexpr uint32_t kLockWaitMs = 5000;  // a command waits at most this long for the device (a poll takes <= timeoutMs)
 
 struct LaneState {

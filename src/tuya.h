@@ -92,6 +92,9 @@ struct Job {
   Result result;
 };
 
+// Places in the two lanes' lists (see submit()).
+constexpr size_t kCommandQueueSize = 16, kMonitorQueueSize = 4;
+
 // How long jobs waited (queue plus the device lock) since boot, per lane: [0] commands (buttons, API, scenarios),
 // [1] the monitor's polls. Meant to show whether a lane is ever a bottleneck.
 struct Stats {

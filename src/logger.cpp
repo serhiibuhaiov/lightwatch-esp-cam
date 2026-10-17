@@ -17,7 +17,7 @@
 namespace Logger {
 namespace {
 
-constexpr size_t kBufSize = 8192;
+constexpr size_t kBufSize = kRamBufferBytes;
 constexpr size_t kLineMax = 384;  // one line: timestamp + tag + message (device payloads are ~300 chars)
 constexpr size_t kWakeAt = kBufSize * 3 / 4;
 constexpr uint32_t kMaxIndex = 9999;

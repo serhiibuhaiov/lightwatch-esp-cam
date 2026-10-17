@@ -39,7 +39,7 @@
      "Стан"
     ],
     "summary": "Стан пристрою",
-    "description": "SD, Wi-Fi, пам'ять, годинник, запити до розеток (`tuya`), короткий список сценаріїв і історія запусків.",
+    "description": "SD, Wi-Fi, пам'ять (`memory`: внутрішня RAM і PSRAM), годинник, запити до розеток (`tuya`), короткий список сценаріїв, історія запусків і всі фіксовані ліміти прошивки (`limits`).",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -61,6 +61,14 @@
         "example": {
          "uptime_s": 3683,
          "heap_free": 94512,
+         "memory": {
+          "internal_free": 104132,
+          "internal_min": 81200,
+          "internal_largest": 65524,
+          "psram_total": 4192123,
+          "psram_free": 4100000,
+          "psram_largest": 4063220
+         },
          "sd": "ok",
          "file_logging": true,
          "config_source": "SD card",
@@ -70,6 +78,42 @@
           "connected": true,
           "ip": "192.168.8.100",
           "rssi": -52
+         },
+         "limits": {
+          "scenarios": {
+           "max": 8,
+           "max_steps": 24,
+           "max_pause_s": 3600,
+           "max_file_bytes": 32768,
+           "power_rule": {
+            "max_watts": 20000,
+            "min_for_s": 10,
+            "max_for_s": 900,
+            "max_warmup_s": 3600,
+            "check_every_s": 3
+           }
+          },
+          "devices": {
+           "max": 16,
+           "max_file_bytes": 8192,
+           "history_capacity": 80,
+           "history_span_s": 1200,
+           "poll_interval_s": 15
+          },
+          "tuya_queues": {
+           "commands": 16,
+           "monitor": 4
+          },
+          "put_body_bytes": {
+           "config": 8192,
+           "devices": 8192,
+           "scenarios": 24576
+          },
+          "logs": {
+           "ram_bytes": 8192,
+           "tail_max_bytes": 32768
+          },
+          "boot_history": 16
          }
         }
        }
@@ -380,7 +424,7 @@
      "Пристрої"
     ],
     "summary": "Список пристроїв зі станом",
-    "description": "Пристрої з `/devices.json` (ключі не віддаються, лише `key_set`) і кешований стан з фонового опитування. До розеток не звертається.",
+    "description": "Пристрої з `/devices.json` (ключі не віддаються, лише `key_set`) і кешований стан з фонового опитування. До розеток не звертається. `max`: скільки пристроїв можна мати; `history_capacity`: скільки записів історії показників тримається на пристрій.",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -1108,7 +1152,7 @@
      "Сценарії"
     ],
     "summary": "Сценарії та стан запусків",
-    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`).",
+    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування).",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."

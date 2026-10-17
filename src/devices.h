@@ -31,6 +31,7 @@
 // Thread safety: every function takes one short internal mutex and copies; no I/O under it.
 //
 #include <Arduino.h>
+#include <ArduinoJson.h>
 
 #include <vector>
 
@@ -152,5 +153,11 @@ void onJobDone(const Tuya::Job& job);
 // Starts the poller. attempts = tries per device and cycle (>= 1). Call once, after Tuya::begin().
 void startMonitor(uint16_t intervalSec, uint16_t timeoutMs, uint8_t attempts);
 uint16_t pollIntervalSec();
+
+constexpr size_t kMaxDevices = 16;
+
+// The limits of the device list and the history, for the API and the page: max, max_file_bytes, history_capacity,
+// history_span_s (capacity x the current polling interval), poll_interval_s.
+void limits(JsonObject out);
 
 }  // namespace Devices

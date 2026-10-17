@@ -48,6 +48,18 @@ namespace Scenario {
 
 constexpr size_t kMaxScenarios = 8;
 constexpr size_t kMaxSteps = 24;
+constexpr uint16_t kMaxPauseS = 3600;      // pause after a step
+constexpr size_t kMaxFileBytes = 32768;    // /scenarios.json
+constexpr uint32_t kMaxWatts = 20000;      // power rule threshold
+constexpr uint32_t kMinForS = 10, kMaxForS = 900;
+constexpr uint32_t kMaxWarmupS = 3600;
+
+// for_s a power rule may have now: kMaxForS, or less when the history of the readings (Devices::kHistoryCapacity
+// answers at the current polling interval) is shorter.
+uint32_t maxForS();
+
+// All the limits above (and maxForS()) as JSON, for the API and the page.
+void limits(JsonObject out);
 
 // reasonName: text for the log, e.g. "SW". Call once, after Logger, Config, Devices and Tuya are up.
 // Reads /scenarios.json and, after a power-up, starts the enabled power_on scenarios.

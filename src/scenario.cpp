@@ -24,13 +24,11 @@ const char* kPath = "/scenarios.json";
 const char* kTmp = "/scenarios.tmp";
 const char* kBak = "/scenarios.bak";
 const char* kBakTmp = "/scenarios.bak.tmp";
-constexpr size_t kMaxFileBytes = 32768;  // kMaxScenarios x kMaxSteps steps
 
 constexpr uint8_t kAttempts = 3;          // tries per step
 constexpr uint32_t kCommandTimeoutMs = 3000;
 constexpr uint32_t kRetryGapMs = 2000;
 constexpr uint32_t kQueueWaitMs = 120000; // how long a command may wait in the Tuya queue before the attempt is given up
-constexpr uint16_t kMaxPauseS = 3600;
 
 // A run started by the power-up trigger cannot count on the network: after a blackout the router (and the sockets) take
 // a minute or two to come back. So it waits for Wi-Fi first (as long as it takes: no command gets through without it)
@@ -44,10 +42,8 @@ const char* kTriggerManual = "manual";
 const char* kTriggerPowerBelow = "power_below";
 const char* kTriggerPowerAbove = "power_above";
 
-// A power trigger: `when` = { device, watts, for_s, warmup_s }.
-constexpr uint32_t kMaxWatts = 20000;
-constexpr uint32_t kMinForS = 10, kMaxForS = 900;
-constexpr uint32_t kDefaultWarmupS = 60, kMaxWarmupS = 3600;
+// A power trigger: `when` = { device, watts, for_s, warmup_s } (limits in scenario.h).
+constexpr uint32_t kDefaultWarmupS = 60;
 constexpr uint32_t kWatchTickMs = 3000;  // how often the conditions are looked at
 
 enum class State : uint8_t { Idle, Skipped, Waiting, Running, Done, Stopped };
@@ -1004,11 +1000,30 @@ StopResult stop(const String& name) {
   return StopResult::Stopping;
 }
 
+uint32_t maxForS() {
+  const uint32_t span = (Devices::kHistoryCapacity - 2) * static_cast<uint32_t>(Devices::pollIntervalSec());
+  return span < kMaxForS ? span : kMaxForS;
+}
+
+void limits(JsonObject out) {
+  out["max"] = kMaxScenarios;
+  out["max_steps"] = kMaxSteps;
+  out["max_pause_s"] = kMaxPauseS;
+  out["max_file_bytes"] = kMaxFileBytes;
+  JsonObject p = out["power_rule"].to<JsonObject>();
+  p["max_watts"] = kMaxWatts;
+  p["min_for_s"] = kMinForS;
+  p["max_for_s"] = maxForS();
+  p["max_warmup_s"] = kMaxWarmupS;
+  p["check_every_s"] = kWatchTickMs / 1000;
+}
+
 String configJson() {
   JsonDocument doc;
   doc["max"] = kMaxScenarios;
   doc["max_steps"] = kMaxSteps;
   doc["max_pause_s"] = kMaxPauseS;
+  limits(doc["limits"].to<JsonObject>());
   JsonArray triggers = doc["triggers"].to<JsonArray>();
   triggers.add(kTriggerPowerOn);
   triggers.add(kTriggerManual);

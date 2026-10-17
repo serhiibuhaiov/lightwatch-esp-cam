@@ -21,7 +21,6 @@ const char* TAG = "devices";
 const char* kPath = "/devices.json";
 const char* kTmp = "/devices.tmp";
 constexpr size_t kMaxFileBytes = 8192;
-constexpr size_t kMaxDevices = 16;
 const char* kBak = "/devices.bak";
 const char* kBakTmp = "/devices.bak.tmp";
 
@@ -414,6 +413,15 @@ bool state(const String& name, State& out) {
 uint16_t pollIntervalSec() {
   Lock lock;
   return gIntervalSec;
+}
+
+void limits(JsonObject out) {
+  const uint32_t interval = pollIntervalSec();
+  out["max"] = kMaxDevices;
+  out["max_file_bytes"] = kMaxFileBytes;
+  out["history_capacity"] = kHistoryCapacity;
+  out["history_span_s"] = static_cast<uint32_t>(kHistoryCapacity) * interval;  // at the current polling interval
+  out["poll_interval_s"] = interval;
 }
 
 namespace {

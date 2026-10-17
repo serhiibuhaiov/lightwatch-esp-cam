@@ -42,7 +42,7 @@ def test_ui_page_served_behind_auth(dev):
         assert r.status_code == 200
         assert r.headers["Content-Type"].startswith("text/html")
         assert "<title>" in r.text and "/api/status" in r.text and "/api/config" in r.text
-        assert 5000 < len(r.content) < 90000
+        assert 5000 < len(r.content) < 120000  # embedded in the firmware: keep an eye on its size
 
 
 # ---- GET /api/status ------------------------------------------------------------------
@@ -82,6 +82,33 @@ def test_status(dev):
     if st["time_valid"]:
         assert hist[-1]["time_quality"] == "synced" and hist[-1]["time"] > 1700000000
     assert dev.get("/api/status", auth=False).status_code == 401
+
+
+def test_status_memory(dev):
+    m = dev.get("/api/status").json()["memory"]
+    assert set(m) == {"internal_free", "internal_min", "internal_largest", "psram_total", "psram_free", "psram_largest"}
+    assert 20000 < m["internal_min"] <= m["internal_free"] and 0 < m["internal_largest"] <= m["internal_free"]
+    assert m["psram_total"] == 0 or (m["psram_total"] > 1 << 20 and m["psram_largest"] <= m["psram_free"] <= m["psram_total"])
+
+
+def test_status_limits_match_what_the_other_routes_say(dev):
+    """The page shows the limits from /api/status; they must be the ones the editors and the history work with."""
+    lim = dev.get("/api/status").json()["limits"]
+    sc, scenarios = lim["scenarios"], dev.get("/api/scenarios").json()
+    assert sc == scenarios["limits"]
+    assert (sc["max"], sc["max_steps"], sc["max_pause_s"]) == (scenarios["max"], scenarios["max_steps"], scenarios["max_pause_s"])
+    pr = sc["power_rule"]
+    assert pr["min_for_s"] <= pr["max_for_s"] <= 900 and pr["max_watts"] == 20000 and pr["max_warmup_s"] == 3600
+    devices = dev.get("/api/devices").json()
+    dv = lim["devices"]
+    assert dv["max"] == devices["max"] == dev.get("/api/devices/config").json()["max"]
+    assert dv["history_capacity"] == devices["history_capacity"]
+    assert dv["poll_interval_s"] == devices["poll_interval_s"] and dv["history_span_s"] == dv["history_capacity"] * dv["poll_interval_s"]
+    assert pr["max_for_s"] == min(900, (dv["history_capacity"] - 2) * dv["poll_interval_s"])
+    assert lim["tuya_queues"] == {"commands": 16, "monitor": 4}
+    assert lim["put_body_bytes"] == {"config": 8192, "devices": 8192, "scenarios": 24576}
+    assert lim["logs"] == {"ram_bytes": 8192, "tail_max_bytes": 32768}
+    assert 1 <= len(dev.get("/api/status").json()["boot_history"]) <= lim["boot_history"]
 
 
 def test_sd_is_healthy_in_the_normal_suite(dev):

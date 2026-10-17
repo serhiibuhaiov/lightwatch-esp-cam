@@ -8,7 +8,6 @@
 namespace BootLog {
 namespace {
 
-constexpr size_t kMaxEntries = 16;
 constexpr const char* kNs = "boot";
 constexpr const char* kKeyEntries = "hb";   // blob of Entry[]
 constexpr const char* kKeySeen = "seen";    // last epoch the device was known to be alive

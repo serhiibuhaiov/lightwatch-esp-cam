@@ -16,6 +16,8 @@
 
 namespace Storage {
 
+constexpr size_t kMaxTailBytes = 32768;  // the most sdReadTail() returns
+
 struct FileInfo {
   String name;   // base name, no directory
   size_t size;

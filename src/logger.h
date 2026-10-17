@@ -24,6 +24,9 @@
 
 namespace Logger {
 
+// The RAM buffer of log lines: flushed to the card, or (no card) a ring of the newest lines.
+constexpr size_t kRamBufferBytes = 8192;
+
 enum class Level : uint8_t { Debug = 0, Info = 1, Warn = 2, Error = 3 };
 
 struct Settings {

@@ -12,7 +12,7 @@ namespace Storage {
 namespace {
 
 const char* TAG = "storage";
-constexpr size_t kMaxTail = 32768;
+constexpr size_t kMaxTail = kMaxTailBytes;
 
 SemaphoreHandle_t gMutex = nullptr;
 volatile bool gSdMounted = false;
