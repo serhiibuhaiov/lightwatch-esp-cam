@@ -1,9 +1,9 @@
 #include "scenario.h"
 
-#include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <time.h>
 
 #include <WiFi.h>
 
@@ -28,6 +28,18 @@ const char* kPath = "/scenarios.json";
 const char* kTmp = "/scenarios.tmp";
 const char* kBak = "/scenarios.bak";
 const char* kBakTmp = "/scenarios.bak.tmp";
+// The runs that are alive, kept so that a restart can continue them (on_interrupt). Written on every change (at most every
+// kRunsSaveGapMs) and every kRunsCheckpointMs while a run waits or pauses, so a pause loses at most that much.
+const char* kRunsPath = "/runs.json";
+const char* kRunsTmp = "/runs.tmp";
+constexpr size_t kRunsMaxBytes = 131072;
+constexpr uint32_t kRunsSaveGapMs = 3000;
+constexpr uint32_t kRunsCheckpointMs = 300000;
+constexpr size_t kWhyMaxChars = 160;  // a failure reason as /runs.json and the history keep it
+// The history of the runs: one JSON line per ended run, appended; at kHistoryFileBytes the file becomes the old one.
+const char* kHistoryDir = "/runs";
+const char* kHistoryPath = "/runs/history.jsonl";
+const char* kHistoryOld = "/runs/history.1.jsonl";
 
 // A step's command or status query (the engine retries; its timing is in lib/scenario_engine/engine.h).
 constexpr uint32_t kCommandTimeoutMs = 3000;
@@ -60,16 +72,11 @@ struct Def {
   uint32_t watts = 0;
   uint32_t forS = 0;
   uint32_t warmupS = kDefaultWarmupS;
+  ScenarioEngine::OnInterrupt onInterrupt;  // what a restart does to a run of this scenario
 
   bool isPower() const { return trigger == kTriggerPowerBelow || trigger == kTriggerPowerAbove; }
   const String& device(const Step& s) const { return devices[s.dev]; }
 };
-
-// A power-up whose power_on runs are still waiting for the network is carried over a software restart: the Wi-Fi watchdog
-// in main.cpp restarts the board (reset reason SW) when Wi-Fi stays away, and that must not lose the power-up. RTC memory
-// keeps its value over a software restart and loses it when the power goes.
-constexpr uint32_t kPowerUpPending = 0x50574F4E;  // "PWON"
-RTC_NOINIT_ATTR uint32_t gPowerUpPending;
 
 SemaphoreHandle_t gMux = nullptr;      // guards everything below
 SemaphoreHandle_t gSaveMux = nullptr;  // serialises save(); held across the SD write
@@ -256,10 +263,44 @@ bool parse(const String& raw, std::vector<Def>& out, String& err) {
       }
       d.steps.push_back(st);
     }
+    JsonVariantConst oi = item["on_interrupt"];
+    if (!oi.isNull()) {
+      if (!oi.is<JsonObjectConst>()) {
+        err = where + ".on_interrupt must be an object {power, software, crash, brownout, resume_within_min}";
+        return false;
+      }
+      struct Slot { const char* key; ScenarioEngine::Policy* target; };
+      const Slot slots[] = {{"power", &d.onInterrupt.power}, {"software", &d.onInterrupt.software}, {"crash", &d.onInterrupt.crash},
+                            {"brownout", &d.onInterrupt.brownout}};
+      for (const Slot& s : slots) {
+        JsonVariantConst v = oi[s.key];
+        if (v.isNull()) continue;
+        if (!v.is<const char*>() || !ScenarioEngine::policyFromName(v.as<const char*>(), *s.target)) {
+          err = where + ".on_interrupt." + s.key + " must be \"resume\", \"restart\" or \"drop\"";
+          return false;
+        }
+      }
+      JsonVariantConst m = oi["resume_within_min"];
+      if (!m.isNull()) {
+        if (!m.is<int>() || m.as<int>() < 0 || m.as<int>() > ScenarioEngine::kMaxResumeWithinMin) {
+          err = where + ".on_interrupt.resume_within_min must be an integer 0.." + String(static_cast<unsigned>(ScenarioEngine::kMaxResumeWithinMin));
+          return false;
+        }
+        d.onInterrupt.resumeWithinMin = static_cast<uint16_t>(m.as<int>());
+      }
+    }
     list.push_back(d);
   }
   out = list;
   return true;
+}
+
+void writeOnInterrupt(JsonObject o, const ScenarioEngine::OnInterrupt& p) {
+  o["power"] = ScenarioEngine::policyName(p.power);
+  o["software"] = ScenarioEngine::policyName(p.software);
+  o["crash"] = ScenarioEngine::policyName(p.crash);
+  o["brownout"] = ScenarioEngine::policyName(p.brownout);
+  o["resume_within_min"] = p.resumeWithinMin;
 }
 
 String fileText(const std::vector<Def>& list, bool pretty) {
@@ -279,6 +320,7 @@ String fileText(const std::vector<Def>& list, bool pretty) {
       w["warmup_s"] = d.warmupS;
     }
     o["default_pause_s"] = d.defaultPauseS;
+    writeOnInterrupt(o["on_interrupt"].to<JsonObject>(), d.onInterrupt);
     JsonArray steps = o["steps"].to<JsonArray>();
     for (const Step& s : d.steps) {
       JsonObject so = steps.add<JsonObject>();
@@ -392,6 +434,11 @@ class BoardEnv : public ScenarioEngine::Env {
   }
 
   uint32_t nowMs() override { return millis(); }
+  uint32_t epoch() override {
+    const time_t now = time(nullptr);
+    return now > 1700000000 ? static_cast<uint32_t>(now) : 0;
+  }
+  void finished(const std::string& name, const ScenarioEngine::Run& r) override;  // below: the history line
   bool wifiUp() override { return WiFi.status() == WL_CONNECTED; }
 
   ScenarioEngine::DeviceInfo device(const std::string& name) override {
@@ -459,6 +506,214 @@ class BoardEnv : public ScenarioEngine::Env {
   uint32_t nextId_ = 0;
 };
 
+
+// ---- /runs.json: the alive runs ---------------------------------------------------------------------------------------
+
+std::string clip(const std::string& s) { return s.size() > kWhyMaxChars ? s.substr(0, kWhyMaxChars) : s; }
+
+String runsText(const std::vector<ScenarioEngine::Snapshot>& runs, uint32_t epoch) {
+  JsonDocument doc(PsramAllocator::instance());
+  doc["version"] = 1;
+  doc["saved_epoch"] = epoch;
+  JsonArray arr = doc["runs"].to<JsonArray>();
+  for (const ScenarioEngine::Snapshot& s : runs) {
+    JsonObject o = arr.add<JsonObject>();
+    o["name"] = s.name;
+    o["trigger"] = s.trigger;
+    o["def_hash"] = s.defHash;
+    o["state"] = static_cast<int>(s.state);
+    o["phase"] = static_cast<int>(s.phase);
+    o["patient"] = s.patient;
+    o["step"] = s.step;
+    o["attempt"] = s.attempt;
+    o["left_ms"] = s.leftMs;
+    o["run_ms"] = s.runMs;
+    o["start_epoch"] = s.startEpoch;
+    if (!s.resumed.empty()) o["resumed"] = s.resumed;
+    o["switched"] = s.switched;
+    o["skipped"] = s.skipped;
+    o["failed"] = s.failed;
+    JsonObject def = o["def"].to<JsonObject>();  // the steps the run works with: names and actions for the history
+    def["default_pause_s"] = s.def.defaultPauseS;
+    JsonArray devs = def["devices"].to<JsonArray>();
+    for (const std::string& n : s.def.devices) devs.add(n);
+    JsonArray dsteps = def["steps"].to<JsonArray>();
+    for (const ScenarioEngine::StepDef& st : s.def.steps) {
+      JsonArray a = dsteps.add<JsonArray>();  // [dev, on, enabled, pause_after_s]
+      a.add(st.dev);
+      a.add(st.on);
+      a.add(st.enabled);
+      a.add(st.pauseAfterS);
+    }
+    JsonArray steps = o["steps"].to<JsonArray>();
+    for (const ScenarioEngine::StepRun& sr : s.steps) {
+      JsonArray a = steps.add<JsonArray>();  // [state, attempts, pause_s, at_s, why]
+      a.add(static_cast<int>(sr.state));
+      a.add(sr.attempts);
+      a.add(sr.pauseS);
+      a.add(sr.atS);
+      a.add(clip(sr.why));
+    }
+  }
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+// Reads the runs a restart interrupted. Nothing (and no error) when there is no card or no file.
+void readRuns(std::vector<ScenarioEngine::Snapshot>& out, uint32_t& savedEpoch) {
+  out.clear();
+  savedEpoch = 0;
+  if (!Storage::sdMounted()) return;
+  String raw;
+  // A save removes the old file before renaming the new one: a power cut in between leaves only the temporary file.
+  if (!Storage::sdReadAll(kRunsPath, raw, kRunsMaxBytes) && !Storage::sdReadAll(kRunsTmp, raw, kRunsMaxBytes)) return;
+  JsonDocument doc(PsramAllocator::instance());
+  if (deserializeJson(doc, raw)) {
+    LOGW(TAG, "%s is not valid JSON: the interrupted runs are not continued", kRunsPath);
+    return;
+  }
+  savedEpoch = doc["saved_epoch"] | 0u;
+  for (JsonObjectConst o : doc["runs"].as<JsonArrayConst>()) {
+    ScenarioEngine::Snapshot s;
+    s.name = o["name"] | "";
+    s.trigger = o["trigger"] | "manual";
+    s.defHash = o["def_hash"] | 0u;
+    s.state = static_cast<ScenarioEngine::RunState>(o["state"] | 0);
+    s.phase = static_cast<ScenarioEngine::Phase>(o["phase"] | 0);
+    s.patient = o["patient"] | false;
+    s.step = o["step"] | 0u;
+    s.attempt = o["attempt"] | 0;
+    s.leftMs = o["left_ms"] | 0u;
+    s.runMs = o["run_ms"] | 0u;
+    s.startEpoch = o["start_epoch"] | 0u;
+    s.resumed = o["resumed"] | "";
+    s.switched = o["switched"] | 0u;
+    s.skipped = o["skipped"] | 0u;
+    s.failed = o["failed"] | 0u;
+    JsonObjectConst def = o["def"];
+    s.def.name = s.name;
+    s.def.defaultPauseS = def["default_pause_s"] | 0;
+    for (JsonVariantConst n : def["devices"].as<JsonArrayConst>()) s.def.devices.push_back(n.as<const char*>() ? n.as<const char*>() : "");
+    for (JsonArrayConst a : def["steps"].as<JsonArrayConst>()) {
+      ScenarioEngine::StepDef st;
+      st.dev = a[0] | 0;
+      st.on = a[1] | true;
+      st.enabled = a[2] | true;
+      st.pauseAfterS = a[3] | -1;
+      if (st.dev >= s.def.devices.size()) continue;  // damaged: leave the step out
+      s.def.steps.push_back(st);
+    }
+    for (JsonArrayConst a : o["steps"].as<JsonArrayConst>()) {
+      ScenarioEngine::StepRun sr;
+      sr.state = static_cast<ScenarioEngine::StepState>(a[0] | 0);
+      sr.attempts = a[1] | 0;
+      sr.pauseS = a[2] | 0;
+      sr.atS = a[3] | 0u;
+      sr.why = a[4] | "";
+      s.steps.push_back(sr);
+    }
+    if (!s.name.empty()) out.push_back(std::move(s));
+  }
+}
+
+uint32_t gLastRunsSaveMs = 0;
+bool gRunsDirty = false;
+bool gRunsFileThere = false;  // so that an empty list removes the file once, not on every change
+
+void saveRuns(const std::vector<ScenarioEngine::Snapshot>& runs) {
+  gLastRunsSaveMs = millis();
+  if (!Storage::sdMounted()) return;
+  if (runs.empty()) {
+    if (gRunsFileThere) Storage::sdRemove(kRunsPath);
+    gRunsFileThere = false;
+    return;
+  }
+  const time_t now = time(nullptr);
+  const String text = runsText(runs, now > 1700000000 ? static_cast<uint32_t>(now) : 0);
+  if (text.length() > kRunsMaxBytes || !Storage::sdWriteAtomic(kRunsPath, kRunsTmp, text)) {
+    LOGW(TAG, "could not save the alive runs to %s (%u bytes)", kRunsPath, static_cast<unsigned>(text.length()));
+    return;
+  }
+  gRunsFileThere = true;
+}
+
+// ---- the history of the runs --------------------------------------------------------------------------------------------
+
+uint32_t gHistoryNextId = 1;
+std::vector<String> gHistoryPending;  // lines made under gMux, written to the card by the engine task
+
+void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
+  JsonDocument doc;  // the key order matters: GET /api/scenarios/history finds a scenario by `{"id":N,"name":"..."`
+  doc["id"] = gHistoryNextId++;
+  doc["name"] = name;
+  doc["trigger"] = r.trigger;
+  doc["result"] = ScenarioEngine::runStateName(r.state);
+  if (r.startEpoch) {
+    doc["start"] = r.startEpoch;
+  } else {
+    doc["start"] = nullptr;
+  }
+  const uint32_t end = epoch();
+  if (end) {
+    doc["end"] = end;
+  } else {
+    doc["end"] = nullptr;
+  }
+  doc["duration_s"] = r.durationS;
+  if (!r.resumed.empty()) doc["resumed"] = r.resumed;
+  if (!r.skipReason.empty()) doc["reason"] = r.skipReason;
+  doc["switched"] = r.switched;
+  doc["skipped"] = r.skipped;
+  doc["failed"] = r.failed;
+  JsonArray steps = doc["steps"].to<JsonArray>();
+  for (size_t i = 0; i < r.steps.size() && i < r.def.steps.size(); ++i) {
+    const ScenarioEngine::StepRun& s = r.steps[i];
+    JsonObject o = steps.add<JsonObject>();
+    o["device"] = r.def.device(i);
+    o["action"] = r.def.steps[i].on ? "on" : "off";
+    o["state"] = ScenarioEngine::stepStateName(s.state);
+    o["attempts"] = s.attempts;
+    if (s.atS) o["at_s"] = s.atS;
+    const std::string detail = clip(ScenarioEngine::stepDetail(r, i));
+    if (!detail.empty()) o["detail"] = detail;
+  }
+  String line;
+  serializeJson(doc, line);
+  if (gHistoryPending.size() < 64) gHistoryPending.push_back(line);  // the card is gone for long: the oldest lines win
+}
+
+void appendHistory(const std::vector<String>& lines) {
+  if (lines.empty() || !Storage::sdMounted()) return;
+  Storage::sdMkdir(kHistoryDir);
+  if (Storage::sdSize(kHistoryPath) > static_cast<long>(kHistoryFileBytes)) Storage::sdReplace(kHistoryPath, kHistoryOld);
+  for (const String& line : lines) {
+    const String l = line + "\n";
+    if (!Storage::sdAppend(kHistoryPath, reinterpret_cast<const uint8_t*>(l.c_str()), l.length())) {
+      LOGW(TAG, "could not write the history of the runs");
+      return;
+    }
+  }
+}
+
+// The id at the start of a history line, 0 if it is not one.
+uint32_t lineId(const String& line) {
+  if (!line.startsWith("{\"id\":")) return 0;
+  return static_cast<uint32_t>(line.substring(6).toInt());
+}
+
+uint32_t lastHistoryId() {
+  for (const char* path : {kHistoryPath, kHistoryOld}) {
+    String tail;
+    if (!Storage::sdReadTail(path, 8192, tail)) continue;
+    tail.trim();
+    const int nl = tail.lastIndexOf('\n');
+    const uint32_t id = lineId(nl >= 0 ? tail.substring(nl + 1) : tail);
+    if (id) return id;
+  }
+  return 0;
+}
+
 BoardEnv* gEnv = nullptr;
 TaskHandle_t gEngineTask = nullptr;
 
@@ -473,13 +728,26 @@ void engineTask(void*) {
   uint32_t nextWatch = millis() + kWatchTickMs;
   for (;;) {
     uint32_t sleepMs;
+    bool save = false;
+    std::vector<ScenarioEngine::Snapshot> snaps;
+    std::vector<String> lines;
     {
       Lock lock;
       sleepMs = gEngine->tick();
-      // The power-up has been served once none of its runs waits for the network any more: a software restart from now on
-      // must not repeat it.
-      if (gPowerUpPending == kPowerUpPending && !gEngine->holdsPowerUp()) gPowerUpPending = 0;
+      if (gEngine->takeDirty()) gRunsDirty = true;
+      const uint32_t sinceSave = millis() - gLastRunsSaveMs;
+      if ((gRunsDirty && sinceSave >= kRunsSaveGapMs) || (gEngine->alive() && sinceSave >= kRunsCheckpointMs)) {
+        snaps = gEngine->snapshot();
+        save = true;
+        gRunsDirty = false;
+      } else if (gRunsDirty) {
+        sleepMs = std::min<uint32_t>(sleepMs, kRunsSaveGapMs - sinceSave);
+      }
+      lines.swap(gHistoryPending);
     }
+    // The card, outside the lock: the web page and the API never wait for it.
+    if (save) saveRuns(snaps);
+    appendHistory(lines);
     const int32_t toWatch = static_cast<int32_t>(nextWatch - millis());
     if (toWatch <= 0) {
       nextWatch = millis() + kWatchTickMs;
@@ -602,8 +870,13 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
       o["starts_in_s"] = secondsUntil(r->startAtMs);
       if (!r->waitReason.empty()) o["wait_reason"] = r->waitReason;
     }
+    if (st == RunState::Running && !r->waitReason.empty()) o["wait_reason"] = r->waitReason;
     if (st == RunState::Skipped) o["skip_reason"] = r->skipReason;
-    if (st == RunState::Waiting || st == RunState::Running || st == RunState::Done || st == RunState::Stopped) o["run_trigger"] = r->trigger;
+    if (st == RunState::Interrupted) o["interrupt_reason"] = r->skipReason;
+    if (!r->resumed.empty()) o["resumed"] = r->resumed;
+    if (st == RunState::Waiting || st == RunState::Running || st == RunState::Done || st == RunState::Stopped || st == RunState::Interrupted) {
+      o["run_trigger"] = r->trigger;
+    }
     if (!r->steps.empty()) {
       o["progress_done"] = doneSteps(*r);
       o["progress_total"] = totalSteps(*r);
@@ -612,6 +885,7 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
   }
   if (!full) return;
   o["default_pause_s"] = d.defaultPauseS;
+  writeOnInterrupt(o["on_interrupt"].to<JsonObject>(), d.onInterrupt);
   if (d.isPower()) {
     JsonObject w = o["when"].to<JsonObject>();
     w["device"] = d.whenDevice;
@@ -674,29 +948,71 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
   load();
   refreshWatched();
 
-  // A software restart while the power-up's runs were still waiting for Wi-Fi (the watchdog in main.cpp): still a power-up.
-  const bool carried = reason == ESP_RST_SW && gPowerUpPending == kPowerUpPending;
-  const bool powerUp = reason == ESP_RST_POWERON || carried;
-  if (carried) LOGW(TAG, "restarted before the power-up's scenarios got the network: they start again");
+  using ScenarioEngine::Cause;
+  using ScenarioEngine::Policy;
+  const Cause cause = reason == ESP_RST_POWERON ? Cause::Power
+                      : reason == ESP_RST_SW     ? Cause::Software
+                      : reason == ESP_RST_BROWNOUT ? Cause::Brownout
+                                                   : Cause::Crash;
+  // The runs this restart interrupted, and how long the board was away (known when the clock was set before and after:
+  // it survives a software restart, a panic and a watchdog, not a power cut).
+  std::vector<ScenarioEngine::Snapshot> saved;
+  uint32_t savedEpoch = 0;
+  readRuns(saved, savedEpoch);
+  gRunsFileThere = !saved.empty();
+  const time_t now = time(nullptr);
+  const bool gapKnown = savedEpoch && now > 1700000000;
+  const uint32_t gapS = gapKnown && static_cast<uint32_t>(now) > savedEpoch ? static_cast<uint32_t>(now) - savedEpoch : 0;
+  const uint32_t elapsedMs = gapKnown ? gapS * 1000 : millis();
   {
     Lock lock;
-    bool pending = false;
+    gHistoryNextId = lastHistoryId() + 1;
+    for (const ScenarioEngine::Snapshot& s : saved) {
+      const Def* d = nullptr;
+      for (const Def& x : gDefs) {
+        if (x.name == s.name.c_str()) d = &x;
+      }
+      if (!d) {
+        gEngine->interrupted(s, "interrupted by a restart; the scenario no longer exists");
+        continue;
+      }
+      if (!d->enabled && s.trigger != "manual") {
+        gEngine->interrupted(s, "interrupted by a restart; the scenario is disabled now");
+        continue;
+      }
+      bool defChanged = false;
+      if (s.state == ScenarioEngine::RunState::Running) {
+        ScenarioEngine::Def cur;
+        defChanged = !gEnv->def(s.name, cur) || ScenarioEngine::defHash(cur) != s.defHash;
+      }
+      const ScenarioEngine::Decision dec = ScenarioEngine::decide(cause, d->onInterrupt, gapKnown, gapS, defChanged);
+      const std::string why = std::string("interrupted by a restart (") + reasonName + "): " + dec.why;
+      if (cause == Cause::Power && d->trigger == kTriggerPowerOn && dec.action != Policy::Resume) {
+        gEngine->interrupted(s, why + "; the power-up starts it again");
+      } else if (dec.action == Policy::Resume) {
+        if (gEngine->resume(s, elapsedMs, reasonName) != ScenarioEngine::Engine::StartResult::Started) {
+          gEngine->interrupted(s, why + "; could not be continued");
+        }
+      } else if (dec.action == Policy::Restart) {
+        gEngine->interrupted(s, why);
+        gEngine->start(s.name, s.trigger, millis(), true);
+      } else {
+        gEngine->interrupted(s, why);
+      }
+    }
     for (const Def& d : gDefs) {
       if (!d.enabled || d.trigger != kTriggerPowerOn) continue;
-      if (!powerUp) {
+      const ScenarioEngine::Run* r = gEngine->run(d.name.c_str());
+      if (r && r->alive) continue;  // continued (or started again) after the restart
+      if (reason != ESP_RST_POWERON) {
         const String why = String("not a power-up (reset reason: ") + reasonName + ")";
         gEngine->skip(d.name.c_str(), why.c_str());
         LOGI(TAG, "[%s] not started: %s", d.name.c_str(), why.c_str());
       } else {
         LOGI(TAG, "[%s] power-up: starts %u s after boot", d.name.c_str(), static_cast<unsigned>(delaySec));
-        // counted from boot
-        if (gEngine->start(d.name.c_str(), "power-on", static_cast<uint32_t>(delaySec) * 1000UL, true) ==
-            ScenarioEngine::Engine::StartResult::Started) {
-          pending = true;
-        }
+        gEngine->start(d.name.c_str(), "power-on", static_cast<uint32_t>(delaySec) * 1000UL);  // counted from boot
       }
     }
-    gPowerUpPending = pending ? kPowerUpPending : 0;
   }
   if (!gEngineTask) xTaskCreate(engineTask, "scn_engine", 8192, nullptr, 1, &gEngineTask);
 }
@@ -787,6 +1103,67 @@ void engineStats(JsonObject out) {
   out["offline_attempt_ms"] = s.offlineAttemptMs;
 }
 
+bool history(const String& name, size_t limit, uint32_t before, String& out) {
+  out = "{\"runs\":[";
+  if (!Storage::sdMounted()) {
+    out += "],\"more\":false,\"sd\":false}";
+    return false;
+  }
+  const String key = name.isEmpty() ? String() : ",\"name\":\"" + name + "\",";
+  size_t found = 0;
+  bool more = false;
+  // Newest first: the current file from its end, then the old one. Read in blocks, so a big file never sits in memory.
+  for (const char* path : {kHistoryPath, kHistoryOld}) {
+    long pos = Storage::sdSize(path);
+    if (pos <= 0) continue;
+    String carry;  // the start of a line whose beginning is in an earlier block
+    uint8_t buf[1024];
+    while (pos > 0 && !more) {
+      const size_t n = static_cast<size_t>(std::min<long>(pos, sizeof(buf)));
+      pos -= static_cast<long>(n);
+      const size_t got = Storage::sdReadAt(path, static_cast<size_t>(pos), buf, n);
+      if (got != n) break;
+      String chunk;
+      chunk.concat(reinterpret_cast<const char*>(buf), static_cast<unsigned int>(n));
+      chunk += carry;
+      int start = 0;
+      if (pos > 0) {  // the first line may begin in the block before this one
+        start = chunk.indexOf('\n');
+        if (start < 0) {
+          carry = chunk;
+          continue;
+        }
+        carry = chunk.substring(0, start);
+        ++start;
+      } else {
+        carry = "";
+      }
+      int end = chunk.length();
+      while (end > start && !more) {  // the lines of this block, last first
+        int nl = chunk.lastIndexOf('\n', end - 1);
+        if (nl < start - 1) nl = start - 1;
+        const String line = chunk.substring(nl + 1, end);
+        end = nl;
+        const uint32_t id = lineId(line);
+        if (!id || (before && id >= before)) continue;
+        if (!key.isEmpty() && line.indexOf(key) < 0) continue;
+        if (found == limit) {
+          more = true;
+          break;
+        }
+        if (found) out += ',';
+        out += line;
+        ++found;
+      }
+    }
+    if (more) break;
+  }
+  out += "],\"more\":";
+  out += more ? "true" : "false";
+  out += ",\"sd\":true}";
+  return true;
+}
+
 uint32_t maxForS() {
   const uint32_t span = (Devices::kHistoryCapacity - 2) * static_cast<uint32_t>(Devices::pollIntervalSec());
   return span < kMaxForS ? span : kMaxForS;
@@ -797,6 +1174,8 @@ void limits(JsonObject out) {
   out["max_steps"] = kMaxSteps;
   out["max_pause_s"] = kMaxPauseS;
   out["max_file_bytes"] = kMaxFileBytes;
+  out["history_file_bytes"] = kHistoryFileBytes;  // two files: the current one and the one before
+  out["max_resume_within_min"] = ScenarioEngine::kMaxResumeWithinMin;
   JsonObject p = out["power_rule"].to<JsonObject>();
   p["max_watts"] = kMaxWatts;
   p["min_for_s"] = kMinForS;

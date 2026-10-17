@@ -165,6 +165,7 @@ function limitsCard(l) {
   const sc = l.scenarios, pr = sc.power_rule, dv = l.devices;
   const rows = [
     ["Сценарії", "до " + sc.max + " сценаріїв, до " + sc.max_steps + " кроків у кожному; пауза після кроку 0–" + sc.max_pause_s + " с (" + fmtDur(sc.max_pause_s) + "); файл scenarios.json до " + fmtKb(sc.max_file_bytes)],
+    ["Історія запусків сценаріїв", "на SD: поточний файл до " + fmtKb(sc.history_file_bytes || 131072) + " і один попередній; продовження після перезапуску: перерва до " + (sc.max_resume_within_min || 1440) + " хв"],
     ["Тригер споживання", "поріг 0–" + pr.max_watts + " Вт; тривалість " + pr.min_for_s + "–" + pr.max_for_s + " с (не довше за історію показників); розігрів 0–" + pr.max_warmup_s + " с; умова перевіряється кожні " + pr.check_every_s + " с"],
     ["Пристрої", "до " + dv.max + " пристроїв; файл devices.json до " + fmtKb(dv.max_file_bytes)],
     ["Історія показників", dv.history_capacity + " останніх запитів на пристрій (≈" + fmtDur(dv.history_span_s) + " при опитуванні кожні " + dv.poll_interval_s + " с); у пам'яті, скидається при перезапуску"],
@@ -312,7 +313,16 @@ const WATCH_REASON = { met: "умова виконана", waiting: "умова 
   "no-data": "ще немає даних", "no-power-dp": "у розетки не вказано DP потужності або його немає", ignored: "розетка ігнорується", "no-device": "такої розетки немає в списку пристроїв",
   "too-long": "тривалість більша за історію показників" };
 const SC_STATE = { idle: ["n", "не запускався"], skipped: ["n", "не запускався"], waiting: ["warn", "чекає старту"], running: ["warn", "виконується"],
-  done: ["ok", "виконано"], stopped: ["warn", "зупинено"] };
+  done: ["ok", "виконано"], stopped: ["warn", "зупинено"], interrupted: ["err", "перервано перезапуском"] };
+// on_interrupt: what a restart of the board does to a run of the scenario.
+const OI_CAUSES = [["power", "Світло зникало", "вмикання живлення; на платі налагодження також прошивання й кнопка RST"],
+  ["software", "Програмний перезапуск", "немає Wi-Fi довше за wifi.restart_after_min, «Зберегти й перезапустити»"],
+  ["crash", "Збій або зависання", "panic, watchdog"], ["brownout", "Просідання напруги", "живлення плати просіло"]];
+const OI_POLICY = [["resume", "продовжити"], ["restart", "почати спочатку"], ["drop", "не продовжувати"]];
+const OI_DEFAULT = { power: "restart", software: "resume", crash: "resume", brownout: "resume", resume_within_min: 120 };
+const RUN_RESULT = { done: ["ok", "виконано"], stopped: ["warn", "зупинено"], interrupted: ["err", "перервано"], skipped: ["n", "не стартував"] };
+const TRIGGER_RUN = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу" };
+const fmtEpoch = e => e ? new Date(e * 1000).toLocaleString() : "час невідомий";
 const STEP_STATE = { pending: ["n", "очікує"], disabled: ["n", "крок вимкнено"], running: ["warn", "виконується"], ok: ["ok", "виконано"],
   skipped: ["n", "пропущено (ігнорується)"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
 
@@ -324,7 +334,9 @@ function scenarioStateText(s) {
   const how = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу" }[s.run_trigger];
   const prog = s.progress_total != null ? ", кроків " + s.progress_done + " з " + s.progress_total : "";
   const pause = s.pause_left_s != null ? ", пауза ще " + fmtDur(s.pause_left_s) : "";
-  return (SC_STATE[s.state] || ["n", s.state])[1] + (how && s.state !== "idle" ? " (запуск: " + how + ")" : "") + prog + pause;
+  const wifi = s.state === "running" && s.wait_reason === "wifi" ? ", чекає на Wi-Fi" : "";
+  const resumed = s.resumed && (s.state === "running" || s.state === "waiting") ? ", продовжено після перезапуску" : "";
+  return (SC_STATE[s.state] || ["n", s.state])[1] + (how && s.state !== "idle" ? " (запуск: " + how + ")" : "") + prog + pause + wifi + resumed;
 }
 
 function scenariosCard(list, st) {
@@ -347,8 +359,10 @@ function viewScenarios() {
 
   const blankStep = () => ({ device: devNames[0] || "", action: "on", enabled: true, pause: "" });
   const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60" });
-  const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), steps: [] });
+  const blankOi = () => ({ ...OI_DEFAULT, resume_within_min: String(OI_DEFAULT.resume_within_min) });
+  const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), oi: blankOi(), steps: [] });
   const fromServer = s => ({ orig: s.name, name: s.name, enabled: s.enabled, trigger: s.trigger, pause: String(s.default_pause_s),
+    oi: s.on_interrupt ? { ...s.on_interrupt, resume_within_min: String(s.on_interrupt.resume_within_min) } : blankOi(),
     when: s.when ? { device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s) } : blankWhen(),
     steps: s.steps.map(x => ({ device: x.device, action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s) })) });
 
@@ -359,7 +373,8 @@ function viewScenarios() {
       ignored = new Set(dj.devices.filter(d => d.ignore).map(d => d.name));
       const l = j.limits || {}, pr = l.power_rule || {};
       limits = { max: j.max, steps: j.max_steps, pause: j.max_pause_s, watts: pr.max_watts || 20000, forMin: pr.min_for_s || 10,
-        forMax: pr.max_for_s || 900, warmup: pr.max_warmup_s || 3600, fileBytes: l.max_file_bytes || 32768 };
+        forMax: pr.max_for_s || 900, warmup: pr.max_warmup_s || 3600, fileBytes: l.max_file_bytes || 32768,
+        historyBytes: l.history_file_bytes || 131072, resumeMax: l.max_resume_within_min || 1440 };
       info = { sd: j.sd, error: j.error };
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
       if (!keepEdits) rows = j.scenarios.map(fromServer);
@@ -384,6 +399,8 @@ function viewScenarios() {
     const out = [E("div", { class: "row" }, badge((SC_STATE[s.state] || ["n"])[0], scenarioStateText(s)),
       E("button", { class: "p", disabled: active, onclick: () => act(s.name, "run") }, "Запустити зараз"),
       E("button", { class: "d", disabled: !active, onclick: () => act(s.name, "stop") }, "Зупинити"))];
+    if (s.state === "interrupted" && s.interrupt_reason) out.push(E("div", { class: "mut", style: "margin:6px 0" }, s.interrupt_reason));
+    if (s.resumed) out.push(E("div", { class: "mut", style: "margin:6px 0" }, "Продовжено після перезапуску: " + s.resumed));
     if (s.watch) {
       const w = s.watch;
       out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(w.met ? "ok" : "n", "умова"), " ",
@@ -427,6 +444,8 @@ function viewScenarios() {
           return at + "тривалість має бути цілим числом секунд " + limits.forMin + "–" + limits.forMax + " (не довше за історію показників).";
         if (!/^\d{1,4}$/.test(w.warmup_s) || Number(w.warmup_s) > limits.warmup) return at + "розігрів має бути цілим числом секунд 0–" + limits.warmup + ".";
       }
+      if (!/^\d{1,4}$/.test(r.oi.resume_within_min) || Number(r.oi.resume_within_min) > limits.resumeMax)
+        return at + "«продовжувати, якщо перерва до» має бути цілим числом хвилин 0–" + limits.resumeMax + ".";
       if (r.steps.length > limits.steps) return at + "забагато кроків (максимум " + limits.steps + ").";
       for (const [k, st] of r.steps.entries()) {
         if (!NAME_RE.test(st.device)) return at + "крок " + (k + 1) + ": оберіть пристрій.";
@@ -443,6 +462,7 @@ function viewScenarios() {
     try {
       const body = { scenarios: rows.map(r => ({ name: r.name, enabled: r.enabled, trigger: r.trigger, default_pause_s: Number(r.pause),
         ...(r.trigger === "power_below" || r.trigger === "power_above" ? { when: { device: r.when.device, watts: Number(r.when.watts), for_s: Number(r.when.for_s), warmup_s: Number(r.when.warmup_s) } } : {}),
+        on_interrupt: { power: r.oi.power, software: r.oi.software, crash: r.oi.crash, brownout: r.oi.brownout, resume_within_min: Number(r.oi.resume_within_min) },
         steps: r.steps.map(st => { const o = { device: st.device, action: st.action, enabled: st.enabled }; if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
       const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -497,6 +517,26 @@ function viewScenarios() {
         "Поки такий сценарій увімкнений, монітор опитує цю розетку з UPDATEDPS, щоб показники були свіжими."));
   }
 
+  // What a restart of the board does to a run of this scenario (on_interrupt).
+  function interruptFields(r) {
+    const sel = key => {
+      const s = E("select", {}, OI_POLICY.map(([v, l]) => E("option", { value: v, selected: v === r.oi[key] }, l)));
+      s.addEventListener("change", () => { r.oi[key] = s.value; });  // no re-render: it would close the details
+      return s;
+    };
+    const within = E("input", { type: "number", min: 0, max: limits.resumeMax, value: r.oi.resume_within_min });
+    within.addEventListener("input", () => { r.oi.resume_within_min = within.value.trim(); });
+    return E("details", { style: "margin-top:14px" }, E("summary", {}, "Після перезапуску плати: " +
+        OI_CAUSES.map(([k, l]) => l.toLowerCase() + " → " + (OI_POLICY.find(x => x[0] === r.oi[k]) || [0, r.oi[k]])[1]).join(", ")),
+      E("div", { class: "fields", style: "margin-top:8px" },
+        ...OI_CAUSES.map(([k, l, hint]) => field(l, sel(k), hint)),
+        field("Продовжувати, якщо перерва до, хв", within, "0–" + limits.resumeMax + "; довша перерва: почати спочатку")),
+      E("p", { class: "mut", style: "margin:8px 0 0" }, "Запуск, що виконувався або чекав, коли плата перезапустилась: «продовжити» — з того самого кроку (його буде виконано ще раз) " +
+        "і з рештою паузи, спершу дочекавшись Wi-Fi; «почати спочатку» — з першого кроку; «не продовжувати» — запуск позначається як перерваний. «Продовжити» стає «почати спочатку», " +
+        "якщо сценарій змінили, поки запуск ішов, або якщо світло зникало, а годинника ще немає (невідомо, скільки тривала перерва). Зберігається на SD (runs.json), " +
+        "тож пауза втрачає не більше 5 хв. Для сценарію «З'явилося живлення» після вмикання живлення «почати спочатку» і «не продовжувати» означають звичайний старт за тригером."));
+  }
+
   function card(r, i) {
     const nameIn = E("input", { type: "text", value: r.name, maxlength: 32, placeholder: "наприклад power-restored", autocomplete: "off" });
     nameIn.addEventListener("input", () => { r.name = nameIn.value.trim(); });
@@ -522,6 +562,7 @@ function viewScenarios() {
         E("div", { class: "f" }, E("label", {}, "Увімкнений"), E("label", { style: "font-weight:400" }, en, " стартує за тригером"),
           E("small", {}, "Вимкнений сценарій не стартує сам, але запускається вручну"))),
       r.trigger === "power_below" || r.trigger === "power_above" ? whenFields(r) : null,
+      interruptFields(r),
       E("h2", { style: "margin-top:14px" }, "Кроки по черзі"),
       r.steps.length ? r.steps.map((st, k) => stepRow(r, st, k)) : E("p", { class: "mut", style: "margin:0 0 8px" }, "Кроків ще немає."),
       E("div", { class: "row" }, E("button", { type: "button", disabled: saving || r.steps.length >= limits.steps || !devNames.length, onclick: () => { r.steps.push(blankStep()); render(); } }, "Додати крок"),
@@ -539,7 +580,7 @@ function viewScenarios() {
         "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж.")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
-      limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Усі ліміти: вкладка «Статус»."));
+      limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Історія запусків: до 2 × " + fmtKb(limits.historyBytes) + " на SD. Усі ліміти: вкладка «Статус»."));
     if (!rows.length) out.push(note("warn", "Сценаріїв ще немає. Натисніть «Додати сценарій»."));
     rows.forEach((r, i) => out.push(card(r, i)));
     out.push(E("div", { class: "row" },
@@ -547,11 +588,57 @@ function viewScenarios() {
       E("button", { type: "button", class: "p", disabled: saving, onclick: save }, "Зберегти"),
       E("button", { type: "button", disabled: saving, onclick: () => { msg = null; load(false); } }, "Скасувати зміни"),
       E("span", { class: "mut" }, rows.length + " з " + limits.max)));
+    out.push(hist.box);
     box.replaceChildren(...out);
     stamp();
   }
 
-  load(false).then(() => every(poll, 3000));
+  // ---- the history of the runs (GET /api/scenarios/history): newest first, steps on demand
+  const hist = { box: E("div"), filter: "", runs: [], more: false, sd: true, error: null };
+  async function loadHistory(older) {
+    try {
+      const q = new URLSearchParams({ limit: "20" });
+      if (hist.filter) q.set("name", hist.filter);
+      if (older && hist.runs.length) q.set("before", String(hist.runs[hist.runs.length - 1].id));
+      const { j } = await getJson("/api/scenarios/history?" + q);
+      hist.runs = older ? hist.runs.concat(j.runs) : j.runs;
+      hist.more = j.more;
+      hist.sd = j.sd;
+      hist.error = null;
+    } catch (e) { hist.error = e.message; }
+    renderHistory();
+  }
+  function renderHistory() {
+    const names = Object.keys(live).sort();
+    const sel = E("select", {}, E("option", { value: "" }, "усі сценарії"), names.map(n => E("option", { value: n, selected: n === hist.filter }, n)));
+    sel.addEventListener("change", () => { hist.filter = sel.value; loadHistory(false); });
+    const items = hist.runs.map(h => {
+      const res = RUN_RESULT[h.result] || ["n", h.result];
+      const steps = h.steps || [];
+      const sum = [h.switched ? "перемкнуто " + h.switched : "", h.failed ? "не вдалося " + h.failed : "", h.skipped ? "пропущено " + h.skipped : ""].filter(Boolean).join(", ");
+      return E("details", {},
+        E("summary", {}, badge(res[0], res[1]), " ", E("b", {}, h.name), " ", E("span", { class: "mut" },
+          fmtEpoch(h.start) + " · " + (TRIGGER_RUN[h.trigger] || h.trigger) + " · " + fmtDur(h.duration_s) + (sum ? " · " + sum : "") + (h.resumed ? " · продовжено після перезапуску" : ""))),
+        h.reason ? E("p", { class: "mut", style: "margin:6px 0" }, h.reason) : "",
+        h.resumed ? E("p", { class: "mut", style: "margin:6px 0" }, "Перезапуски, після яких запуск продовжився: " + h.resumed) : "",
+        steps.length ? E("div", { class: "tw" }, E("table", { class: "h" },
+          E("thead", {}, E("tr", {}, ["Крок", "Пристрій", "Дія", "Результат", "Спроб", "Коли (від старту)", "Деталі"].map(x => E("th", {}, x)))),
+          E("tbody", {}, steps.map((x, k) => E("tr", { class: "h-" + (STEP_STATE[x.state] || ["n"])[0] },
+            E("td", {}, String(k + 1)), E("td", {}, x.device), E("td", {}, x.action === "off" ? "вимкнути" : "увімкнути"),
+            E("td", {}, (STEP_STATE[x.state] || [0, x.state])[1]), E("td", {}, String(x.attempts)),
+            E("td", {}, x.at_s ? fmtDur(x.at_s) : "—"), E("td", { class: "mut" }, x.detail || "")))))) : E("p", { class: "mut" }, "Без кроків."));
+    });
+    hist.box.replaceChildren(E("div", { class: "card" }, E("h2", {}, "Історія запусків"),
+      E("div", { class: "row" }, sel, E("button", { type: "button", onclick: () => loadHistory(false) }, "Оновити")),
+      hist.error ? note("err", "Не вдалося отримати історію: " + hist.error) : "",
+      !hist.sd ? note("warn", "Немає SD-картки: історія запусків зберігається лише на ній.") : "",
+      items.length ? items : E("p", { class: "mut" }, "Запусків ще не було."),
+      hist.more ? E("button", { type: "button", onclick: () => loadHistory(true) }, "Показати старіші") : "",
+      E("p", { class: "mut", style: "margin:8px 0 0" }, "Кожен завершений запуск (виконано, зупинено, перервано перезапуском) з усіма кроками: результат, спроби, коли крок завершився від старту запуску, причина. " +
+        "Зберігається на SD (runs/history.jsonl, до 2 × " + fmtKb(limits.historyBytes) + ": коли файл заповнюється, він стає попереднім, а ще старіший видаляється) і переживає перезапуски.")));
+  }
+
+  load(false).then(() => { every(poll, 3000); loadHistory(false); });
 }
 
 // ---------------------------------------------------------------- devices

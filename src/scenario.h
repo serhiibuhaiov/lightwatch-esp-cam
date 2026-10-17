@@ -53,6 +53,7 @@ constexpr size_t kMaxFileBytes = 65536;    // /scenarios.json (16 x 24 steps wit
 constexpr uint32_t kMaxWatts = 20000;      // power rule threshold
 constexpr uint32_t kMinForS = 10, kMaxForS = 900;
 constexpr uint32_t kMaxWarmupS = 3600;
+constexpr size_t kHistoryFileBytes = 131072;  // the history of the runs: a file this big becomes the old one
 
 // for_s a power rule may have now: kMaxForS, or less when the history of the readings (Devices::kHistoryCapacity
 // answers at the current polling interval) is shorter.
@@ -85,6 +86,10 @@ StopResult stop(const String& name);
 
 // JSON for GET /api/scenarios: the definitions (editor) with the last run of each (steps and their results).
 String configJson();
+
+// GET /api/scenarios/history: the ended runs, newest first, as {"runs":[...], "more":bool, "sd":bool}: at most `limit`, only
+// those older than the run with id `before` (0: from the newest), only of scenario `name` ("": all). False without a card.
+bool history(const String& name, size_t limit, uint32_t before, String& out);
 
 // A short entry per scenario for GET /api/status.
 void summary(JsonArray out);

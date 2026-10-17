@@ -91,7 +91,9 @@
             "max_for_s": 900,
             "max_warmup_s": 3600,
             "check_every_s": 3
-           }
+           },
+           "history_file_bytes": 131072,
+           "max_resume_within_min": 1440
           },
           "devices": {
            "max": 16,
@@ -1165,7 +1167,7 @@
      "Сценарії"
     ],
     "summary": "Сценарії та стан запусків",
-    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування). Запуск у паузі між кроками має `pause_left_s`.",
+    "description": "Визначення з `/scenarios.json` і останній запуск кожного (`state`, `run_steps`, `wait_reason`, для тригерів споживання `when` і `watch`). `limits`: ліміти редактора (як `limits.scenarios` у `/api/status`; `power_rule.max_for_s` залежить від інтервалу опитування). Запуск у паузі між кроками має `pause_left_s`. У кожного сценарію `on_interrupt`. Стан `interrupted` (запуск перервав перезапуск плати, `interrupt_reason`); `resumed`: перезапуски, після яких запуск продовжився; `wait_reason: \"wifi\"` і в стані `running` (продовжений запуск чекає мережу).",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -1191,7 +1193,7 @@
      "Сценарії"
     ],
     "summary": "Замінити список сценаріїв",
-    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). Тіло до 49152 байт, до 16 сценаріїв по 24 кроки.",
+    "description": "**Повна заміна.** Сценарії, яких немає в запиті, видаляються (виконувані зупиняються). Тіло до 49152 байт, до 16 сценаріїв по 24 кроки. `on_interrupt` (необов'язково): що робить перезапуск плати із запуском цього сценарію, окремо для `power` (світло зникало), `software` (програмний перезапуск), `crash` (збій, watchdog) і `brownout` (просідання напруги): `resume` (продовжити з того самого кроку й рештою паузи), `restart` (почати спочатку) або `drop` (не продовжувати); `resume_within_min` 0..1440 (довша перерва: почати спочатку). За замовчуванням power=restart, решта resume, 120 хв.",
     "responses": {
      "401": {
       "description": "Потрібна авторизація (HTTP Basic)."
@@ -1277,7 +1279,14 @@
             "enabled": true,
             "pause_after_s": 300
            }
-          ]
+          ],
+          "on_interrupt": {
+           "power": "restart",
+           "software": "resume",
+           "crash": "resume",
+           "brownout": "resume",
+           "resume_within_min": 120
+          }
          },
          {
           "name": "heater-idle-off",
@@ -1294,7 +1303,14 @@
             "device": "heater3",
             "action": "off"
            }
-          ]
+          ],
+          "on_interrupt": {
+           "power": "restart",
+           "software": "resume",
+           "crash": "resume",
+           "brownout": "resume",
+           "resume_within_min": 120
+          }
          }
         ]
        }
@@ -1434,6 +1450,108 @@
       }
      }
     ]
+   }
+  },
+  "/api/scenarios/history": {
+   "get": {
+    "tags": [
+     "Сценарії"
+    ],
+    "summary": "Історія запусків сценаріїв",
+    "description": "Завершені запуски (виконано, зупинено, перервано перезапуском, не стартував), найновіші першими, з усіма кроками: `id`, `name`, `trigger`, `result`, `start`/`end` (Unix-час, `null`, поки годинника не було), `duration_s`, `resumed`, `reason`, `switched`/`skipped`/`failed`, `steps` (`device`, `action`, `state`, `attempts`, `at_s`: коли крок завершився від старту запуску, `detail`). Зберігається на SD (`/runs/history.jsonl` і попередній файл). `more`: є старіші; далі `before=<id останнього>`. `sd: false`: немає картки.",
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": false,
+      "description": "Лише цей сценарій.",
+      "schema": {
+       "type": "string",
+       "pattern": "^[a-z0-9_-]{1,32}$"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "description": "Скільки запусків (1..50, за замовчуванням 20).",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 50
+      }
+     },
+     {
+      "name": "before",
+      "in": "query",
+      "required": false,
+      "description": "Лише запуски, старші за запуск з цим `id` (наступна сторінка).",
+      "schema": {
+       "type": "integer",
+       "minimum": 1
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Запуски.",
+      "content": {
+       "application/json": {
+        "example": {
+         "runs": [
+          {
+           "id": 42,
+           "name": "heaters",
+           "trigger": "manual",
+           "result": "done",
+           "start": 1792231200,
+           "end": 1792236630,
+           "duration_s": 5430,
+           "resumed": "SW at step 2",
+           "switched": 3,
+           "skipped": 0,
+           "failed": 0,
+           "steps": [
+            {
+             "device": "heater1",
+             "action": "on",
+             "state": "ok",
+             "attempts": 1,
+             "at_s": 1,
+             "detail": "switched on; pause 3600 s before the next step"
+            },
+            {
+             "device": "heater2",
+             "action": "on",
+             "state": "ok",
+             "attempts": 1,
+             "at_s": 3602,
+             "detail": "switched on; pause 1800 s before the next step"
+            },
+            {
+             "device": "heater3",
+             "action": "on",
+             "state": "ok",
+             "attempts": 2,
+             "at_s": 5409,
+             "detail": "switched on after 2 attempts"
+            }
+           ]
+          }
+         ],
+         "more": false,
+         "sd": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Недопустимий `name`, `limit` або `before`."
+     },
+     "401": {
+      "description": "Потрібна авторизація."
+     }
+    }
    }
   },
   "/api/openapi.json": {

@@ -65,6 +65,8 @@ struct JobStatus {
   std::string error, detail;
 };
 
+struct Run;
+
 class Env {
  public:
   virtual ~Env() = default;
@@ -72,6 +74,7 @@ class Env {
   virtual bool known(const std::string& scenario) = 0;
   virtual bool def(const std::string& scenario, Def& out) = 0;
   virtual uint32_t nowMs() = 0;
+  virtual uint32_t epoch() = 0;  // Unix time, 0 while the clock is not set
   virtual bool wifiUp() = 0;
   virtual DeviceInfo device(const std::string& name) = 0;
   // Queues a command (On/Off) or a status query for the device in the command lane; 0 = the list is full right now.
@@ -80,11 +83,13 @@ class Env {
   // The engine is done with the job. `withdraw`: it has not finished, drop it if it has not started yet.
   virtual void release(uint32_t job, bool withdraw) = 0;
   virtual void log(bool warn, const std::string& line) = 0;
+  // A run has ended (done, stopped, interrupted, removed before it started): for the history of the runs.
+  virtual void finished(const std::string& scenario, const Run& run) = 0;
 };
 
-enum class RunState : uint8_t { Idle, Skipped, Waiting, Running, Done, Stopped };
+enum class RunState : uint8_t { Idle, Skipped, Waiting, Running, Done, Stopped, Interrupted };
 enum class StepState : uint8_t { Pending, Disabled, Running, Ok, Skipped, Failed, Stopped };
-const char* runStateName(RunState s);    // idle | skipped | waiting | running | done | stopped
+const char* runStateName(RunState s);    // idle | skipped | waiting | running | done | stopped | interrupted
 const char* stepStateName(StepState s);  // pending | disabled | running | ok | skipped | failed | stopped
 
 // Kept small: the text the API shows is put together by stepDetail() when asked for.
@@ -92,6 +97,7 @@ struct StepRun {
   StepState state = StepState::Pending;
   uint8_t attempts = 0;
   uint16_t pauseS = 0;  // a pause after this step was kept (seconds)
+  uint32_t atS = 0;     // when it ended, seconds since the run began (0: not ended)
   std::string why;      // failed: the reason; running after a failed attempt: why that one failed
 };
 
@@ -101,14 +107,16 @@ struct Run {
   // What the API shows.
   RunState state = RunState::Idle;
   std::string trigger;     // what started it: power-on | manual | power-below | power-above
-  std::string skipReason;  // state Skipped
-  std::string waitReason;  // while waiting past the start time: "wifi"
+  std::string skipReason;  // state Skipped / Interrupted: why
+  std::string waitReason;  // while waiting for the network: "wifi"
   uint32_t startAtMs = 0;
   int current = -1;        // the step in progress; -1 in a pause or when none
   std::vector<StepRun> steps;
   bool alive = false;      // started and not finished
   bool stop = false;       // asked to stop
-  bool holdsPowerUp = false;  // started by the power-up and not past the wait for the network yet
+  std::string resumed;     // the restarts this run went through and was continued after: "SW at step 2; PANIC at step 3"
+  uint32_t startEpoch = 0; // Unix time the run began (0 unknown)
+  uint32_t durationS = 0;  // an ended run: how long it went
 
   // The machine.
   Phase phase = Phase::Finished;
@@ -127,6 +135,10 @@ struct Run {
   size_t pauseFrom = 0;          // the step the pause belongs to
   std::string lastWhy;
   unsigned switched = 0, skipped = 0, failed = 0;
+  uint32_t startedMs = 0;        // when it began running in this boot
+  uint32_t carriedMs = 0;        // how long it had been going before a restart it was continued after
+  bool needNet = false;          // continued after a restart: wait for Wi-Fi before the next command
+  bool netGate = false;          // in WaitNet/Settle for that reason (not for the start of a power-up run)
   bool offlineAttempt = false;   // measurement: the monitor counted the device offline when the attempt began
   uint32_t attemptJobMs = 0;     // measurement: time the attempt's jobs held the command lane
 };
@@ -143,6 +155,54 @@ struct Stats {
   uint32_t offlineAttempts = 0, offlineAttemptsOk = 0, offlineAttemptMs = 0;
 };
 
+// One alive run as /runs.json keeps it, to continue it after a restart (see Engine::snapshot/resume).
+struct Snapshot {
+  std::string name, trigger;
+  uint32_t defHash = 0;     // defHash() of the steps the run works with: an edit since means "start again"
+  RunState state = RunState::Waiting;
+  Phase phase = Phase::WaitStart;
+  bool patient = false;
+  uint32_t step = 0;
+  uint8_t attempt = 0;
+  uint32_t leftMs = 0;      // until the deadline of WaitStart / Settle / Pause / Gap
+  uint32_t runMs = 0;       // how long the run had been going
+  uint32_t startEpoch = 0;
+  std::string resumed;
+  Def def;                  // the steps the run works with (empty while it waits for its start)
+  std::vector<StepRun> steps;
+  unsigned switched = 0, skipped = 0, failed = 0;
+};
+
+// FNV-1a over everything in a definition that changes what a run does (devices, actions, enabled, pauses).
+uint32_t defHash(const Def& d);
+
+// ---- what to do with a run that a restart interrupted (on_interrupt) ----------------------------------------------------
+
+enum class Policy : uint8_t { Resume, Restart, Drop };
+enum class Cause : uint8_t { Power, Software, Crash, Brownout };
+const char* policyName(Policy p);  // resume | restart | drop
+bool policyFromName(const std::string& text, Policy& out);
+const char* causeName(Cause c);    // power | software | crash | brownout
+
+struct OnInterrupt {
+  Policy power = Policy::Restart;    // the light went out (POWERON; on the debug board also flashing and RST)
+  Policy software = Policy::Resume;  // a software restart (the Wi-Fi watchdog, "save and restart")
+  Policy crash = Policy::Resume;     // a panic or a watchdog
+  Policy brownout = Policy::Resume;  // the supply of the board sagged
+  uint16_t resumeWithinMin = 120;    // a longer interruption turns "resume" into "restart"
+  Policy of(Cause c) const;
+};
+constexpr uint16_t kMaxResumeWithinMin = 1440;
+
+struct Decision {
+  Policy action = Policy::Restart;
+  std::string why;  // for the log and the history
+};
+// `gapKnown`/`gapS`: how long the board was away (known when the clock was set before and after). `defChanged`: the
+// scenario was edited since the run began. "resume" becomes "restart" when the scenario was edited, when the power went
+// and nobody knows for how long, or when the interruption was longer than resumeWithinMin.
+Decision decide(Cause cause, const OnInterrupt& policy, bool gapKnown, uint32_t gapS, bool defChanged);
+
 // What the API shows for step `i` of a run: "switched on after 2 attempts; pause 30 s before the next step", the reason of a
 // failure, "previous attempt: ..." while retrying, "stopped", ...
 std::string stepDetail(const Run& r, size_t i);
@@ -158,7 +218,8 @@ class Engine {
   enum class StartResult { Started, NotFound, AlreadyRunning };
   // Starts a run at `startAtMs`. A run that is still waiting for its start is started now instead (its trigger becomes
   // `trigger`); one that is running gives AlreadyRunning.
-  StartResult start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool holdsPowerUp = false);
+  // `waitNet`: wait for Wi-Fi before the first command (a run started again after a restart).
+  StartResult start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool waitNet = false);
   enum class StopResult { Stopping, NotFound, NotRunning };
   StopResult stop(const std::string& name);
   // A power_on scenario that does not start (not a power-up): shown as skipped with the reason.
@@ -169,8 +230,16 @@ class Engine {
   // Moves every run on; returns how long the engine may sleep (it is woken earlier on start/stop/setDefs).
   uint32_t tick();
 
+  // The alive runs, to keep in /runs.json. `dirty`: something worth saving changed since the last takeDirty().
+  std::vector<Snapshot> snapshot() const;
+  bool takeDirty();
+  // After a restart: continues the saved run (`elapsedMs` of the interruption are taken off its wait or pause; the step
+  // it was in is done again), after waiting for Wi-Fi. NotFound if the scenario is gone. `cause` goes into Run::resumed.
+  StartResult resume(const Snapshot& s, uint32_t elapsedMs, const std::string& cause);
+  // After a restart: the saved run is not continued. Shown (and recorded in the history) as interrupted with `why`.
+  void interrupted(const Snapshot& s, const std::string& why);
+
   const Run* run(const std::string& name) const;
-  bool holdsPowerUp() const;  // a run of the power-up still waits for the network
   size_t alive() const;
   const Stats& stats() const { return stats_; }
 
@@ -186,11 +255,16 @@ class Engine {
   void stopNow(const std::string& name, Run& r, bool markStep, uint8_t attempts);
   void grantSlots(uint32_t now);
   void dropJob(Run& r, bool withdraw);
+  uint32_t runSeconds(const Run& r, uint32_t now) const;
+  void stepEnded(Run& r, uint32_t now);
+  uint32_t signature() const;
   void logf(bool warn, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
 
   Env& env_;
   std::map<std::string, Run> runs_;  // by scenario name
   Stats stats_;
+  bool dirty_ = false;
+  uint32_t lastSignature_ = 0;
 };
 
 }  // namespace ScenarioEngine

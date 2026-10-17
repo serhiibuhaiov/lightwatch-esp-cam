@@ -304,6 +304,37 @@ void onScenariosPut(AsyncWebServerRequest* req) {
   sendJson(req, 200, out);
 }
 
+// GET /api/scenarios/history[?name=<scenario>][&limit=N][&before=<id>]: the ended runs with their steps, newest first.
+void onScenariosHistory(AsyncWebServerRequest* req) {
+  if (!authorize(req)) return;
+  String name;
+  if (req->hasParam("name")) {
+    name = req->getParam("name")->value();
+    bool ok = !name.isEmpty() && name.length() <= 32;
+    for (size_t i = 0; ok && i < name.length(); ++i) {
+      const char c = name[i];
+      ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    }
+    if (!ok) {
+      sendError(req, 400, "name must be a scenario name (1..32 chars of a-z 0-9 _ -)");
+      return;
+    }
+  }
+  uint64_t limit = 20;
+  if (req->hasParam("limit") && (!parseUnsigned(req->getParam("limit")->value(), 50, limit) || limit < 1)) {
+    sendError(req, 400, "limit must be an integer 1..50");
+    return;
+  }
+  uint64_t before = 0;
+  if (req->hasParam("before") && (!parseUnsigned(req->getParam("before")->value(), 4294967295ULL, before) || before < 1)) {
+    sendError(req, 400, "before must be a run id (1..4294967295)");
+    return;
+  }
+  String out;
+  Scenario::history(name, static_cast<size_t>(limit), static_cast<uint32_t>(before), out);
+  sendJson(req, 200, out);
+}
+
 // POST /api/scenarios/run|stop?name=<scenario>
 void onScenarioRun(AsyncWebServerRequest* req) {
   if (!authorize(req)) return;
@@ -766,6 +797,7 @@ void begin() {
   // /run and /stop first: the library also routes /api/scenarios/... to the /api/scenarios handlers.
   server.on("/api/scenarios/run", HTTP_POST, onScenarioRun);
   server.on("/api/scenarios/stop", HTTP_POST, onScenarioStop);
+  server.on("/api/scenarios/history", HTTP_GET, onScenariosHistory);
   server.on("/api/scenarios", HTTP_GET, onScenariosGet);
   server.on("/api/scenarios", HTTP_PUT, onScenariosPut, nullptr, onConfigBody);
   // The editor routes come first: the library also routes /api/devices/... to the /api/devices handler.

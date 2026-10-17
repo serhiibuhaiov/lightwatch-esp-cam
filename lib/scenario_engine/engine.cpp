@@ -23,6 +23,7 @@ const char* runStateName(RunState s) {
     case RunState::Running: return "running";
     case RunState::Done: return "done";
     case RunState::Stopped: return "stopped";
+    case RunState::Interrupted: return "interrupted";
     default: return "idle";
   }
 }
@@ -49,6 +50,87 @@ void Engine::logf(bool warn, const char* fmt, ...) {
 }
 
 // ---- outside requests ----------------------------------------------------------------------------
+
+// ---- on_interrupt ---------------------------------------------------------------------------------------------------
+
+const char* policyName(Policy p) {
+  switch (p) {
+    case Policy::Resume: return "resume";
+    case Policy::Drop: return "drop";
+    default: return "restart";
+  }
+}
+
+bool policyFromName(const std::string& text, Policy& out) {
+  if (text == "resume") out = Policy::Resume;
+  else if (text == "restart") out = Policy::Restart;
+  else if (text == "drop") out = Policy::Drop;
+  else return false;
+  return true;
+}
+
+const char* causeName(Cause c) {
+  switch (c) {
+    case Cause::Power: return "power";
+    case Cause::Software: return "software";
+    case Cause::Brownout: return "brownout";
+    default: return "crash";
+  }
+}
+
+Policy OnInterrupt::of(Cause c) const {
+  switch (c) {
+    case Cause::Power: return power;
+    case Cause::Software: return software;
+    case Cause::Brownout: return brownout;
+    default: return crash;
+  }
+}
+
+Decision decide(Cause cause, const OnInterrupt& policy, bool gapKnown, uint32_t gapS, bool defChanged) {
+  Decision d;
+  d.action = policy.of(cause);
+  const std::string rule = std::string("on_interrupt.") + causeName(cause) + " = " + policyName(d.action);
+  d.why = rule;
+  if (d.action != Policy::Resume) return d;
+  if (defChanged) {
+    d.action = Policy::Restart;
+    d.why = rule + ", but the scenario was edited since the run began: started again";
+  } else if (!gapKnown && cause == Cause::Power) {
+    d.action = Policy::Restart;
+    d.why = rule + ", but how long the power was off is not known (no clock yet): started again";
+  } else if (gapKnown && gapS > static_cast<uint32_t>(policy.resumeWithinMin) * 60) {
+    d.action = Policy::Restart;
+    d.why = rule + ", but the board was away " + std::to_string(gapS / 60) + " min, longer than resume_within_min " +
+            std::to_string(policy.resumeWithinMin) + ": started again";
+  }
+  return d;
+}
+
+uint32_t defHash(const Def& d) {
+  uint32_t h = 2166136261u;
+  auto mix = [&](uint32_t v) {
+    for (int i = 0; i < 4; ++i) {
+      h ^= (v >> (8 * i)) & 0xff;
+      h *= 16777619u;
+    }
+  };
+  auto mixText = [&](const std::string& s) {
+    for (unsigned char c : s) {
+      h ^= c;
+      h *= 16777619u;
+    }
+    mix(static_cast<uint32_t>(s.size()));
+  };
+  mix(d.defaultPauseS);
+  mix(static_cast<uint32_t>(d.steps.size()));
+  for (size_t i = 0; i < d.steps.size(); ++i) {
+    mixText(d.device(i));
+    mix((d.steps[i].on ? 1u : 0u) | (d.steps[i].enabled ? 2u : 0u));
+    mix(static_cast<uint32_t>(d.steps[i].pauseAfterS));
+  }
+  return h;
+}
 
 std::string stepDetail(const Run& r, size_t i) {
   if (i >= r.steps.size()) return std::string();
@@ -82,7 +164,7 @@ void Engine::defsChanged() {
   }
 }
 
-Engine::StartResult Engine::start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool holdsPowerUp) {
+Engine::StartResult Engine::start(const std::string& name, const std::string& trigger, uint32_t startAtMs, bool waitNet) {
   if (!env_.known(name)) return StartResult::NotFound;
   auto it = runs_.find(name);
   if (it != runs_.end() && it->second.alive) {
@@ -101,9 +183,10 @@ Engine::StartResult Engine::start(const std::string& name, const std::string& tr
   r.trigger = trigger;
   r.startAtMs = startAtMs;
   r.alive = true;
-  r.holdsPowerUp = holdsPowerUp;
+  r.needNet = waitNet;
   r.phase = Phase::WaitStart;
-  if (!holdsPowerUp) logf(false, "[%s] start requested (%s)", name.c_str(), trigger.c_str());
+  dirty_ = true;
+  if (trigger != "power-on") logf(false, "[%s] start requested (%s)", name.c_str(), trigger.c_str());
   return StartResult::Started;
 }
 
@@ -133,13 +216,6 @@ const Run* Engine::run(const std::string& name) const {
   return it == runs_.end() ? nullptr : &it->second;
 }
 
-bool Engine::holdsPowerUp() const {
-  for (const auto& kv : runs_) {
-    if (kv.second.holdsPowerUp) return true;
-  }
-  return false;
-}
-
 size_t Engine::alive() const {
   size_t n = 0;
   for (const auto& kv : runs_) n += kv.second.alive ? 1 : 0;
@@ -154,6 +230,11 @@ uint32_t Engine::tick() {
     if (kv.second.alive) advance(kv.first, kv.second, now);
   }
   grantSlots(now);
+  const uint32_t sig = signature();
+  if (sig != lastSignature_) {
+    lastSignature_ = sig;
+    dirty_ = true;
+  }
 
   uint32_t sleep = kIdleTickMs;
   for (const auto& kv : runs_) {
@@ -199,7 +280,7 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
           finish(name, r, RunState::Stopped);
           return;
         }
-        if (r.trigger != "power-on") {  // started by hand meanwhile: no more waiting
+        if (!r.netGate && r.trigger != "power-on") {  // started by hand meanwhile: no more waiting
           beginRunning(name, r, now);
           continue;
         }
@@ -211,6 +292,12 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
           return;
         }
         if (!due(now, r.deadlineMs)) return;
+        if (r.netGate) {  // a run continued after a restart: on with its steps
+          r.netGate = false;
+          r.waitReason.clear();
+          r.phase = Phase::NextStep;
+          continue;
+        }
         beginRunning(name, r, now);
         continue;
 
@@ -295,9 +382,10 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
 }
 
 void Engine::beginRunning(const std::string& name, Run& r, uint32_t now) {
-  (void)now;
-  r.holdsPowerUp = false;
   r.waitReason.clear();
+  r.startedMs = now;
+  r.carriedMs = 0;
+  r.startEpoch = env_.epoch();
   Def def;
   if (!env_.def(name, def)) {
     logf(true, "[%s] removed before it started", name.c_str());
@@ -343,6 +431,17 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
     stopNow(name, r, true, 0);
     return;
   }
+  if (r.needNet) {  // continued after a restart: the next command needs the network
+    r.needNet = false;
+    if (!env_.wifiUp()) {
+      logf(false, "[%s] waiting for Wi-Fi before step %u", name.c_str(), static_cast<unsigned>(r.step + 1));
+      r.netGate = true;
+      r.waitReason = "wifi";
+      r.current = -1;
+      r.phase = Phase::WaitNet;
+      return;
+    }
+  }
   r.current = static_cast<int>(r.step);
   const std::string& device = r.def.device(r.step);
   const DeviceInfo d = env_.device(device);
@@ -351,6 +450,7 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
     sr.state = StepState::Failed;
     sr.attempts = 0;
     sr.why = "no such device in /devices.json";
+    stepEnded(r, now);
     logf(true, "[%s] step %u: no device '%s' in /devices.json", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str());
     ++r.failed;
     ++r.step;
@@ -359,6 +459,7 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
   if (d.ignored) {
     sr.state = StepState::Skipped;
     sr.attempts = 0;
+    stepEnded(r, now);
     logf(false, "[%s] step %u: %s is ignored, skipped", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str());
     ++r.skipped;
     ++r.step;
@@ -414,6 +515,7 @@ void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const 
   sr.state = StepState::Failed;
   sr.attempts = r.attempt;
   sr.why = r.lastWhy;
+  stepEnded(r, now);
   logf(true, "[%s] step %u: %s FAILED after %u attempts, going on", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str(),
        static_cast<unsigned>(r.attempt));
   ++r.failed;
@@ -422,13 +524,13 @@ void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const 
 }
 
 void Engine::attemptSucceeded(const std::string& name, Run& r, uint32_t now) {
-  (void)now;
   endAttemptMeasurement(r, true);
   const StepDef& st = r.def.steps[r.step];
   StepRun& sr = r.steps[r.step];
   sr.state = StepState::Ok;
   sr.attempts = r.attempt;
   sr.why.clear();
+  stepEnded(r, now);
   logf(false, "[%s] step %u: %s is %s (attempt %u)", name.c_str(), static_cast<unsigned>(r.step + 1), r.def.device(r.step).c_str(), verb(st.on),
        static_cast<unsigned>(r.attempt));
   ++r.switched;
@@ -445,19 +547,27 @@ void Engine::stopNow(const std::string& name, Run& r, bool markStep, uint8_t att
     sr.state = StepState::Stopped;
     sr.attempts = attempts;
     sr.why.clear();
+    stepEnded(r, env_.nowMs());
   }
   finish(name, r, RunState::Stopped);
 }
 
 void Engine::finish(const std::string& name, Run& r, RunState state) {
   const bool ran = r.state == RunState::Running;
+  r.durationS = ran ? runSeconds(r, env_.nowMs()) : 0;
+  if (ran && r.startEpoch == 0) {  // the clock came later: count back
+    const uint32_t e = env_.epoch();
+    if (e > r.durationS) r.startEpoch = e - r.durationS;
+  }
   r.state = state;
   r.current = -1;
   r.alive = false;
   r.phase = Phase::Finished;
   r.wantsSlot = false;
-  r.holdsPowerUp = false;
+  r.needNet = r.netGate = false;
   r.waitReason.clear();
+  dirty_ = true;
+  env_.finished(name, r);
   if (ran) {
     logf(false, "[%s] %s: %u switched, %u skipped, %u failed", name.c_str(), state == RunState::Stopped ? "stopped" : "finished", r.switched,
          r.skipped, r.failed);
@@ -509,6 +619,152 @@ void Engine::grantSlots(uint32_t now) {
     stats_.maxInFlightSeen = std::max(stats_.maxInFlightSeen, stats_.inFlight);
     if (r.slotWaitCounted) stats_.slotWaitMaxMs = std::max(stats_.slotWaitMaxMs, now - r.askedMs);
   }
+}
+
+uint32_t Engine::runSeconds(const Run& r, uint32_t now) const { return (r.carriedMs + (now - r.startedMs)) / 1000; }
+
+void Engine::stepEnded(Run& r, uint32_t now) {
+  if (r.step < r.steps.size()) r.steps[r.step].atS = std::max<uint32_t>(1, runSeconds(r, now));
+}
+
+// Changes when something worth saving in /runs.json changes (a phase, a step, an attempt, a run starting or ending).
+uint32_t Engine::signature() const {
+  uint32_t h = 2166136261u;
+  for (const auto& kv : runs_) {
+    const Run& r = kv.second;
+    const uint32_t v = (r.alive ? 1u : 0u) | (static_cast<uint32_t>(r.phase) << 1) | (static_cast<uint32_t>(r.step) << 5) |
+                       (static_cast<uint32_t>(r.attempt) << 13) | (static_cast<uint32_t>(r.state) << 21);
+    h = (h ^ v) * 16777619u;
+  }
+  return h;
+}
+
+bool Engine::takeDirty() {
+  const bool d = dirty_;
+  dirty_ = false;
+  return d;
+}
+
+std::vector<Snapshot> Engine::snapshot() const {
+  const uint32_t now = env_.nowMs();
+  std::vector<Snapshot> out;
+  for (const auto& kv : runs_) {
+    const Run& r = kv.second;
+    if (!r.alive) continue;
+    Snapshot s;
+    s.name = kv.first;
+    s.trigger = r.trigger;
+    s.state = r.state;
+    s.phase = r.phase;
+    s.patient = r.patient;
+    s.step = static_cast<uint32_t>(r.step);
+    s.attempt = r.attempt;
+    switch (r.phase) {
+      case Phase::WaitStart: s.leftMs = until(now, r.startAtMs); break;
+      case Phase::Settle:
+      case Phase::Pause:
+      case Phase::Gap: s.leftMs = until(now, r.deadlineMs); break;
+      default: break;
+    }
+    if (r.state == RunState::Running) {
+      s.runMs = r.carriedMs + (now - r.startedMs);
+      s.def = r.def;
+      s.defHash = defHash(r.def);
+    }
+    s.startEpoch = r.startEpoch;
+    s.resumed = r.resumed;
+    s.steps = r.steps;
+    s.switched = r.switched;
+    s.skipped = r.skipped;
+    s.failed = r.failed;
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
+Engine::StartResult Engine::resume(const Snapshot& s, uint32_t elapsedMs, const std::string& cause) {
+  if (!env_.known(s.name)) return StartResult::NotFound;
+  auto it = runs_.find(s.name);
+  if (it != runs_.end() && it->second.alive) return StartResult::AlreadyRunning;
+  const uint32_t now = env_.nowMs();
+  auto left = [&](uint32_t ms) { return ms > elapsedMs ? ms - elapsedMs : 0; };
+  Run& r = runs_[s.name];
+  r = Run();
+  r.alive = true;
+  r.trigger = s.trigger;
+  r.patient = s.patient;
+  r.startEpoch = s.startEpoch;
+  if (s.state == RunState::Running) {
+    Def def;
+    if (!env_.def(s.name, def)) {
+      runs_.erase(s.name);
+      return StartResult::NotFound;
+    }
+    r.def = std::move(def);
+    r.state = RunState::Running;
+    r.steps = s.steps;
+    r.steps.resize(r.def.steps.size());
+    r.step = std::min<size_t>(s.step, r.def.steps.size());
+    r.switched = s.switched;
+    r.skipped = s.skipped;
+    r.failed = s.failed;
+    r.startedMs = now;
+    r.carriedMs = s.runMs + elapsedMs;
+    r.needNet = true;
+    const std::string at = cause + " at step " + std::to_string(r.step + 1);
+    r.resumed = s.resumed.empty() ? at : s.resumed + "; " + at;
+    if (s.phase == Phase::Pause) {
+      r.phase = Phase::Pause;
+      r.deadlineMs = now + left(s.leftMs);
+      r.current = -1;
+      logf(false, "[%s] continued after a restart (%s): %u s of the pause left", s.name.c_str(), cause.c_str(),
+           static_cast<unsigned>(left(s.leftMs) / 1000));
+    } else {
+      r.phase = Phase::NextStep;
+      if (r.step < r.steps.size() && (r.steps[r.step].state == StepState::Running || r.steps[r.step].state == StepState::Pending)) {
+        StepRun& sr = r.steps[r.step];  // the step it was in is done again
+        sr.state = StepState::Pending;
+        sr.attempts = 0;
+        sr.why.clear();
+      }
+      logf(false, "[%s] continued after a restart (%s) at step %u", s.name.c_str(), cause.c_str(), static_cast<unsigned>(r.step + 1));
+    }
+  } else {  // it was waiting for its start (or for Wi-Fi before it): it waits again
+    r.state = RunState::Waiting;
+    r.phase = Phase::WaitStart;
+    r.startAtMs = now + (s.phase == Phase::WaitStart ? left(s.leftMs) : 0);
+    r.resumed = s.resumed.empty() ? cause + " while waiting" : s.resumed + "; " + cause + " while waiting";
+    logf(false, "[%s] continued after a restart (%s): waits for its start", s.name.c_str(), cause.c_str());
+  }
+  dirty_ = true;
+  return StartResult::Started;
+}
+
+void Engine::interrupted(const Snapshot& s, const std::string& why) {
+  Run& r = runs_[s.name];
+  r = Run();
+  r.state = RunState::Interrupted;
+  r.trigger = s.trigger;
+  r.skipReason = why;
+  r.def = s.def;
+  r.steps = s.steps;
+  r.steps.resize(r.def.steps.size());
+  for (StepRun& sr : r.steps) {
+    if (sr.state == StepState::Running) {
+      sr.state = StepState::Stopped;
+      sr.why.clear();
+    }
+  }
+  r.switched = s.switched;
+  r.skipped = s.skipped;
+  r.failed = s.failed;
+  r.startEpoch = s.startEpoch;
+  r.resumed = s.resumed;
+  r.durationS = s.runMs / 1000;
+  r.phase = Phase::Finished;
+  logf(true, "[%s] %s", s.name.c_str(), why.c_str());  // `why` says it all: "interrupted by a restart (SW): ..."
+  env_.finished(s.name, r);
+  dirty_ = true;
 }
 
 }  // namespace ScenarioEngine

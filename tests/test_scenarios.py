@@ -23,11 +23,13 @@ def listing(dev):
 
 
 def editable(sc):
-    """A scenario as PUT wants it (no runtime fields; `when` of a power rule kept, its live `watch` dropped)."""
+    """A scenario as PUT wants it (no runtime fields; `when` of a power rule and `on_interrupt` kept, the live `watch` dropped)."""
     out = {"name": sc["name"], "enabled": sc["enabled"], "trigger": sc["trigger"], "default_pause_s": sc["default_pause_s"],
            "steps": [{k: v for k, v in st.items() if not (k == "pause_after_s" and v is None)} for st in sc["steps"]]}
     if "when" in sc:
         out["when"] = sc["when"]
+    if "on_interrupt" in sc:
+        out["on_interrupt"] = sc["on_interrupt"]
     return out
 
 

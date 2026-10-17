@@ -53,6 +53,15 @@ class FakeEnv : public Env {
     return true;
   }
   uint32_t nowMs() override { return now; }
+  uint32_t epochNow = 0;  // 0: the clock is not set
+  uint32_t epoch() override { return epochNow ? epochNow + (now - epochAtMs) / 1000 : 0; }
+  uint32_t epochAtMs = 0;
+  void setClock(uint32_t unix) {
+    epochNow = unix;
+    epochAtMs = now;
+  }
+  std::vector<std::pair<std::string, Run>> history;  // every run that ended, as the engine reported it
+  void finished(const std::string& name, const Run& r) override { history.emplace_back(name, r); }
   bool wifiUp() override { return wifi; }
   DeviceInfo device(const std::string& name) override {
     DeviceInfo d;
@@ -356,18 +365,14 @@ void test_a_power_up_run_waits_for_wifi_as_long_as_it_takes_then_settles() {
   env->devices["a"] = FakeDevice();
   env->wifi = false;
   setDefs({def("p", {step("a")})});
-  eng->start("p", "power-on", env->now + 45000, true);
-  TEST_ASSERT_TRUE(eng->holdsPowerUp());
+  eng->start("p", "power-on", env->now + 45000);
   runFor(3 * 3600 * 1000);  // three hours without Wi-Fi
   assertState(RunState::Waiting, "p");
   TEST_ASSERT_EQUAL_STRING("wifi", R("p").waitReason.c_str());
-  TEST_ASSERT_TRUE(eng->holdsPowerUp());
   env->wifi = true;
   runFor(9000);
   assertState(RunState::Waiting, "p");  // 10 s for the sockets
-  runFor(3000);
-  TEST_ASSERT_FALSE(eng->holdsPowerUp());
-  runFor(3000);
+  runFor(6000);
   assertState(RunState::Done, "p");
 }
 
@@ -375,7 +380,7 @@ void test_a_power_up_run_keeps_trying_a_step_for_90_s() {
   env->devices["a"].dead = true;
   env->devices["a"].offline = true;
   setDefs({def("p", {step("a")})});
-  eng->start("p", "power-on", env->now, true);
+  eng->start("p", "power-on", env->now);
   runFor(60000);
   assertState(RunState::Running, "p");
   runFor(40000);
@@ -392,12 +397,11 @@ void test_starting_a_waiting_power_up_run_by_hand_skips_the_waits() {
   env->devices["a"] = FakeDevice();
   env->wifi = false;
   setDefs({def("p", {step("a")})});
-  eng->start("p", "power-on", env->now + 45000, true);
+  eng->start("p", "power-on", env->now + 45000);
   runFor(50000);
   TEST_ASSERT_TRUE(eng->start("p", "manual", env->now) == Engine::StartResult::Started);
   runFor(5000);
   TEST_ASSERT_EQUAL_STRING("manual", R("p").trigger.c_str());
-  TEST_ASSERT_FALSE(eng->holdsPowerUp());
   TEST_ASSERT_TRUE(R("p").state == RunState::Running || R("p").state == RunState::Done);
 }
 
@@ -435,6 +439,193 @@ void test_a_scenario_removed_while_its_run_is_alive_is_stopped() {
   TEST_ASSERT_TRUE(eng->start("s", "manual", env->now) == Engine::StartResult::NotFound);
 }
 
+
+// ---- after a restart: on_interrupt, snapshot and resume ------------------------------------------------------------
+
+// The board restarts: a new engine, the Tuya jobs are gone, time goes on by `awayMs`.
+void reboot(uint32_t awayMs) {
+  delete eng;
+  env->jobs.clear();
+  env->now += awayMs;
+  env->laneFreeMs = env->now;
+  eng = new Engine(*env);
+}
+
+void test_decide_turns_resume_into_restart_when_it_would_be_wrong() {
+  OnInterrupt p;  // the defaults: power restart, the rest resume, 120 min
+  TEST_ASSERT_TRUE(decide(Cause::Software, p, true, 60, false).action == Policy::Resume);
+  TEST_ASSERT_TRUE(decide(Cause::Crash, p, false, 0, false).action == Policy::Resume);     // unknown gap: taken as short
+  TEST_ASSERT_TRUE(decide(Cause::Brownout, p, true, 7200, false).action == Policy::Resume); // exactly 120 min
+  TEST_ASSERT_TRUE(decide(Cause::Brownout, p, true, 7201, false).action == Policy::Restart);
+  TEST_ASSERT_TRUE(decide(Cause::Software, p, true, 60, true).action == Policy::Restart);   // edited meanwhile
+  TEST_ASSERT_TRUE(decide(Cause::Power, p, true, 60, false).action == Policy::Restart);    // the default for power
+  p.power = Policy::Resume;
+  TEST_ASSERT_TRUE(decide(Cause::Power, p, true, 60, false).action == Policy::Resume);
+  const Decision d = decide(Cause::Power, p, false, 0, false);  // no clock: nobody knows how long the light was off
+  TEST_ASSERT_TRUE(d.action == Policy::Restart);
+  TEST_ASSERT_TRUE(contains(d.why, "not known"));
+  p.software = Policy::Drop;
+  TEST_ASSERT_TRUE(decide(Cause::Software, p, true, 60, true).action == Policy::Drop);  // drop stays drop
+  Policy x;
+  TEST_ASSERT_TRUE(policyFromName("resume", x) && x == Policy::Resume);
+  TEST_ASSERT_FALSE(policyFromName("Resume", x));
+}
+
+void test_a_run_in_an_hour_long_pause_continues_with_what_is_left_of_it() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 3600), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(10 * 60 * 1000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  TEST_ASSERT_EQUAL(1, saved.size());
+  TEST_ASSERT_TRUE(saved[0].phase == Phase::Pause);
+  TEST_ASSERT_TRUE(saved[0].leftMs > 2995000 && saved[0].leftMs <= 3005000);  // 3600 s from ~1 s, 600 s later
+  TEST_ASSERT_EQUAL_UINT32(defHash(env->defs["s"]), saved[0].defHash);
+
+  reboot(5 * 60 * 1000);  // away for 5 minutes
+  TEST_ASSERT_TRUE(eng->resume(saved[0], 5 * 60 * 1000, "SW") == Engine::StartResult::Started);
+  runFor(50);
+  assertState(RunState::Running, "s");
+  assertStep(StepState::Ok, "s", 0);
+  TEST_ASSERT_EQUAL_STRING("SW at step 2", R("s").resumed.c_str());
+  runFor(2650 * 1000);
+  assertStep(StepState::Pending, "s", 1);  // 10 + 5 + 44 min: not yet
+  runFor(60 * 1000);
+  assertState(RunState::Done, "s");
+  TEST_ASSERT_FALSE(env->devices["a"].relay);
+  // The history: one record, with the whole time (before, away and after) and the step times on that scale.
+  TEST_ASSERT_EQUAL(1, env->history.size());
+  const Run& h = env->history[0].second;
+  TEST_ASSERT_TRUE(h.state == RunState::Done);
+  TEST_ASSERT_TRUE(h.durationS >= 3601 && h.durationS <= 3610);
+  TEST_ASSERT_TRUE(h.steps[0].atS >= 1 && h.steps[0].atS <= 2);
+  TEST_ASSERT_TRUE(h.steps[1].atS >= 3601 && h.steps[1].atS <= 3610);
+  TEST_ASSERT_EQUAL_STRING("SW at step 2", h.resumed.c_str());
+}
+
+void test_the_step_a_restart_cut_is_done_again() {
+  env->devices["a"] = FakeDevice();
+  env->laneFreeMs = env->now + 5000;  // the lane is busy: the command is still queued
+  setDefs({def("s", {step("a")})});
+  eng->start("s", "manual", env->now);
+  runFor(1000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  TEST_ASSERT_TRUE(saved[0].phase == Phase::Command);
+  reboot(2000);
+  eng->resume(saved[0], 2000, "PANIC");
+  runFor(3000);
+  assertState(RunState::Done, "s");
+  assertStep(StepState::Ok, "s", 0);
+  TEST_ASSERT_EQUAL_UINT8(1, R("s").steps[0].attempts);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+}
+
+void test_a_continued_run_waits_for_wifi_before_its_next_command() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 60), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(5000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  reboot(1000);
+  env->wifi = false;
+  eng->resume(saved[0], 1000, "BROWNOUT");
+  runFor(70000);  // the pause is over: step 2 waits for the network
+  assertState(RunState::Running, "s");
+  TEST_ASSERT_EQUAL_STRING("wifi", R("s").waitReason.c_str());
+  assertStep(StepState::Pending, "s", 1);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+  env->wifi = true;
+  runFor(9000);
+  assertStep(StepState::Pending, "s", 1);  // 10 s for the sockets after the network came
+  runFor(3000);
+  assertState(RunState::Done, "s");
+  TEST_ASSERT_FALSE(env->devices["a"].relay);
+}
+
+void test_a_run_waiting_for_its_start_keeps_the_rest_of_the_delay() {
+  env->devices["a"] = FakeDevice();
+  env->wifi = false;
+  setDefs({def("p", {step("a")})});
+  eng->start("p", "power-on", env->now + 45000);
+  runFor(20000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  TEST_ASSERT_TRUE(saved[0].state == RunState::Waiting && saved[0].defHash == 0);
+  reboot(5000);
+  eng->resume(saved[0], 5000, "SW");
+  runFor(1000);
+  assertState(RunState::Waiting, "p");
+  TEST_ASSERT_TRUE(R("p").startAtMs - env->now <= 20000 && R("p").startAtMs - env->now > 18000);
+  env->wifi = true;
+  runFor(40000);
+  assertState(RunState::Done, "p");
+  TEST_ASSERT_EQUAL_STRING("SW while waiting", R("p").resumed.c_str());
+}
+
+void test_a_run_not_continued_is_shown_and_recorded_as_interrupted() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 600), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(5000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  reboot(1000);
+  eng->interrupted(saved[0], "on_interrupt.software = drop");
+  assertState(RunState::Interrupted, "s");
+  TEST_ASSERT_FALSE(R("s").alive);
+  TEST_ASSERT_EQUAL_STRING("on_interrupt.software = drop", R("s").skipReason.c_str());
+  assertStep(StepState::Ok, "s", 0);
+  assertStep(StepState::Pending, "s", 1);
+  TEST_ASSERT_EQUAL(1, env->history.size());
+  TEST_ASSERT_TRUE(env->history[0].second.state == RunState::Interrupted);
+  TEST_ASSERT_EQUAL(0, eng->snapshot().size());
+  TEST_ASSERT_TRUE(eng->start("s", "manual", env->now) == Engine::StartResult::Started);  // a new run is fine
+}
+
+void test_a_run_whose_scenario_is_gone_cannot_be_continued() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 600), step("a", false)})});
+  eng->start("s", "manual", env->now);
+  runFor(3000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  TEST_ASSERT_EQUAL(1, saved.size());
+  reboot(1000);
+  setDefs({});
+  TEST_ASSERT_TRUE(eng->resume(saved[0], 1000, "SW") == Engine::StartResult::NotFound);
+  TEST_ASSERT_NULL(eng->run("s"));
+}
+
+void test_dirty_marks_what_is_worth_saving_and_the_history_gets_every_end() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 30), step("a")}), def("w", {step("a")})});
+  TEST_ASSERT_FALSE(eng->takeDirty());
+  eng->start("s", "manual", env->now);
+  TEST_ASSERT_TRUE(eng->takeDirty());
+  TEST_ASSERT_FALSE(eng->takeDirty());
+  runFor(3000);  // step 1 done, in the pause
+  TEST_ASSERT_TRUE(eng->takeDirty());
+  runFor(10000);  // nothing happens in the pause
+  TEST_ASSERT_FALSE(eng->takeDirty());
+  eng->start("w", "manual", env->now + 60000);
+  eng->stop("w");  // stopped while waiting: an end too
+  runFor(40000);
+  TEST_ASSERT_TRUE(eng->takeDirty());
+  TEST_ASSERT_EQUAL(2, env->history.size());
+  TEST_ASSERT_EQUAL_STRING("w", env->history[0].first.c_str());
+  TEST_ASSERT_TRUE(env->history[0].second.state == RunState::Stopped);
+  TEST_ASSERT_TRUE(env->history[1].second.state == RunState::Done);
+}
+
+void test_the_start_time_is_counted_back_when_the_clock_comes_later() {
+  env->devices["a"] = FakeDevice();
+  setDefs({def("s", {step("a", true, 100), step("a")})});
+  eng->start("s", "manual", env->now);
+  runFor(50000);
+  env->setClock(1800000000);  // NTP, 50 s into the run
+  runFor(60000);
+  assertState(RunState::Done, "s");
+  const Run& h = env->history.back().second;
+  TEST_ASSERT_TRUE(h.startEpoch >= 1800000000 - 51 && h.startEpoch <= 1800000000 - 49);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
@@ -452,5 +643,14 @@ int main(int, char**) {
   RUN_TEST(test_starting_a_waiting_power_up_run_by_hand_skips_the_waits);
   RUN_TEST(test_an_edit_while_waiting_counts_a_running_run_keeps_its_steps);
   RUN_TEST(test_a_scenario_removed_while_its_run_is_alive_is_stopped);
+  RUN_TEST(test_decide_turns_resume_into_restart_when_it_would_be_wrong);
+  RUN_TEST(test_a_run_in_an_hour_long_pause_continues_with_what_is_left_of_it);
+  RUN_TEST(test_the_step_a_restart_cut_is_done_again);
+  RUN_TEST(test_a_continued_run_waits_for_wifi_before_its_next_command);
+  RUN_TEST(test_a_run_waiting_for_its_start_keeps_the_rest_of_the_delay);
+  RUN_TEST(test_a_run_not_continued_is_shown_and_recorded_as_interrupted);
+  RUN_TEST(test_a_run_whose_scenario_is_gone_cannot_be_continued);
+  RUN_TEST(test_dirty_marks_what_is_worth_saving_and_the_history_gets_every_end);
+  RUN_TEST(test_the_start_time_is_counted_back_when_the_clock_comes_later);
   return UNITY_END();
 }
