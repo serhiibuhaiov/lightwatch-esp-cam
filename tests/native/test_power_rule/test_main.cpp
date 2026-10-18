@@ -167,6 +167,38 @@ void test_a_gap_longer_than_two_and_a_half_intervals_breaks_the_run() {
   TEST_ASSERT_EQUAL_UINT32(71 * kInterval + 37, below(s, 100, 10, 0, 73).runS);
 }
 
+// A monitor slower than its interval (40 s between the polls of this device, 15 s configured): the tolerance follows the
+// real step, so the rule works instead of seeing every gap as a missed poll.
+void test_a_slow_monitor_widens_the_tolerance_to_its_real_step() {
+  std::vector<Sample> s;
+  for (uint32_t i = 0; i < 20; ++i) s.push_back(on(i * 40, 300));
+  TEST_ASSERT_EQUAL_UINT32(40, PowerRule::pollStep(s, kInterval));
+  const PowerRule::Result r = below(s, 100, 600, 0);
+  TEST_ASSERT_TRUE(r.met);
+  TEST_ASSERT_EQUAL_UINT32(19 * 40, r.runS);
+  // stale only after 2.5 real steps
+  assertReason("met", PowerRule::evaluate(s, kCap, s.back().t + 99, kInterval, true, 100, 600, 0));
+  assertReason("stale", PowerRule::evaluate(s, kCap, s.back().t + 101, kInterval, true, 100, 600, 0));
+  // one missed poll (80 s) is tolerated, two (120 s) are not
+  s.push_back(on(s.back().t + 80, 300));
+  TEST_ASSERT_EQUAL_UINT32(19 * 40 + 80, below(s, 100, 600, 0).runS);
+  s.push_back(on(s.back().t + 120, 300));
+  TEST_ASSERT_EQUAL_UINT32(0, below(s, 100, 600, 0).runS);
+}
+
+void test_the_poll_step_is_never_below_the_interval_and_ignores_one_late_poll() {
+  std::vector<Sample> s;
+  for (uint32_t i = 0; i < 5; ++i) s.push_back(on(i * 5, 300));  // faster than configured: the interval stays
+  TEST_ASSERT_EQUAL_UINT32(kInterval, PowerRule::pollStep(s, kInterval));
+  s.clear();
+  addOn(s, 0, 10, 300);
+  s.push_back(on(s.back().t + 60, 300));  // one late poll among regular ones
+  TEST_ASSERT_EQUAL_UINT32(kInterval, PowerRule::pollStep(s, kInterval));
+  s.resize(2);  // too few samples to tell: the interval
+  s[1].t = 100;
+  TEST_ASSERT_EQUAL_UINT32(kInterval, PowerRule::pollStep(s, kInterval));
+}
+
 void test_after_a_restart_only_a_false_condition_arms_a_fired_rule() {
   TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart("not-met"));
   TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart("relay-off"));
@@ -197,6 +229,8 @@ int main(int, char**) {
   RUN_TEST(test_a_full_ring_needs_no_warm_up);
   RUN_TEST(test_a_failed_answer_restarts_the_count);
   RUN_TEST(test_a_gap_longer_than_two_and_a_half_intervals_breaks_the_run);
+  RUN_TEST(test_a_slow_monitor_widens_the_tolerance_to_its_real_step);
+  RUN_TEST(test_the_poll_step_is_never_below_the_interval_and_ignores_one_late_poll);
   RUN_TEST(test_after_a_restart_only_a_false_condition_arms_a_fired_rule);
   return UNITY_END();
 }

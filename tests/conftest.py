@@ -118,7 +118,7 @@ def device_list(dev):
     r = dev.get("/api/devices/config")
     assert r.status_code == 200, r.text
     return [{"name": d["name"], "ip": d["ip"], "version": d["version"], "dp": d["dp"], "ignore": d.get("ignore", False),
-             "keep_connected": d.get("keep_connected", False), "meters": {k: v for k, v in d["meters"].items() if v is not None}} for d in r.json()["devices"]]
+             "keep_connected": d.get("keep_connected", False), "updatedps": d.get("updatedps", True), "meters": {k: v for k, v in d["meters"].items() if v is not None}} for d in r.json()["devices"]]
 
 
 def put_devices(dev, devices):

@@ -8,8 +8,9 @@
 // for 3.5) before it is used, and the retcode of the device is checked.
 //
 // A device with Target::keep (keep_connected in devices.json) instead gets one connection that stays open: every
-// operation of both lanes goes over it, and the monitor's worker sends a heartbeat when it was idle for
-// kHeartbeatIdleMs. Some sockets misbehave under a new connection and handshake every few seconds (the boiler socket
+// operation of both lanes goes over it, and a task of its own ("tuya_hb", every 0.5 s) sends a heartbeat on it when it
+// was idle for kHeartbeatIdleMs and waits kHeartbeatTimeoutMs for the answer (none: the connection is closed; only polls
+// and commands connect). Some sockets misbehave under a new connection and handshake every few seconds (the boiler socket
 // switched itself off while it was polled that way, and never while it was not polled).
 //
 // Blocking: an operation takes up to `timeoutMs` plus the connect time. Never call
@@ -124,8 +125,10 @@ uint32_t connections(const String& ip);
 // have keep_connected). A connection in use right now is closed at the next call.
 void keepOnly(const std::vector<String>& ips);
 
-// A kept connection idle for this long gets a heartbeat (HEART_BEAT 0x09, empty body), like TinyTuya and localtuya do.
-constexpr uint32_t kHeartbeatIdleMs = 10000;
+// A kept connection idle for this long gets a heartbeat (HEART_BEAT 0x09, empty body), like TinyTuya and localtuya do
+// (they send one every 10-12 s); its answer is awaited this long.
+constexpr uint32_t kHeartbeatIdleMs = 5000;
+constexpr uint32_t kHeartbeatTimeoutMs = 2000;
 
 // Starts the two worker tasks. Call once from setup().
 void begin();

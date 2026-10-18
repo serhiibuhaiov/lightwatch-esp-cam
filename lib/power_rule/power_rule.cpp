@@ -5,6 +5,16 @@
 
 namespace PowerRule {
 
+uint32_t pollStep(const std::vector<Sample>& s, uint32_t intervalS) {
+  constexpr size_t kGaps = 8;
+  if (s.size() < 3) return intervalS;
+  uint32_t gaps[kGaps];
+  const size_t n = std::min(s.size() - 1, kGaps);
+  for (size_t i = 0; i < n; ++i) gaps[i] = s[s.size() - 1 - i].t - s[s.size() - 2 - i].t;
+  std::nth_element(gaps, gaps + n / 2, gaps + n);
+  return std::max(intervalS, gaps[n / 2]);
+}
+
 Result evaluate(const std::vector<Sample>& s, size_t capacity, uint32_t now, uint32_t intervalS, bool below, uint32_t watts,
                 uint32_t forS, uint32_t warmupS) {
   Result pc;
@@ -12,7 +22,7 @@ Result evaluate(const std::vector<Sample>& s, size_t capacity, uint32_t now, uin
     pc.reason = "no-data";
     return pc;
   }
-  const uint32_t maxGap = std::max<uint32_t>(20, intervalS * 5 / 2);  // one missed poll is tolerated, two are not
+  const uint32_t maxGap = std::max<uint32_t>(20, pollStep(s, intervalS) * 5 / 2);  // one missed poll is tolerated, two are not
   const Sample& last = s.back();
   if (now - last.t > maxGap) {
     pc.reason = "stale";

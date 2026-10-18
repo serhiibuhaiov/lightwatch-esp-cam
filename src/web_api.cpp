@@ -286,6 +286,15 @@ void onStatus(AsyncWebServerRequest* req) {
       c["busy"] = ts.busy[i];
     }
   }
+  {
+    // The device monitor: a cycle over all the devices longer than the interval polls each of them less often.
+    JsonObject m = doc["monitor"].to<JsonObject>();
+    uint32_t lastMs = 0, maxMs = 0;
+    Devices::monitorCycle(lastMs, maxMs);
+    m["interval_s"] = Devices::pollIntervalSec();
+    m["last_cycle_ms"] = lastMs;
+    m["max_cycle_ms"] = maxMs;
+  }
   Scenario::summary(doc["scenarios"].to<JsonArray>());  // name, trigger, state, progress of every scenario
   Scenario::engineStats(doc["scenario_engine"].to<JsonObject>());
 
@@ -501,6 +510,7 @@ JsonDocument devicesSummary() {
     o["key_set"] = true;  // the key itself is never sent
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
+    o["updatedps"] = d.updatedps;
     JsonObject meters = o["meters"].to<JsonObject>();  // data points of the readings, null = standard number
     for (const auto& m : {std::make_pair("power", d.dpPower), std::make_pair("current", d.dpCurrent),
                           std::make_pair("voltage", d.dpVoltage), std::make_pair("energy", d.dpEnergy)}) {

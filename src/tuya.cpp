@@ -173,17 +173,33 @@ class Session {
     return r;
   }
 
-  // A kept connection that is idle: the frames the device sent meanwhile are read, then a heartbeat goes out (its
-  // answer is read with the next operation). False: the connection is gone and was closed.
+  // A kept connection that is idle (see the heartbeat task): reads what the device sent meanwhile, sends a heartbeat
+  // and waits up to kHeartbeatTimeoutMs for its answer. False: the connection is gone (closed here, logged once).
   bool heartbeat() {
     if (!open_) return false;
     detail_ = Logger::Level::Debug;
     errCode_ = nullptr;
     errDetail_ = "";
-    deadline_ = millis() + 1000;
+    deadline_ = millis() + kHeartbeatTimeoutMs;
     if (!drain() || !sendPacket(kCmdHeartBeat, nullptr, 0, false, sessionKey_)) {
       close();
       return false;
+    }
+    for (;;) {
+      Frame f;
+      if (!recvFrame(sessionKey_, f)) {
+        if (errCode_ && strcmp(errCode_, "closed") == 0) {
+          logf(Logger::Level::Info, "the device closed the kept connection (seen by the heartbeat %lu s after the last request)",
+               static_cast<unsigned long>(idleMs() / 1000));
+        } else {
+          logf(Logger::Level::Info, "no answer to the heartbeat in %lu ms (%s), connection closed",
+               static_cast<unsigned long>(kHeartbeatTimeoutMs), errCode_ ? errCode_ : "protocol");
+        }
+        close();
+        return false;
+      }
+      if (f.cmd == kCmdHeartBeat) break;
+      logPushed(f);  // a status push that came first
     }
     lastUseMs_ = millis();
     return true;
@@ -256,8 +272,6 @@ class Session {
   // Reads what the device sent on its own over a kept connection while it was idle (the answers to heartbeats, status
   // pushes: one that carries the switch is logged at INFO, readings at the detail level). False: the device closed it.
   bool drain() {
-    char dpKey[12];
-    snprintf(dpKey, sizeof(dpKey), "\"%u\":", static_cast<unsigned>(switchDp_));
     while (client_.available() > 0) {
       const uint32_t saved = deadline_;
       deadline_ = millis() + 500;
@@ -265,11 +279,7 @@ class Session {
       const bool got = recvFrame(sessionKey_, f);
       deadline_ = saved;
       if (!got) return false;
-      if (f.cmd == kCmdHeartBeat) continue;
-      const String text = payloadText(f);
-      logLong(switchDp_ && text.indexOf(dpKey) >= 0 ? Logger::Level::Info : detail_, String("rx cmd=0x") + String(static_cast<unsigned>(f.cmd), HEX) + " seq=" + String(static_cast<unsigned long>(f.seq)) +
-                                       " retcode=" + String(static_cast<unsigned long>(f.retcode)) + " payload=" + String(static_cast<unsigned>(f.len)) + "B (sent while idle)",
-              text);
+      if (f.cmd != kCmdHeartBeat) logPushed(f);
     }
     if (!client_.connected()) {
       logf(Logger::Level::Info, "the device closed the kept connection (seen %lu s after the last request)",
@@ -277,6 +287,17 @@ class Session {
       return false;
     }
     return true;
+  }
+
+  // A frame the device sent on its own: one that carries the switch is logged at INFO, readings at the detail level.
+  void logPushed(const Frame& f) {
+    char dpKey[12];
+    snprintf(dpKey, sizeof(dpKey), "\"%u\":", static_cast<unsigned>(switchDp_));
+    const String text = payloadText(f);
+    logLong(switchDp_ && text.indexOf(dpKey) >= 0 ? Logger::Level::Info : detail_,
+            String("rx cmd=0x") + String(static_cast<unsigned>(f.cmd), HEX) + " seq=" + String(static_cast<unsigned long>(f.seq)) +
+                " retcode=" + String(static_cast<unsigned long>(f.retcode)) + " payload=" + String(static_cast<unsigned>(f.len)) + "B (sent while idle)",
+            text);
   }
 
   bool execute(Op op, uint16_t dp, uint32_t unixTime, const RefreshOpts* refresh, Result& r) {
@@ -605,6 +626,7 @@ class Session {
 constexpr size_t kCommandLane = 0, kMonitorLane = 1;
 constexpr size_t kCapacity[2] = {kCommandQueueSize, kMonitorQueueSize};
 constexpr uint32_t kLockWaitMs = 5000;  // a command waits at most this long for the device (a poll takes <= timeoutMs)
+constexpr uint32_t kHeartbeatWakeMs = 500;  // the heartbeat task looks at the kept connections this often
 
 struct LaneState {
   std::deque<std::shared_ptr<Job>> jobs;
@@ -678,8 +700,9 @@ Result runKept(const Job& job, const char* label) {
   return r;
 }
 
-// The monitor's worker, when its lane is idle: a heartbeat on every kept connection idle for kHeartbeatIdleMs. A device
-// busy with a command is skipped (the command keeps the connection alive).
+// The heartbeat task: a heartbeat on every kept connection idle for kHeartbeatIdleMs. A device whose lock is taken is
+// skipped (its connection is in use right now); a connection that does not answer is closed and dropped, and the next
+// poll or command connects again. It never opens a connection itself.
 void heartbeats() {
   std::vector<String> due;
   xSemaphoreTake(gListMux, portMAX_DELAY);
@@ -691,18 +714,25 @@ void heartbeats() {
     SemaphoreHandle_t lock = deviceLock(ip);
     if (xSemaphoreTake(lock, 0) != pdTRUE) continue;
     if (Session* s = takeKept(ip)) {
-      s->heartbeat();  // a lost connection is closed: the next operation connects again
-      putKept(ip, s);
+      if (s->heartbeat()) {
+        putKept(ip, s);
+      } else {
+        delete s;
+      }
     }
     xSemaphoreGive(lock);
   }
 }
 
-std::shared_ptr<Job> nextJob(size_t lane) {
-  // The monitor's worker wakes up now and then for the heartbeats; the command worker only for jobs.
-  if (xSemaphoreTake(gLanes[lane].ready, lane == kMonitorLane ? pdMS_TO_TICKS(1000) : portMAX_DELAY) != pdTRUE) {
-    return nullptr;
+void heartbeatTask(void*) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(kHeartbeatWakeMs));
+    if (WiFi.status() == WL_CONNECTED) heartbeats();
   }
+}
+
+std::shared_ptr<Job> nextJob(size_t lane) {
+  xSemaphoreTake(gLanes[lane].ready, portMAX_DELAY);
   xSemaphoreTake(gListMux, portMAX_DELAY);
   std::shared_ptr<Job> job;
   if (!gLanes[lane].jobs.empty()) {
@@ -717,16 +747,18 @@ void worker(void* arg) {
   const size_t lane = reinterpret_cast<size_t>(arg);
   for (;;) {
     std::shared_ptr<Job> job = nextJob(lane);
-    if (!job) {
-      if (lane == kMonitorLane) heartbeats();
-      continue;
-    }
+    if (!job) continue;
 
     const char* label = job->device.c_str();
     SemaphoreHandle_t lock = deviceLock(job->target.ip);
     // A submitter that gave up (a scenario step that waited too long) must not have its command arrive later.
     bool cancelled = job->cancelled.load();
-    bool locked = !cancelled && xSemaphoreTake(lock, lane == kMonitorLane ? 0 : pdMS_TO_TICKS(kLockWaitMs)) == pdTRUE;
+    // A poll does not wait for a device held by another operation, except for a heartbeat on a kept connection (it holds
+    // the device for at most kHeartbeatTimeoutMs): without that wait, polls of kept devices would often end "busy".
+    const TickType_t wait = lane != kMonitorLane ? pdMS_TO_TICKS(kLockWaitMs)
+                            : job->target.keep  ? pdMS_TO_TICKS(kHeartbeatTimeoutMs + 500)
+                                                : 0;
+    bool locked = !cancelled && xSemaphoreTake(lock, wait) == pdTRUE;
     if (locked && job->cancelled.load()) {  // given up while this job waited for the device
       xSemaphoreGive(lock);
       locked = false;
@@ -829,6 +861,7 @@ void begin() {
   for (size_t i = 0; i < 2; ++i) gLanes[i].ready = xSemaphoreCreateCounting(kCapacity[i], 0);
   xTaskCreate(worker, "tuya_cmd", 10240, reinterpret_cast<void*>(kCommandLane), 1, nullptr);
   xTaskCreate(worker, "tuya_mon", 10240, reinterpret_cast<void*>(kMonitorLane), 1, nullptr);
+  xTaskCreate(heartbeatTask, "tuya_hb", 4096, nullptr, 1, nullptr);
 }
 
 void setObserver(void (*observer)(const Job&)) { gObserver = observer; }

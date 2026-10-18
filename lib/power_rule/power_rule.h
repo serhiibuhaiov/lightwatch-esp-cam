@@ -29,10 +29,17 @@ struct Result {
 
 // `samples`: oldest first, at most `capacity` (the history ring; full = the oldest ones are gone). `now`: uptime seconds.
 // The newest answers must all be on the right side of `watts`, the relay on, with no unanswered query and no gap longer
-// than 2.5 poll intervals (at least 20 s), for `forS` seconds. A run that starts right after a clean "relay off" answer,
+// than 2.5 poll steps (at least 20 s), for `forS` seconds. The poll step is `intervalS`, or the real step when the
+// monitor is slower than that (a cycle over many, slow or dead devices takes longer than the interval): the median gap
+// between the newest answers (see pollStep()). A run that starts right after a clean "relay off" answer,
 // or with the history itself while the ring is not full yet (after a boot: the power came back), gets `warmupS` first.
 Result evaluate(const std::vector<Sample>& samples, size_t capacity, uint32_t now, uint32_t intervalS, bool below,
                 uint32_t watts, uint32_t forS, uint32_t warmupS);
+
+// The step between the polls of a device: `intervalS`, or the median of the last (up to 8) gaps between its samples
+// when that is longer. The median ignores a single late or missed poll; samples are written for failed polls too, so
+// only a slow monitor (or polls skipped while a command had the device) makes the gaps longer.
+uint32_t pollStep(const std::vector<Sample>& samples, uint32_t intervalS);
 
 // A rule that had fired before a restart is restored "fired" (not armed). The board cannot know whether its condition
 // went away meanwhile, so it is armed again only by a look that shows the condition false for sure: the power on the

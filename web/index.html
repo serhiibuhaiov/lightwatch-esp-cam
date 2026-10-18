@@ -253,7 +253,10 @@ function viewStatus() {
                 E("td", { title: "Опитування, пропущені, бо розетку тримав інший запит; команди, що не дочекались розетки" }, String(t.busy)));
             })))),
           E("p", { class: "mut", style: "margin:8px 0 0" }, "Очікування це час від постановки запиту в чергу до початку роботи з розеткою (разом з очікуванням її замка). " +
-            "Команди й опитування йдуть окремо й одночасно, але до однієї розетки одночасно лише один запит. Великі значення «Довше 1 с» означають, що розетки (зокрема недоступні) затримують команди.")));
+            "Команди й опитування йдуть окремо й одночасно, але до однієї розетки одночасно лише один запит. Великі значення «Довше 1 с» означають, що розетки (зокрема недоступні) затримують команди."),
+          s.monitor ? E("p", { class: "mut", style: "margin:6px 0 0" }, "Цикл опитування всіх розеток: останній " + (s.monitor.last_cycle_ms / 1000).toFixed(1) +
+            " с, найдовший " + (s.monitor.max_cycle_ms / 1000).toFixed(1) + " с, інтервал " + s.monitor.interval_s + " с" +
+            (s.monitor.last_cycle_ms > s.monitor.interval_s * 1000 ? ". Цикл довший за інтервал: розетки опитуються рідше (тригери споживання це враховують)." : ".")) : null));
       }
       if (s.scenario_engine) {  // the scenario engine: its places in the command lane and the attempts on offline sockets
         const g = s.scenario_engine;
@@ -837,10 +840,10 @@ function viewDevices() {
     if (op !== "status" && !confirm((op === "on" ? "Увімкнути" : "Вимкнути") + " «" + d.name + "» (" + d.ip + ")?")) return;
     busy.add(d.name); msgs[d.name] = { cls: "n", text: "Виконую…" }; render();
     try {
-      // "Оновити зараз" asks the device to re-read its meters (UPDATEDPS) before the query; if the device does not
-      // take that command, fall back to the plain status query.
+      // "Оновити зараз" asks the device to re-read its meters (UPDATEDPS) before the query, unless it has updatedps:false;
+      // if the device does not take that command, fall back to the plain status query.
       const call = async o => { const x = await api("/api/devices/" + o + "?name=" + encodeURIComponent(d.name), { method: "POST" }); return [x, await x.json().catch(() => ({}))]; };
-      let [r, j] = await call(op === "status" ? "refresh" : op);
+      let [r, j] = await call(op === "status" && d.updatedps !== false ? "refresh" : op);
       if (op === "status" && r.ok && !j.ok && ["closed", "protocol", "device"].includes(j.error)) [r, j] = await call("status");
       if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
       const ph = j.phases_ms || {};
@@ -994,14 +997,14 @@ function viewDevConfig() {
 
   const NAME_RE = /^[a-z0-9_-]{1,32}$/;
   const IP_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
-  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, keep_connected: false, meters: { power: "", current: "", voltage: "", energy: "" } });
+  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, keep_connected: false, updatedps: true, meters: { power: "", current: "", voltage: "", energy: "" } });
   const mstr = v => (v == null ? "" : String(v));
 
   async function load() {
     try {
       const { j } = await getJson("/api/devices/config");
       max = j.max || 16;
-      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected,
+      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false,
         meters: { power: mstr(d.meters && d.meters.power), current: mstr(d.meters && d.meters.current), voltage: mstr(d.meters && d.meters.voltage), energy: mstr(d.meters && d.meters.energy) } }));
       render();
     } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати список: " + e.message)); }
@@ -1037,7 +1040,7 @@ function viewDevConfig() {
       const body = { devices: rows.map(r => {
         const meters = {};
         for (const [k, v] of Object.entries(r.meters)) if (v !== "") meters[k] = Number(v);  // empty = standard number, left out
-        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, meters };
+        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, updatedps: !!r.updatedps, meters };
       }) };
       const r = await api("/api/devices/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -1070,6 +1073,8 @@ function viewDevConfig() {
     ign.addEventListener("change", () => { r.ignore = ign.checked; });
     const keep = E("input", { type: "checkbox", checked: r.keep_connected });
     keep.addEventListener("change", () => { r.keep_connected = keep.checked; });
+    const upd = E("input", { type: "checkbox", checked: r.updatedps });
+    upd.addEventListener("change", () => { r.updatedps = upd.checked; });
     const mIn = {};
     const mField = (k, label) => {
       mIn[k] = E("input", { type: "number", value: r.meters[k], min: 0, max: 255, placeholder: "станд. " + STD_METER_DP[k] });
@@ -1104,7 +1109,9 @@ function viewDevConfig() {
         E("div", { class: "f" }, E("label", {}, "Ігнорувати"), E("label", { style: "font-weight:400" }, ign, " не опитувати, пропускати в сценаріях"),
           E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати.")),
         E("div", { class: "f" }, E("label", {}, "Тримати з'єднання"), E("label", { style: "font-weight:400" }, keep, " одне з'єднання на всі запити"),
-          E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Займає одне з їхніх місць для підключень."))),
+          E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Займає одне з їхніх місць для підключень.")),
+        E("div", { class: "f" }, E("label", {}, "UPDATEDPS"), E("label", { style: "font-weight:400" }, upd, " просити переміряти показники"),
+          E("small", {}, "Перед опитуванням, поки на розетку чекає тригер споживання, і в «Оновити зараз». Вимкніть, якщо розетка й так дає свіжі показники або збоїть від цього."))),
       E("details", { open: Object.values(r.meters).some(v => v !== "") },
         E("summary", {}, "Показники: у яких data points напруга, струм, потужність, енергія"),
         E("div", { class: "fields", style: "margin-top:10px" },
@@ -1332,7 +1339,7 @@ function viewLogs() {
 // Requests that change something ask for confirmation first; the PUTs (full replacement) start from the current content.
 const PREFILL = {
   "/api/config": j => j,
-  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected,
+  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false,
     meters: Object.fromEntries(Object.entries(d.meters || {}).filter(([, v]) => v != null)) })) }),
   "/api/scenarios": j => ({ scenarios: j.scenarios.map(sc => {
     const o = { name: sc.name, enabled: sc.enabled, trigger: sc.trigger, default_pause_s: sc.default_pause_s };

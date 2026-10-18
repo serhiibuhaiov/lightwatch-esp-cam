@@ -60,6 +60,7 @@ class FakeTuya:
         self.queries = 0            # status queries (0x10) answered
         self.heartbeats = 0         # heartbeats (0x09) answered
         self.idle_timeout = 10.0    # seconds without a request before the fake closes the connection
+        self.answer_heartbeat = True  # False: heartbeats are counted but never answered
         self.commands = []          # [(unix time, {dp: value})]
         self.hmac_errors = 0
         self.answer_delay = 0.0     # seconds to wait before answering the handshake (to provoke a timeout)
@@ -157,7 +158,8 @@ class FakeTuya:
             if cmd == HEART_BEAT:
                 with self.lock:
                     self.heartbeats += 1
-                sock.sendall(self._frame(seq, HEART_BEAT, b"", session))
+                if self.answer_heartbeat:
+                    sock.sendall(self._frame(seq, HEART_BEAT, b"", session))
             elif cmd == DP_QUERY_NEW:
                 with self.lock:
                     self.queries += 1

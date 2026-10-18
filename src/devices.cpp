@@ -8,6 +8,7 @@
 #include <esp_timer.h>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 
 #include "logger.h"
@@ -39,6 +40,7 @@ struct History {
 std::map<String, History> gHistory;  // by device name; lives and dies with the state
 std::vector<String> gWatched;        // devices a power rule waits for (see setWatched)
 uint16_t gIntervalSec = 30;
+std::atomic<uint32_t> gLastCycleMs{0}, gMaxCycleMs{0};  // see monitorCycle()
 
 // Seconds since boot from the 64-bit timer: millis()/1000 would jump back to 0 after 49.7 days and break the history.
 uint32_t uptimeS() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
@@ -176,6 +178,13 @@ bool parse(const String& raw, std::vector<Device>& out, String& err, const std::
       }
       d.keepConnected = item["keep_connected"].as<bool>();
     }
+    if (!item["updatedps"].isNull()) {
+      if (!item["updatedps"].is<bool>()) {
+        err = where + ".updatedps must be true or false";
+        return false;
+      }
+      d.updatedps = item["updatedps"].as<bool>();
+    }
     if (!item["meters"].isNull()) {
       if (!item["meters"].is<JsonObjectConst>()) {
         err = where + ".meters must be an object";
@@ -226,6 +235,7 @@ String fileText(const std::vector<Device>& list) {
     o["dp"] = d.dp;
     if (d.ignore) o["ignore"] = true;
     if (d.keepConnected) o["keep_connected"] = true;
+    if (!d.updatedps) o["updatedps"] = false;
     if (d.dpPower >= 0 || d.dpCurrent >= 0 || d.dpVoltage >= 0 || d.dpEnergy >= 0) {
       JsonObject m = o["meters"].to<JsonObject>();
       if (d.dpPower >= 0) m["power"] = d.dpPower;
@@ -336,6 +346,7 @@ String configJson() {
     o["key_set"] = true;  // the key is never sent
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
+    o["updatedps"] = d.updatedps;
     writeMeters(o["meters"].to<JsonObject>(), d);
   }
   String out;
@@ -423,6 +434,11 @@ bool state(const String& name, State& out) {
 uint16_t pollIntervalSec() {
   Lock lock;
   return gIntervalSec;
+}
+
+void monitorCycle(uint32_t& lastMs, uint32_t& maxMs) {
+  lastMs = gLastCycleMs;
+  maxMs = gMaxCycleMs;
 }
 
 void limits(JsonObject out) {
@@ -591,6 +607,7 @@ void monitorTask(void* arg) {
   // so the log would say "OFFLINE" and nothing until the device is back).
   constexpr uint32_t kDiagEveryMs = 60000;
   std::map<String, uint32_t> diagAt;
+  bool slow = false;  // the last cycle took longer than the interval
 
   vTaskDelay(pdMS_TO_TICKS(5000));  // let Wi-Fi come up
   for (;;) {
@@ -638,8 +655,9 @@ void monitorTask(void* arg) {
         if (Tuya::commandPending(d.ip)) continue;
 
         // A device a power rule watches gets UPDATEDPS + status (fresh readings) instead of the plain query; only
-        // those, and only while a rule is enabled. If it does not take that command: plain queries for a while.
-        const String meters = isWatched(d.name) ? meterDps(d) : String();
+        // those, only while a rule is enabled, and not with updatedps:false. If it does not take that command: plain
+        // queries for a while.
+        const String meters = isWatched(d.name) && d.updatedps ? meterDps(d) : String();
         bool useRefresh = !meters.isEmpty();
         auto skipIt = noRefresh.find(d.name);
         if (skipIt != noRefresh.end()) {
@@ -717,6 +735,15 @@ void monitorTask(void* arg) {
     }
     const uint32_t spent = millis() - cycleStart;
     const uint32_t period = static_cast<uint32_t>(p.intervalSec) * 1000UL;
+    gLastCycleMs = spent;
+    if (spent > gMaxCycleMs) gMaxCycleMs = spent;
+    if (spent > period && !slow) {  // one line per slow streak, not one per cycle
+      LOGW(TAG, "monitor cycle took %lu ms, longer than the %u s interval: the devices are polled less often",
+           static_cast<unsigned long>(spent), static_cast<unsigned>(p.intervalSec));
+    } else if (spent <= period && slow) {
+      LOGI(TAG, "monitor cycle back within the interval (%lu ms)", static_cast<unsigned long>(spent));
+    }
+    slow = spent > period;
     vTaskDelay(pdMS_TO_TICKS(spent < period ? period - spent : 1000));
   }
 }

@@ -61,6 +61,9 @@ def test_status(dev):
         assert set(t) == {"jobs", "wait_avg_ms", "wait_max_ms", "wait_over_1s", "busy"}
         assert all(isinstance(v, int) and v >= 0 for v in t.values())
         assert t["wait_avg_ms"] <= t["wait_max_ms"]
+    mon = st["monitor"]
+    assert set(mon) == {"interval_s", "last_cycle_ms", "max_cycle_ms"} and mon["interval_s"] == dev.get("/api/devices").json()["poll_interval_s"]
+    assert 0 < mon["last_cycle_ms"] <= mon["max_cycle_ms"]
     assert "scenario" not in st and isinstance(st["scenarios"], list)
     for sc in st["scenarios"]:
         assert {"name", "enabled", "trigger", "state"} <= set(sc)

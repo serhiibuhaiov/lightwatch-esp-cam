@@ -1,5 +1,6 @@
 """keep_connected: one connection kept open for every operation of a device, with a heartbeat while it is idle, against
-the fake Tuya device on this computer (no real socket is touched). The board must reach this computer on TCP port 6668;
+the fake Tuya device on this computer (no real socket is touched). The heartbeat task sends a heartbeat on a connection idle for
+5 s and closes it when the answer does not come in 2 s; it never connects itself. The board must reach this computer on TCP port 6668;
 otherwise these tests skip.
 """
 import time
@@ -46,10 +47,12 @@ def kept(dev, fake):
     """Every test starts with the fake kept connected, as a real device would treat an idle connection (30 s)."""
     fake.start()
     fake.idle_timeout = 30.0
+    fake.answer_heartbeat = True
     edit(dev, keep_connected=True, ignore=False)
     wait_for(lambda: fake.open_connections == 1, interval(dev) + 10, "the board did not open the kept connection")
     yield
     fake.idle_timeout = 10.0
+    fake.answer_heartbeat = True
     edit(dev, keep_connected=False, ignore=False)
 
 
@@ -59,7 +62,7 @@ def test_a_kept_device_is_polled_over_one_connection_with_heartbeats_between(dev
     assert fake.connections == c0, "the board connected again"
     assert fake.open_connections == 1
     assert fake.queries - q0 >= 2, "the monitor did not poll over the kept connection"
-    assert fake.heartbeats - h0 >= 1, "no heartbeat while the connection was idle"
+    assert fake.heartbeats - h0 >= 3, "too few heartbeats while the connection was idle (one per 5 s of idling)"
     d = state(dev)
     assert d["keep_connected"] is True and d["state"]["online"] is True and d["state"]["fails"] == 0
     assert d["state"]["connections"] >= 1
@@ -103,3 +106,21 @@ def test_an_ignored_kept_device_has_its_connection_closed(dev, fake):
     c0 = fake.connections
     time.sleep(interval(dev) * 1.5)
     assert fake.connections == c0 and fake.open_connections == 0  # not polled, nothing kept
+
+
+def test_a_connection_that_does_not_answer_the_heartbeat_is_closed_and_the_next_poll_connects(dev, fake):
+    fake.answer_heartbeat = False
+    c0 = fake.connections
+    wait_for(lambda: fake.connections > c0, interval(dev) + 15, "the board did not connect again after the silent heartbeat")
+    d = state(dev)["state"]
+    assert d["online"] is True and d["fails"] == 0, d  # a closed idle connection is not a failed poll
+    log = dev.get("/api/logs", params={"file": "current", "tail": 8192}).text
+    assert f"[{FAKE_NAME}] no answer to the heartbeat in 2000 ms" in log
+
+
+def test_polls_of_a_kept_device_do_not_end_busy_because_of_the_heartbeat(dev, fake):
+    busy = lambda: dev.get("/api/status").json()["tuya"]["monitor"]["busy"]
+    b0, q0 = busy(), fake.queries
+    time.sleep(interval(dev) * 3.2)
+    assert fake.queries - q0 >= 3
+    assert busy() == b0, "a poll ended busy: it did not wait for the heartbeat"

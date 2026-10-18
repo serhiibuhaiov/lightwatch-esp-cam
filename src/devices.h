@@ -48,6 +48,9 @@ struct Device {
   int16_t dpPower = -1, dpCurrent = -1, dpVoltage = -1, dpEnergy = -1;  // -1 = standard number, 0 = none
   bool ignore = false;  // not polled by the monitor and skipped by scenario steps (manual actions still work)
   bool keepConnected = false;  // one connection kept open for every operation (see Tuya::Target::keep)
+  // UPDATEDPS before the poll while a power rule watches it. false: plain status queries only (a socket that keeps its
+  // readings fresh by itself, or that misbehaves on UPDATEDPS: the boiler switched itself off during one).
+  bool updatedps = true;
 
   Tuya::Target target() const {
     Tuya::Target t;
@@ -155,6 +158,11 @@ void onJobDone(const Tuya::Job& job);
 // Starts the poller. attempts = tries per device and cycle (>= 1). Call once, after Tuya::begin().
 void startMonitor(uint16_t intervalSec, uint16_t timeoutMs, uint8_t attempts);
 uint16_t pollIntervalSec();
+
+// How long the monitor's cycles over all the devices took: the last one and the longest since boot (ms, 0 = none yet).
+// A cycle longer than the interval means every device is polled less often than configured (the power rules follow
+// the real step, see PowerRule::pollStep).
+void monitorCycle(uint32_t& lastMs, uint32_t& maxMs);
 
 constexpr size_t kMaxDevices = 16;
 

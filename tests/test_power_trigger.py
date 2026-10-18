@@ -325,6 +325,27 @@ def test_updatedps_is_sent_only_while_a_rule_waits_for_the_device(dev, guard, fa
     assert fake.updatedps == settled, "UPDATEDPS went on after the rule was switched off"
 
 
+def test_a_device_with_updatedps_off_gets_plain_queries_even_when_watched(dev, guard, fake):
+    gap = dev.get("/api/devices").json()["poll_interval_s"]
+
+    def flag(value):
+        devices = device_list(dev)
+        for d in devices:
+            if d["name"] == FAKE_NAME:
+                d["updatedps"] = value
+        assert put_devices(dev, devices).status_code == 200
+
+    flag(False)
+    try:
+        assert put(dev, guard + [rule(TEST + "plain", watts=1, for_s=900)]).status_code == 200  # never fires: 1 W
+        fake.updatedps = 0
+        time.sleep(gap * 2 + 5)
+        assert fake.updatedps == 0, "UPDATEDPS to a device with updatedps:false"
+        assert reason(dev, TEST + "plain") == "not-met"  # the rule still gets fresh answers from the plain queries
+    finally:
+        flag(True)
+
+
 def test_a_rule_on_another_device_does_not_make_this_one_get_updatedps(dev, guard, fake):
     gap = dev.get("/api/devices").json()["poll_interval_s"]
     assert put(dev, guard + [rule(TEST + "other", device="zz-no-such-device", watts=1, for_s=900)]).status_code == 200
