@@ -2,7 +2,8 @@
 //
 // PSRAM allocators. PsramAllocator, for ArduinoJson, puts a document in PSRAM when the board has it, and falls back to
 // the normal heap when it has not (or PSRAM is full). For the big documents (scenarios up to ~60 KB, /runs.json, the
-// device list and its state, /api/status, the history of the readings, the config); the small ones stay as they are.
+// device list and its state, /api/status, the history of the readings, the config) and the Tuya session buffers; the
+// small ones stay as they are.
 // Never used for anything a task stack, an interrupt or DMA touches. PsramStdAllocator does the same for std::
 // containers whose blocks are under 4 KB and so would stay in the internal RAM.
 //

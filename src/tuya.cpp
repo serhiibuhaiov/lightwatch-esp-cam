@@ -15,6 +15,7 @@
 #include <map>
 
 #include "logger.h"
+#include "psram_alloc.h"
 
 namespace Tuya {
 namespace {
@@ -117,8 +118,10 @@ constexpr uint32_t kCmdStatus = 0x08;  // a status push the device sends on its 
 class Session {
  public:
   Session(const Target& target, const char* label) : target_(target), label_(label ? label : ""), push_(target.push) {
-    tx_ = static_cast<uint8_t*>(malloc(kMaxFrame));
-    rx_ = static_cast<uint8_t*>(malloc(kMaxFrame));
+    // In PSRAM when there is some: 3 KB of 8-bit DRAM per session (a kept connection holds them all the time). Only the
+    // CPU touches them (AES/GCM, and WiFiClient copies into and out of the lwIP buffers).
+    tx_ = static_cast<uint8_t*>(psramMalloc(kMaxFrame));
+    rx_ = static_cast<uint8_t*>(psramMalloc(kMaxFrame));
   }
 
   ~Session() {
