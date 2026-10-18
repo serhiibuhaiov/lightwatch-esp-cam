@@ -37,7 +37,7 @@ def test_devices_list_shape_and_keys_hidden(dev):
     assert isinstance(body["devices"], list)
     assert body["count"] == len(body["devices"])
     for d in body["devices"]:
-        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "meters", "state"}
+        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "meters", "state"}
         assert set(d["meters"]) == {"power", "current", "voltage", "energy"}
         assert {"known", "online", "fails"} <= set(d["state"])
         assert d["version"] in ("3.4", "3.5")
@@ -108,6 +108,7 @@ def existing(dev):
     # meters are kept as they are: a PUT without them would reset them to the standard numbers
     # (and ignore: a PUT without it would clear the flag)
     return [{"name": d["name"], "ip": d["ip"], "version": d["version"], "dp": d["dp"], "ignore": d.get("ignore", False),
+             "keep_connected": d.get("keep_connected", False),
              "meters": {k: v for k, v in d["meters"].items() if v is not None}} for d in get_config(dev)["devices"]]
 
 
@@ -138,7 +139,7 @@ def test_editor_list_has_no_keys(dev):
     body = r.json()
     assert body["max"] == 16
     for d in body["devices"]:
-        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "meters"} and d["key_set"] is True
+        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "meters"} and d["key_set"] is True
         assert set(d["meters"]) == {"power", "current", "voltage", "energy"}
     assert '"key"' not in r.text
 
@@ -205,7 +206,7 @@ def test_editor_add_change_rename_remove(dev, guard):
     assert r.status_code == 200 and r.json() == {"ok": True, "count": len(base) + 1, "warnings": []}  # no scenario names a missing device
     added = {d["name"]: d for d in get_config(dev)["devices"]}["zz-test"]
     assert added == {"name": "zz-test", "ip": "192.168.8.251", "version": "3.5", "dp": 2, "key_set": True, "ignore": False,
-                     "meters": {"power": None, "current": None, "voltage": None, "energy": None}}
+                     "keep_connected": False, "meters": {"power": None, "current": None, "voltage": None, "energy": None}}
     api = {d["name"]: d for d in dev.get("/api/devices").json()["devices"]}
     assert "zz-test" in api and "key" not in api["zz-test"]
 
@@ -254,6 +255,26 @@ def test_editor_ignore_flag_round_trip_and_reload(dev, guard):
     # and it can be switched off again
     r = put_config(dev, guard + [fake("zz-test", ignore=False)])
     assert r.status_code == 200 and {d["name"]: d["ignore"] for d in get_config(dev)["devices"]}["zz-test"] is False
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, 0, []])
+def test_editor_rejects_a_non_boolean_keep_connected(dev, guard, bad):
+    before = get_config(dev)
+    r = put_config(dev, guard + [fake("zz-test", keep_connected=bad)])
+    assert r.status_code == 400 and "keep_connected" in r.json()["error"]
+    assert get_config(dev) == before
+
+
+def test_editor_keep_connected_round_trip_and_reload(dev, guard):
+    r = put_config(dev, guard + [fake("zz-test", keep_connected=True), fake("zz-test2", ip="192.168.8.252")])
+    assert r.status_code == 200, r.text
+    cfg = {d["name"]: d for d in get_config(dev)["devices"]}
+    assert cfg["zz-test"]["keep_connected"] is True and cfg["zz-test2"]["keep_connected"] is False  # the default
+    for g in guard:  # the other devices keep their flag
+        assert cfg[g["name"]]["keep_connected"] == g["keep_connected"]
+    assert {d["name"]: d for d in dev.get("/api/devices").json()["devices"]}["zz-test"]["keep_connected"] is True
+    assert dev.request("POST", "/api/devices/reload").status_code == 200  # it is in the file
+    assert {d["name"]: d["keep_connected"] for d in get_config(dev)["devices"]}["zz-test"] is True
 
 
 def test_editor_meters_mapping_round_trip(dev, guard):

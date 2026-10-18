@@ -47,12 +47,14 @@ struct Device {
   uint16_t dp = 1;
   int16_t dpPower = -1, dpCurrent = -1, dpVoltage = -1, dpEnergy = -1;  // -1 = standard number, 0 = none
   bool ignore = false;  // not polled by the monitor and skipped by scenario steps (manual actions still work)
+  bool keepConnected = false;  // one connection kept open for every operation (see Tuya::Target::keep)
 
   Tuya::Target target() const {
     Tuya::Target t;
     t.ip = ip;
     t.key = key;
     t.version = version;
+    t.keep = keepConnected;
     return t;
   }
 };

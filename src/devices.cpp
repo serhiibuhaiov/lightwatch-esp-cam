@@ -169,6 +169,13 @@ bool parse(const String& raw, std::vector<Device>& out, String& err, const std::
       }
       d.ignore = item["ignore"].as<bool>();
     }
+    if (!item["keep_connected"].isNull()) {
+      if (!item["keep_connected"].is<bool>()) {
+        err = where + ".keep_connected must be true or false";
+        return false;
+      }
+      d.keepConnected = item["keep_connected"].as<bool>();
+    }
     if (!item["meters"].isNull()) {
       if (!item["meters"].is<JsonObjectConst>()) {
         err = where + ".meters must be an object";
@@ -218,6 +225,7 @@ String fileText(const std::vector<Device>& list) {
     o["version"] = Tuya::versionName(d.version);
     o["dp"] = d.dp;
     if (d.ignore) o["ignore"] = true;
+    if (d.keepConnected) o["keep_connected"] = true;
     if (d.dpPower >= 0 || d.dpCurrent >= 0 || d.dpVoltage >= 0 || d.dpEnergy >= 0) {
       JsonObject m = o["meters"].to<JsonObject>();
       if (d.dpPower >= 0) m["power"] = d.dpPower;
@@ -327,6 +335,7 @@ String configJson() {
     o["dp"] = d.dp;
     o["key_set"] = true;  // the key is never sent
     o["ignore"] = d.ignore;
+    o["keep_connected"] = d.keepConnected;
     writeMeters(o["meters"].to<JsonObject>(), d);
   }
   String out;
@@ -588,6 +597,11 @@ void monitorTask(void* arg) {
     const uint32_t cycleStart = millis();
     if (WiFi.status() == WL_CONNECTED) {
       const std::vector<Device> devices = list();
+      std::vector<String> kept;  // the polled devices with keep_connected: the kept connections of any others are closed
+      for (const Device& d : devices) {
+        if (d.keepConnected && !d.ignore) kept.push_back(d.ip);
+      }
+      Tuya::keepOnly(kept);
       for (auto it = cyclesToSkip.begin(); it != cyclesToSkip.end();) {  // forget the devices that are gone
         bool present = false;
         for (const Device& d : devices) present = present || d.name == it->first;

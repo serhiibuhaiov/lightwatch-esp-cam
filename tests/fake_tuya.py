@@ -2,10 +2,12 @@
 
 The board is told that a device with this computer's IP exists, and talks to this server instead of a socket.
 That lets the tests make a device go away and come back, change its readings and switch it, without touching
-a real socket. Only protocol 3.4 is implemented (session key handshake, status query 0x10, control 0x0d).
+a real socket. Only protocol 3.4 is implemented (session key handshake, status query 0x10, control 0x0d, UPDATEDPS 0x12,
+heartbeat 0x09). One connection may carry many requests; it is closed after `idle_timeout` seconds without one.
 
 It also records what the board does: `connections` (every accepted TCP connection), `commands` (the control
-commands received, newest last), and it checks the HMAC of every frame the board sends.
+commands received, newest last), `open_connections`, `queries`, `heartbeats`, and it checks the HMAC of every frame the
+board sends.
 """
 import hashlib
 import hmac
@@ -19,7 +21,7 @@ import time
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 PREFIX, SUFFIX = 0x000055AA, 0x0000AA55
-SESS_START, SESS_RESP, SESS_FINISH, CONTROL_NEW, STATUS_PUSH, DP_QUERY_NEW, UPDATEDPS = 3, 4, 5, 0x0D, 0x08, 0x10, 0x12
+SESS_START, SESS_RESP, SESS_FINISH, CONTROL_NEW, STATUS_PUSH, DP_QUERY_NEW, UPDATEDPS, HEART_BEAT = 3, 4, 5, 0x0D, 0x08, 0x10, 0x12, 0x09
 
 
 def _ecb(key, data, encrypt):
@@ -54,6 +56,10 @@ class FakeTuya:
         self.port = port
         self.dps = dict(dps or {"1": True, "18": 300, "19": 480, "20": 2250})
         self.connections = 0
+        self.open_connections = 0   # connections open right now
+        self.queries = 0            # status queries (0x10) answered
+        self.heartbeats = 0         # heartbeats (0x09) answered
+        self.idle_timeout = 10.0    # seconds without a request before the fake closes the connection
         self.commands = []          # [(unix time, {dp: value})]
         self.hmac_errors = 0
         self.answer_delay = 0.0     # seconds to wait before answering the handshake (to provoke a timeout)
@@ -75,10 +81,14 @@ class FakeTuya:
             def handle(self):
                 with fake.lock:
                     fake.connections += 1
+                    fake.open_connections += 1
                 try:
                     fake._serve(self.request)
                 except (ConnectionError, OSError, struct.error):
                     pass
+                finally:
+                    with fake.lock:
+                        fake.open_connections -= 1
 
         class Server(socketserver.ThreadingTCPServer):
             allow_reuse_address = True
@@ -142,9 +152,15 @@ class FakeTuya:
         mixed = bytes(a ^ b for a, b in zip(local_nonce, device_nonce))
         session = _ecb(self.key, mixed, True)
         while True:
+            sock.settimeout(self.idle_timeout)
             seq, cmd, plain = self._read(sock, session)
-            if cmd == DP_QUERY_NEW:
+            if cmd == HEART_BEAT:
                 with self.lock:
+                    self.heartbeats += 1
+                sock.sendall(self._frame(seq, HEART_BEAT, b"", session))
+            elif cmd == DP_QUERY_NEW:
+                with self.lock:
+                    self.queries += 1
                     body = json.dumps({"dps": self.dps}, separators=(",", ":")).encode()
                 sock.sendall(self._frame(seq, DP_QUERY_NEW, body, session))
             elif cmd == CONTROL_NEW:

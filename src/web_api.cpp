@@ -500,6 +500,7 @@ JsonDocument devicesSummary() {
     o["dp"] = d.dp;
     o["key_set"] = true;  // the key itself is never sent
     o["ignore"] = d.ignore;
+    o["keep_connected"] = d.keepConnected;
     JsonObject meters = o["meters"].to<JsonObject>();  // data points of the readings, null = standard number
     for (const auto& m : {std::make_pair("power", d.dpPower), std::make_pair("current", d.dpCurrent),
                           std::make_pair("voltage", d.dpVoltage), std::make_pair("energy", d.dpEnergy)}) {
@@ -520,6 +521,7 @@ JsonDocument devicesSummary() {
     if (st.lastOkMs) s["age_s"] = (now - st.lastOkMs) / 1000;  // seconds since the last success
     if (st.lastTryMs) s["last_try_age_s"] = (now - st.lastTryMs) / 1000;
     if (st.latencyMs) s["latency_ms"] = st.latencyMs;
+    s["connections"] = Tuya::connections(d.ip);  // TCP connections opened to it since boot
     if (!st.error.isEmpty()) {
       s["error"] = st.error;
       s["detail"] = st.detail;

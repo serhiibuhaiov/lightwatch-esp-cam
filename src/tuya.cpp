@@ -37,6 +37,7 @@ constexpr uint32_t kCmdSessFinish = 0x05;
 constexpr uint32_t kCmdControlNew = 0x0d;
 constexpr uint32_t kCmdDpQueryNew = 0x10;
 constexpr uint32_t kCmdUpdateDps = 0x12;
+constexpr uint32_t kCmdHeartBeat = 0x09;
 
 // ---- big-endian helpers and crypto primitives --------------------------------
 
@@ -107,30 +108,59 @@ struct Frame {
   size_t len = 0;
 };
 
+void noteConnection(const String& ip);  // counts a TCP connection for connections()
+
+// One connection to a device. Without Target::keep it carries one operation and is closed (the Session is destroyed);
+// a kept one stays open between operations: run() then skips the connect and the handshake.
 class Session {
  public:
-  Session(const Target& target, uint32_t timeoutMs, const char* label, bool background)
-      : target_(target),
-        timeoutMs_(timeoutMs),
-        label_(label ? label : ""),
-        detail_(background ? Logger::Level::Debug : Logger::Level::Info) {
+  Session(const Target& target, const char* label) : target_(target), label_(label ? label : "") {
     tx_ = static_cast<uint8_t*>(malloc(kMaxFrame));
     rx_ = static_cast<uint8_t*>(malloc(kMaxFrame));
   }
 
   ~Session() {
-    client_.stop();
+    close();
     free(tx_);
     free(rx_);
     // Do not leave key material around in freed memory.
     memset(realKey_, 0, sizeof(realKey_));
+  }
+
+  const Target& target() const { return target_; }
+  void setLabel(const char* label) { label_ = label ? label : ""; }
+  uint32_t idleMs() const { return millis() - lastUseMs_; }
+
+  void close() {
+    if (open_ || client_.connected()) client_.stop();
+    open_ = false;
     memset(sessionKey_, 0, sizeof(sessionKey_));
   }
 
-  Result run(Op op, uint16_t dp, uint32_t unixTime, const RefreshOpts* refresh = nullptr) {
+  // `dp` is the switch data point (for a status query too: frames that carry it are logged at INFO, see drain()).
+  Result run(Op op, uint16_t dp, uint32_t unixTime, uint32_t timeoutMs, bool background, const RefreshOpts* refresh = nullptr) {
     const uint32_t start = millis();
+    if (dp) switchDp_ = dp;
+    timeoutMs_ = timeoutMs;
+    detail_ = background ? Logger::Level::Debug : Logger::Level::Info;
+    connectMs_ = handshakeMs_ = commandMs_ = 0;
+    errCode_ = nullptr;
+    errDetail_ = "";
     Result r;
+    r.reused = open_;
     bool ok = execute(op, dp, unixTime, refresh, r);
+    if (!ok && r.reused && errCode_ && strcmp(errCode_, "closed") == 0) {
+      // The device dropped the kept connection while it was idle: once more on a new one (on/off may arrive twice).
+      logf(Logger::Level::Info, "the kept connection was closed by the device, connecting again");
+      close();
+      r = Result();
+      connectMs_ = handshakeMs_ = commandMs_ = 0;
+      errCode_ = nullptr;
+      errDetail_ = "";
+      ok = execute(op, dp, unixTime, refresh, r);
+    }
+    if (!ok || !target_.keep) close();
+    lastUseMs_ = millis();
     r.ms = millis() - start;
     r.connectMs = connectMs_;
     r.handshakeMs = handshakeMs_;
@@ -141,6 +171,22 @@ class Session {
       r.detail = errDetail_;
     }
     return r;
+  }
+
+  // A kept connection that is idle: the frames the device sent meanwhile are read, then a heartbeat goes out (its
+  // answer is read with the next operation). False: the connection is gone and was closed.
+  bool heartbeat() {
+    if (!open_) return false;
+    detail_ = Logger::Level::Debug;
+    errCode_ = nullptr;
+    errDetail_ = "";
+    deadline_ = millis() + 1000;
+    if (!drain() || !sendPacket(kCmdHeartBeat, nullptr, 0, false, sessionKey_)) {
+      close();
+      return false;
+    }
+    lastUseMs_ = millis();
+    return true;
   }
 
  private:
@@ -178,20 +224,13 @@ class Session {
 
   bool v34() const { return target_.version == Version::V34; }
 
-  bool execute(Op op, uint16_t dp, uint32_t unixTime, const RefreshOpts* refresh, Result& r) {
-    if (!tx_ || !rx_) return fail("protocol", "out of memory");
+  // TCP connect and session key negotiation.
+  bool connect() {
     if (target_.key.length() != 16) return fail("protocol", "the local key must be exactly 16 characters");
     memcpy(realKey_, target_.key.c_str(), 16);
-
     IPAddress ip;
     if (!ip.fromString(target_.ip)) return fail("connect", "invalid IP address");
     if (WiFi.status() != WL_CONNECTED) return fail("connect", "Wi-Fi is not connected");
-
-    deadline_ = millis() + timeoutMs_;
-    char dpText[16] = "";
-    if (op == Op::On || op == Op::Off) snprintf(dpText, sizeof(dpText), " dp=%u", static_cast<unsigned>(dp));
-    logf(detail_, "%s %s:%u v%s%s timeout=%lu ms", opName(op), target_.ip.c_str(), kPort, versionName(target_.version), dpText,
-         static_cast<unsigned long>(timeoutMs_));
 
     uint32_t t0 = millis();
     const bool connected = client_.connect(ip, kPort, static_cast<int32_t>(std::min(timeoutMs_, kConnectTimeoutMs)));
@@ -199,16 +238,64 @@ class Session {
     if (!connected) {
       return fail("connect", "cannot connect to " + target_.ip + ":6668 (device off, wrong IP, or another client holds the connection)");
     }
+    noteConnection(target_.ip);
     client_.setNoDelay(true);
     logf(detail_, "connected in %lu ms", static_cast<unsigned long>(connectMs_));
 
+    nextSeq_ = 1;
     t0 = millis();
     const bool shook = handshake();
     handshakeMs_ = millis() - t0;
     if (!shook) return false;
+    open_ = true;
     logf(detail_, "session key negotiated in %lu ms", static_cast<unsigned long>(handshakeMs_));
+    if (target_.keep) logf(Logger::Level::Info, "connection kept open (%lu since boot)", static_cast<unsigned long>(connections(target_.ip)));
+    return true;
+  }
 
-    t0 = millis();
+  // Reads what the device sent on its own over a kept connection while it was idle (the answers to heartbeats, status
+  // pushes: one that carries the switch is logged at INFO, readings at the detail level). False: the device closed it.
+  bool drain() {
+    char dpKey[12];
+    snprintf(dpKey, sizeof(dpKey), "\"%u\":", static_cast<unsigned>(switchDp_));
+    while (client_.available() > 0) {
+      const uint32_t saved = deadline_;
+      deadline_ = millis() + 500;
+      Frame f;
+      const bool got = recvFrame(sessionKey_, f);
+      deadline_ = saved;
+      if (!got) return false;
+      if (f.cmd == kCmdHeartBeat) continue;
+      const String text = payloadText(f);
+      logLong(switchDp_ && text.indexOf(dpKey) >= 0 ? Logger::Level::Info : detail_, String("rx cmd=0x") + String(static_cast<unsigned>(f.cmd), HEX) + " seq=" + String(static_cast<unsigned long>(f.seq)) +
+                                       " retcode=" + String(static_cast<unsigned long>(f.retcode)) + " payload=" + String(static_cast<unsigned>(f.len)) + "B (sent while idle)",
+              text);
+    }
+    if (!client_.connected()) {
+      logf(Logger::Level::Info, "the device closed the kept connection (seen %lu s after the last request)",
+           static_cast<unsigned long>(idleMs() / 1000));
+      return false;
+    }
+    return true;
+  }
+
+  bool execute(Op op, uint16_t dp, uint32_t unixTime, const RefreshOpts* refresh, Result& r) {
+    if (!tx_ || !rx_) return fail("protocol", "out of memory");
+    deadline_ = millis() + timeoutMs_;
+    char dpText[16] = "";
+    if (op == Op::On || op == Op::Off) snprintf(dpText, sizeof(dpText), " dp=%u", static_cast<unsigned>(dp));
+    logf(detail_, "%s %s:%u v%s%s timeout=%lu ms%s", opName(op), target_.ip.c_str(), kPort, versionName(target_.version), dpText,
+         static_cast<unsigned long>(timeoutMs_), open_ ? " (kept connection)" : "");
+
+    if (open_ && !drain()) {
+      close();
+      errCode_ = nullptr;  // not a failure of this operation: it connects again
+      errDetail_ = "";
+      r.reused = false;
+    }
+    if (!open_ && !connect()) return false;
+
+    uint32_t t0 = millis();
     Frame f;
     if (op == Op::Query || op == Op::Refresh) {
       static const uint8_t kEmpty[2] = {'{', '}'};
@@ -304,9 +391,9 @@ class Session {
       text.concat(reinterpret_cast<const char*>(body), bodyLen);
       logLong(detail_, String("tx cmd=0x") + String(static_cast<unsigned>(cmd), HEX) + " seq=" + String(static_cast<unsigned long>(seq)) +
                            " frame=" + String(static_cast<unsigned>(total)) + "B", text);
-    } else {  // handshake: binary nonces, only the fact
-      logf(Logger::Level::Debug, "tx cmd=0x%02x seq=%lu frame=%uB (handshake)", static_cast<unsigned>(cmd),
-           static_cast<unsigned long>(seq), static_cast<unsigned>(total));
+    } else {  // handshake (binary nonces) or heartbeat (empty): only the fact
+      logf(Logger::Level::Debug, "tx cmd=0x%02x seq=%lu frame=%uB (%s)", static_cast<unsigned>(cmd), static_cast<unsigned long>(seq),
+           static_cast<unsigned>(total), cmd == kCmdHeartBeat ? "heartbeat" : "handshake");
     }
     if (client_.write(tx_, total) != total) return fail("closed", "sending to the device failed");
     return true;
@@ -487,10 +574,13 @@ class Session {
   }
 
   const Target target_;
-  const uint32_t timeoutMs_;
-  const String label_;
-  const Logger::Level detail_;  // INFO for user actions, DEBUG for the periodic poll
+  uint32_t timeoutMs_ = 0;      // of the current operation
+  String label_;
+  Logger::Level detail_ = Logger::Level::Info;  // INFO for user actions, DEBUG for the periodic poll
   WiFiClient client_;
+  bool open_ = false;           // connected and the session key negotiated
+  uint16_t switchDp_ = 0;       // the device's switch data point, 0 = unknown
+  uint32_t lastUseMs_ = 0;
   uint8_t* tx_ = nullptr;
   uint8_t* rx_ = nullptr;
   uint8_t realKey_[16] = {0};
@@ -524,6 +614,9 @@ LaneState gLanes[2];
 SemaphoreHandle_t gListMux = nullptr;              // guards the lists, the statistics, the locks map and the counters
 std::map<String, SemaphoreHandle_t> gDeviceLocks;  // by IP, created on first use, never removed
 std::map<String, uint16_t> gCommandsPending;       // by IP: command jobs queued or running
+std::map<String, uint32_t> gConnections;           // by IP: TCP connections opened since boot
+// Kept connections by IP. The map is guarded by gListMux; a Session in it is used only by whoever holds its IP's lock.
+std::map<String, Session*> gKept;
 void (*gObserver)(const Job&) = nullptr;
 Stats gStats;  // guarded by gListMux
 
@@ -536,8 +629,80 @@ SemaphoreHandle_t deviceLock(const String& ip) {
   return out;
 }
 
+void noteConnection(const String& ip) {
+  if (!gListMux) return;  // a direct call before begin()
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  ++gConnections[ip];
+  xSemaphoreGive(gListMux);
+}
+
+// Takes the kept Session of `ip` out of the map (nullptr if none). The caller holds the IP's lock.
+Session* takeKept(const String& ip) {
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  Session* s = nullptr;
+  auto it = gKept.find(ip);
+  if (it != gKept.end()) {
+    s = it->second;
+    gKept.erase(it);
+  }
+  xSemaphoreGive(gListMux);
+  return s;
+}
+
+void putKept(const String& ip, Session* s) {
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  gKept[ip] = s;
+  xSemaphoreGive(gListMux);
+}
+
+// Runs a job of a device with Target::keep over its kept connection (opened on first use, or again after it was lost
+// or the device's key or version changed). The caller holds the IP's lock.
+Result runKept(const Job& job, const char* label) {
+  Session* s = takeKept(job.target.ip);
+  if (s && (s->target().key != job.target.key || s->target().version != job.target.version)) {
+    delete s;
+    s = nullptr;
+  }
+  if (!s) s = new Session(job.target, label);
+  s->setLabel(label);
+  Result r;
+  if (job.op == Op::Query) {
+    r = s->run(Op::Query, job.dp, 0, job.timeoutMs, job.background);
+  } else if (job.op == Op::Refresh) {
+    r = s->run(Op::Refresh, job.dp, 0, job.timeoutMs, job.background, &job.refresh);
+  } else {
+    const uint32_t t = job.unixTime >= 0 ? static_cast<uint32_t>(job.unixTime) : static_cast<uint32_t>(time(nullptr));
+    r = s->run(job.op, job.dp, t, job.timeoutMs, job.background);
+  }
+  putKept(job.target.ip, s);  // also when it failed: closed then, it connects again next time
+  return r;
+}
+
+// The monitor's worker, when its lane is idle: a heartbeat on every kept connection idle for kHeartbeatIdleMs. A device
+// busy with a command is skipped (the command keeps the connection alive).
+void heartbeats() {
+  std::vector<String> due;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  for (const auto& k : gKept) {
+    if (k.second->idleMs() >= kHeartbeatIdleMs) due.push_back(k.first);
+  }
+  xSemaphoreGive(gListMux);
+  for (const String& ip : due) {
+    SemaphoreHandle_t lock = deviceLock(ip);
+    if (xSemaphoreTake(lock, 0) != pdTRUE) continue;
+    if (Session* s = takeKept(ip)) {
+      s->heartbeat();  // a lost connection is closed: the next operation connects again
+      putKept(ip, s);
+    }
+    xSemaphoreGive(lock);
+  }
+}
+
 std::shared_ptr<Job> nextJob(size_t lane) {
-  xSemaphoreTake(gLanes[lane].ready, portMAX_DELAY);
+  // The monitor's worker wakes up now and then for the heartbeats; the command worker only for jobs.
+  if (xSemaphoreTake(gLanes[lane].ready, lane == kMonitorLane ? pdMS_TO_TICKS(1000) : portMAX_DELAY) != pdTRUE) {
+    return nullptr;
+  }
   xSemaphoreTake(gListMux, portMAX_DELAY);
   std::shared_ptr<Job> job;
   if (!gLanes[lane].jobs.empty()) {
@@ -552,7 +717,10 @@ void worker(void* arg) {
   const size_t lane = reinterpret_cast<size_t>(arg);
   for (;;) {
     std::shared_ptr<Job> job = nextJob(lane);
-    if (!job) continue;
+    if (!job) {
+      if (lane == kMonitorLane) heartbeats();
+      continue;
+    }
 
     const char* label = job->device.c_str();
     SemaphoreHandle_t lock = deviceLock(job->target.ip);
@@ -575,6 +743,8 @@ void worker(void* arg) {
       xSemaphoreGive(gListMux);
     }
 
+    // A device that has just lost keep_connected: its kept connection is closed before a new one is opened.
+    if (locked && !job->target.keep) delete takeKept(job->target.ip);
     if (cancelled) {
       Result c;
       c.error = "cancelled";
@@ -585,6 +755,8 @@ void worker(void* arg) {
       busy.error = "busy";
       busy.detail = "another request to this device was still running";
       job->result = busy;
+    } else if (job->target.keep) {
+      job->result = runKept(*job, label);
     } else if (job->op == Op::Query) {
       job->result = query(job->target, job->timeoutMs, label, job->background);
     } else if (job->op == Op::Refresh) {
@@ -625,19 +797,19 @@ void worker(void* arg) {
 }  // namespace
 
 Result query(const Target& target, uint32_t timeoutMs, const char* label, bool background) {
-  Session s(target, timeoutMs, label, background);
-  return s.run(Op::Query, 0, 0);
+  Session s(target, label);
+  return s.run(Op::Query, 0, 0, timeoutMs, background);
 }
 
 Result setSwitch(const Target& target, uint16_t dp, bool on, uint32_t unixTime, uint32_t timeoutMs, const char* label,
                  bool background) {
-  Session s(target, timeoutMs, label, background);
-  return s.run(on ? Op::On : Op::Off, dp, unixTime);
+  Session s(target, label);
+  return s.run(on ? Op::On : Op::Off, dp, unixTime, timeoutMs, background);
 }
 
 Result refresh(const Target& target, const RefreshOpts& opts, uint32_t timeoutMs, const char* label, bool background) {
-  Session s(target, timeoutMs, label, background);
-  return s.run(Op::Refresh, 0, 0, &opts);
+  Session s(target, label);
+  return s.run(Op::Refresh, 0, 0, timeoutMs, background, &opts);
 }
 
 const char* versionName(Version v) { return v == Version::V34 ? "3.4" : "3.5"; }
@@ -660,6 +832,32 @@ void begin() {
 }
 
 void setObserver(void (*observer)(const Job&)) { gObserver = observer; }
+
+uint32_t connections(const String& ip) {
+  if (!gListMux) return 0;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  auto it = gConnections.find(ip);
+  const uint32_t n = it == gConnections.end() ? 0 : it->second;
+  xSemaphoreGive(gListMux);
+  return n;
+}
+
+void keepOnly(const std::vector<String>& ips) {
+  if (!gListMux) return;
+  std::vector<String> drop;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  for (const auto& k : gKept) {
+    if (std::find(ips.begin(), ips.end(), k.first) == ips.end()) drop.push_back(k.first);
+  }
+  xSemaphoreGive(gListMux);
+  for (const String& ip : drop) {
+    SemaphoreHandle_t lock = deviceLock(ip);
+    if (xSemaphoreTake(lock, 0) != pdTRUE) continue;  // in use: next time
+    delete takeKept(ip);
+    LOGI(TAG, "%s: kept connection closed (the device is no longer kept connected or polled)", ip.c_str());
+    xSemaphoreGive(lock);
+  }
+}
 
 Stats stats() {
   if (!gListMux) return Stats();

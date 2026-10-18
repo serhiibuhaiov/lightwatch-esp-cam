@@ -7,6 +7,11 @@
 // one command, close. Every received frame is authenticated (HMAC for 3.4, GCM tag
 // for 3.5) before it is used, and the retcode of the device is checked.
 //
+// A device with Target::keep (keep_connected in devices.json) instead gets one connection that stays open: every
+// operation of both lanes goes over it, and the monitor's worker sends a heartbeat when it was idle for
+// kHeartbeatIdleMs. Some sockets misbehave under a new connection and handshake every few seconds (the boiler socket
+// switched itself off while it was polled that way, and never while it was not polled).
+//
 // Blocking: an operation takes up to `timeoutMs` plus the connect time. Never call
 // query()/setSwitch() from the async web task or from loop(): use submit(), which runs them in
 // two worker tasks: "tuya_cmd" (commands: buttons, API, scenarios) and "tuya_mon" (the monitor's polls).
@@ -18,6 +23,7 @@
 
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include "logger.h"
 
@@ -29,6 +35,7 @@ struct Target {
   String ip;                      // dotted IPv4
   String key;                     // the 16-character local key
   Version version = Version::V34;
+  bool keep = false;              // keep one connection open between operations (see above)
 };
 
 struct Result {
@@ -43,6 +50,7 @@ struct Result {
   uint32_t handshakeMs = 0;       // session key negotiation
   uint32_t commandMs = 0;         // command sent until its answer arrived (for a refresh: the final status query)
   uint32_t queuedMs = 0;          // queued jobs: submit() until the worker started it (0 for a direct call)
+  bool reused = false;            // went over a kept connection that was open before (no connect, no handshake)
   uint32_t updateMs = 0;          // refresh only: UPDATEDPS sent until the settle wait ended
   String before;                  // refresh with compare: the status answer BEFORE UPDATEDPS ("" otherwise)
   String frames;                  // refresh: every other frame the device sent (cmd, retcode, payload), one per line
@@ -108,6 +116,16 @@ Stats stats();
 
 // True while a command (not a poll) for this device IP is queued or running. The monitor leaves such a device alone.
 bool commandPending(const String& ip);
+
+// TCP connections opened to this IP since boot (by both lanes, kept or not).
+uint32_t connections(const String& ip);
+
+// Closes the kept connections of every IP not in `ips` (the monitor calls it every cycle with the polled devices that
+// have keep_connected). A connection in use right now is closed at the next call.
+void keepOnly(const std::vector<String>& ips);
+
+// A kept connection idle for this long gets a heartbeat (HEART_BEAT 0x09, empty body), like TinyTuya and localtuya do.
+constexpr uint32_t kHeartbeatIdleMs = 10000;
 
 // Starts the two worker tasks. Call once from setup().
 void begin();

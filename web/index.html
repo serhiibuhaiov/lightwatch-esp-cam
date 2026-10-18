@@ -867,7 +867,8 @@ function viewDevices() {
       : st.known ? (st.online ? (st.fails > 0 ? badge("warn", "онлайн · остання спроба невдала") : badge("ok", "онлайн")) : badge("err", "офлайн")) : badge("n", "невідомо");
     const sw = !st.known || !st.dps ? badge("n", "невідомо") : on === undefined ? badge("n", "немає даних") : on ? badge("ok", "ввімкнено") : badge("n", "вимкнено");
     const parts = [E("div", { class: "dh" }, E("h3", {}, d.name), online, sw,
-      E("span", { class: "mut" }, d.ip + " · протокол " + d.version + " · DP " + d.dp))];
+      E("span", { class: "mut" }, d.ip + " · протокол " + d.version + " · DP " + d.dp +
+        (d.keep_connected ? " · з'єднання тримається" : "") + (st.connections != null ? " · підключень від старту: " + st.connections : "")))];
 
     if (d.ignore) {
       parts.push(note("warn", "Пристрій ігнорується: монітор його не опитує, а кроки сценаріїв для нього пропускаються. Вручну ним можна керувати. Вимкнути ігнорування можна в «Налаштувати пристрої»."));
@@ -993,14 +994,14 @@ function viewDevConfig() {
 
   const NAME_RE = /^[a-z0-9_-]{1,32}$/;
   const IP_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
-  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, meters: { power: "", current: "", voltage: "", energy: "" } });
+  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, keep_connected: false, meters: { power: "", current: "", voltage: "", energy: "" } });
   const mstr = v => (v == null ? "" : String(v));
 
   async function load() {
     try {
       const { j } = await getJson("/api/devices/config");
       max = j.max || 16;
-      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore,
+      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected,
         meters: { power: mstr(d.meters && d.meters.power), current: mstr(d.meters && d.meters.current), voltage: mstr(d.meters && d.meters.voltage), energy: mstr(d.meters && d.meters.energy) } }));
       render();
     } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати список: " + e.message)); }
@@ -1036,7 +1037,7 @@ function viewDevConfig() {
       const body = { devices: rows.map(r => {
         const meters = {};
         for (const [k, v] of Object.entries(r.meters)) if (v !== "") meters[k] = Number(v);  // empty = standard number, left out
-        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, meters };
+        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, meters };
       }) };
       const r = await api("/api/devices/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -1067,6 +1068,8 @@ function viewDevConfig() {
     const dpIn = E("input", { type: "number", value: r.dp, min: 1, max: 255 });
     const ign = E("input", { type: "checkbox", checked: r.ignore });
     ign.addEventListener("change", () => { r.ignore = ign.checked; });
+    const keep = E("input", { type: "checkbox", checked: r.keep_connected });
+    keep.addEventListener("change", () => { r.keep_connected = keep.checked; });
     const mIn = {};
     const mField = (k, label) => {
       mIn[k] = E("input", { type: "number", value: r.meters[k], min: 0, max: 255, placeholder: "станд. " + STD_METER_DP[k] });
@@ -1099,7 +1102,9 @@ function viewDevConfig() {
         field("Версія протоколу", verIn, "3.4 або 3.5"),
         field("DP вмикання", dpIn, "зазвичай 1"),
         E("div", { class: "f" }, E("label", {}, "Ігнорувати"), E("label", { style: "font-weight:400" }, ign, " не опитувати, пропускати в сценаріях"),
-          E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати."))),
+          E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати.")),
+        E("div", { class: "f" }, E("label", {}, "Тримати з'єднання"), E("label", { style: "font-weight:400" }, keep, " одне з'єднання на всі запити"),
+          E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Займає одне з їхніх місць для підключень."))),
       E("details", { open: Object.values(r.meters).some(v => v !== "") },
         E("summary", {}, "Показники: у яких data points напруга, струм, потужність, енергія"),
         E("div", { class: "fields", style: "margin-top:10px" },
@@ -1327,7 +1332,7 @@ function viewLogs() {
 // Requests that change something ask for confirmation first; the PUTs (full replacement) start from the current content.
 const PREFILL = {
   "/api/config": j => j,
-  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore,
+  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected,
     meters: Object.fromEntries(Object.entries(d.meters || {}).filter(([, v]) => v != null)) })) }),
   "/api/scenarios": j => ({ scenarios: j.scenarios.map(sc => {
     const o = { name: sc.name, enabled: sc.enabled, trigger: sc.trigger, default_pause_s: sc.default_pause_s };
