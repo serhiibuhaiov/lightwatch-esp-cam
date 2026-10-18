@@ -1178,10 +1178,94 @@ const SCHEMA = [
 const dget = (o, p) => p.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
 const dset = (o, p, v) => { const ks = p.split("."); const l = ks.pop(); let n = o; for (const k of ks) n = n[k] = n[k] || {}; n[l] = v; };
 
+// The "Прошивка" card: the running firmware and an upload of a new one (POST /api/ota). It lives across reloads of the
+// settings form, so an upload in progress is not thrown away.
+function firmwareCard() {
+  const info = E("div");
+  const file = E("input", { type: "file", accept: ".bin,application/octet-stream" });
+  const bar = E("progress", { max: 100, value: 0, style: "width:100%;display:none" });
+  const msg = E("div");
+  const btn = E("button", { type: "button", class: "d" }, "Оновити прошивку");
+  let fw = null, busy = false;
+  const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+  const STATE = { valid: "підтверджена", pending_verify: "нова, чекає підтвердження", undefined: "залита через USB" };
+
+  async function show() {
+    try {
+      const { j } = await getJson("/api/status");
+      fw = j.firmware || null;
+      if (!fw) { info.replaceChildren(note("warn", "Прошивка не повідомляє про себе (стара версія?).")); return; }
+      const lines = [E("p", { class: "mut", style: "margin:0 0 8px" },
+        "Працює слот " + fw.partition + " (" + (STATE[fw.state] || fw.state) + "), образ " + fw.image_sha256.slice(0, 16) + "…; наступне оновлення піде в " +
+        fw.next_partition + ", до " + fmtKb(fw.slot_bytes) + ".")];
+      if (fw.state === "pending_verify") lines.push(note("warn", fw.confirm_in_s == null ? "Нова прошивка чекає на Wi-Fi, щоб підтвердитись; перезапуск до того поверне попередню."
+        : "Нова прошивка підтвердиться через " + fw.confirm_in_s + " с роботи з Wi-Fi; збій чи перезапуск до того поверне попередню."));
+      if (fw.rolled_back_from) lines.push(note("err", "Прошивка в слоті " + fw.rolled_back_from + " не підтвердилась, і пристрій повернувся до цієї."));
+      info.replaceChildren(...lines);
+    } catch (e) { info.replaceChildren(note("err", "Не вдалося прочитати стан прошивки: " + e.message)); }
+  }
+
+  async function upload() {
+    const f = file.files[0];
+    if (!f) { msg.replaceChildren(note("warn", "Виберіть файл firmware.bin (.pio/build/esp32cam/firmware.bin).")); return; }
+    const head = new Uint8Array(await f.slice(0, 1).arrayBuffer());
+    if (head[0] !== 0xE9) { msg.replaceChildren(note("err", "Це не образ прошивки ESP32 (перший байт не 0xE9).")); return; }
+    if (fw && f.size > fw.slot_bytes) { msg.replaceChildren(note("err", "Файл більший за слот (" + fmtKb(fw.slot_bytes) + ").")); return; }
+    if (!confirm("Залити «" + f.name + "» (" + fmtKb(f.size) + ") і перезапустити пристрій? Сценарії «З'явилося живлення» не стартують, запущені продовжаться після перезапуску.")) return;
+    const want = hex(await f.slice(-32).arrayBuffer());  // the SHA-256 appended to the image: what the board reports after the start
+    busy = true; btn.disabled = true; bar.style.display = ""; bar.value = 0;
+    msg.replaceChildren(note("n", "Завантажую…"));
+    const res = await new Promise(resolve => {
+      const x = new XMLHttpRequest();
+      x.open("POST", "/api/ota");
+      x.setRequestHeader("Content-Type", "application/octet-stream");
+      x.setRequestHeader("X-OTA-Confirm", "1");
+      x.upload.onprogress = ev => { if (ev.lengthComputable) bar.value = Math.round(ev.loaded * 100 / ev.total); };
+      x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {} resolve({ ok: x.status === 200, status: x.status, j }); };
+      x.onerror = () => resolve({ ok: false, status: 0, j: { error: "з'єднання обірвалось" } });
+      x.send(f);
+    });
+    if (!res.ok) {
+      msg.replaceChildren(note("err", "Не оновлено (" + (res.j.error || "HTTP " + res.status) + "). Працює попередня прошивка."));
+      busy = false; btn.disabled = false; bar.style.display = "none";
+      return;
+    }
+    msg.replaceChildren(note("warn", "Записано " + fmtKb(res.j.bytes) + " за " + (res.j.ms / 1000).toFixed(1) + " с. Перезапуск… чекаю на пристрій (до 90 с)"));
+    await sleep(6000);
+    let done = false;
+    for (let i = 0; i < 40 && !done; i++) {
+      try {
+        const r = await fetch("/api/status", { cache: "no-store" });
+        if (r.ok) {
+          const j = await r.json();
+          done = true;
+          msg.replaceChildren(j.firmware && j.firmware.image_sha256 === want
+            ? note("ok", "Нова прошивка працює (слот " + j.firmware.partition + "). Вона підтвердиться сама за " + 60 + " с роботи з Wi-Fi.")
+            : note("err", "Пристрій відповідає, але працює не той образ: оновлення не стало (або його відкотило)."));
+        }
+      } catch (e) {}
+      if (!done) await sleep(2000);
+    }
+    if (!done) msg.replaceChildren(note("err", "Пристрій не відповів за 90 с. Перевірте живлення та Wi-Fi; якщо нова прошивка не стартує, завантажувач поверне попередню."));
+    busy = false; btn.disabled = false; bar.style.display = "none";
+    show();
+  }
+
+  btn.addEventListener("click", upload);
+  const card = E("div", { class: "card" }, E("h2", {}, "Прошивка"), info,
+    E("div", { class: "row" }, file, btn), bar, msg,
+    E("small", { class: "mut" }, "Файл: .pio/build/esp32cam/firmware.bin після «pio run». Новий образ пишеться в інший слот; поки він не перевірений, працює старий. " +
+      "Після перезапуску нова прошивка має пропрацювати 60 с з Wi-Fi, інакше (збій, перезапуск, немає Wi-Fi) завантажувач поверне попередню."));
+  card.refresh = () => { if (!busy) show(); };
+  show();
+  return card;
+}
+
 function viewConfig() {
   const box = E("div");
   main.replaceChildren(box);
   let mode = "saved", loaded = null, inputs = {};
+  const fwCard = firmwareCard();
 
   async function waitForDevice() {
     box.replaceChildren(note("warn", "Перезапуск… чекаю на пристрій (до 90 с)"));
@@ -1257,7 +1341,8 @@ function viewConfig() {
         E("div", { id: "msg" })];
       form.append(...actions);
       const keepMsg = $("#msg", box) ? $("#msg", box).cloneNode(true) : null;
-      box.replaceChildren(...top, form);
+      box.replaceChildren(...top, form, fwCard);
+      fwCard.refresh();
       if (keepMsg && $("#msg", box)) $("#msg", box).replaceWith(keepMsg);
       stamp();
     } catch (e) { box.replaceChildren(note("err", "Не вдалося завантажити налаштування: " + e.message)); }
@@ -1366,7 +1451,9 @@ function viewApi() {
   function opCard(path, method, o) {
     const params = o.parameters || [];
     const inputs = {};
-    const hasBody = !!o.requestBody;
+    // A binary body (the firmware for /api/ota) cannot be typed in here: such a request shows its curl line (x-curl) only.
+    const binary = !!(o.requestBody && !o.requestBody.content["application/json"]);
+    const hasBody = !!o.requestBody && !binary;
     const out = E("div");
     const curl = E("pre", { class: "curl" });
     let ta = null, loadedBody = false;
@@ -1379,6 +1466,7 @@ function viewApi() {
     const upd = () => {
       let c = "curl -u USER:PASS -X " + method.toUpperCase() + " " + JSON.stringify(location.origin + url());
       if (hasBody) c += ' -H "Content-Type: application/json" --data-binary @body.json';
+      if (binary) c += " " + (o["x-curl"] || "");
       curl.textContent = c;
     };
 
@@ -1447,7 +1535,7 @@ function viewApi() {
         fields.length ? E("div", { class: "fields", style: "margin:8px 0" }, fields) : null,
         hasBody ? E("div", { class: "f", style: "margin:8px 0" }, E("label", {}, "Тіло запиту (JSON)"), ta,
           E("small", {}, PREFILL[path] ? "Підставлено поточний вміст пристрою: PUT замінює його повністю." : o.requestBody.description || "")) : null,
-        E("div", { class: "row" }, btn),
+        binary ? note("n", o.requestBody.description || "") : E("div", { class: "row" }, btn),
         curl, out));
     det.addEventListener("toggle", () => { if (det.open) { upd(); loadCurrent(); } });
     upd();

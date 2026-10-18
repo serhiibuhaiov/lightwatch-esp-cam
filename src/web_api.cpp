@@ -17,6 +17,7 @@
 #include "devices.h"
 #include "http_out.h"
 #include "logger.h"
+#include "ota.h"
 #include "psram_alloc.h"
 #include "scenario.h"
 #include "storage.h"
@@ -144,6 +145,7 @@ void onConfigGet(AsyncWebServerRequest* req) {
 
 void rebootTask(void*) {
   vTaskDelay(pdMS_TO_TICKS(1500));  // let the HTTP response leave
+  Ota::confirm("a restart was asked for over the web");  // the web server works: no rollback of a new firmware
   LOGW(TAG, "restarting on request");
   Logger::flushBlocking();
   ESP.restart();
@@ -268,6 +270,7 @@ void onStatus(AsyncWebServerRequest* req) {
     lg["tail_max_bytes"] = Storage::kMaxTailBytes;
     l["boot_history"] = BootLog::kMaxEntries;
   }
+  Ota::status(doc["firmware"].to<JsonObject>());
   doc["config_source"] = Config::sourceName(Config::loadedFrom());
   doc["restart_pending"] = Config::restartPending();
   doc["sd"] = sdStateName(sd);
@@ -940,6 +943,96 @@ void onLogs(AsyncWebServerRequest* req) {
   sendJson(req, 200, out);
 }
 
+// ---- POST /api/ota ------------------------------------------------------------------
+
+// The raw firmware image (.pio/build/esp32cam/firmware.bin) is the body, Content-Type application/octet-stream, written
+// into the other app slot as it arrives (see Ota). X-OTA-Confirm: 1 is required: a page of another site cannot send that
+// header to the board without the browser asking it first (CORS), which it never answers. X-OTA-MD5 (optional): the MD5
+// of the file, checked before the slot is switched.
+const char* kOtaConfirmHeader = "X-OTA-Confirm";
+const char* kOtaMd5Header = "X-OTA-MD5";
+
+// Why an upload was refused, for the request handler. Plain data: the library frees _tempObject with free().
+struct OtaNote {
+  int code;
+  char msg[160];
+};
+
+void otaReject(AsyncWebServerRequest* req, int code, const String& msg) {
+  if (req->_tempObject) return;  // the first reason counts
+  auto* n = static_cast<OtaNote*>(malloc(sizeof(OtaNote)));
+  if (!n) return;
+  n->code = code;
+  strlcpy(n->msg, msg.c_str(), sizeof(n->msg));
+  req->_tempObject = n;
+}
+
+// The checks that need only the headers. 0 = fine.
+int otaHeaderError(AsyncWebServerRequest* req, String& msg) {
+  const AsyncWebHeader* confirm = req->getHeader(kOtaConfirmHeader);
+  if (!confirm || confirm->value() != "1") {
+    msg = String("send the header ") + kOtaConfirmHeader + ": 1 to confirm the firmware update";
+    return 400;
+  }
+  if (!req->contentType().startsWith("application/octet-stream")) {
+    msg = "send the firmware .bin as the body with Content-Type: application/octet-stream";
+    return 415;
+  }
+  return 0;
+}
+
+void onOtaBody(AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
+  if (index == 0) {
+    bool locked = false;
+    if (!credentialsOk(req, locked)) return;  // onOtaPost answers 401/403
+    String msg;
+    int code = otaHeaderError(req, msg);
+    if (!code) {
+      const AsyncWebHeader* md5 = req->getHeader(kOtaMd5Header);
+      code = Ota::begin(req, total, md5 ? md5->value() : String(), msg);
+    }
+    if (code) {
+      otaReject(req, code, msg);
+      return;
+    }
+    req->onDisconnect([req]() { Ota::abort(req, "the connection was closed"); });
+  }
+  if (!Ota::owns(req)) return;
+  String err;
+  if (!Ota::write(req, data, len, err)) otaReject(req, 400, err);
+}
+
+void onOtaPost(AsyncWebServerRequest* req) {
+  if (!authorize(req)) return;
+  if (const auto* n = static_cast<const OtaNote*>(req->_tempObject)) {
+    Ota::abort(req, n->msg);
+    sendError(req, n->code, n->msg);
+    return;
+  }
+  if (!Ota::owns(req)) {  // no body at all (or a form body the library parsed as fields)
+    String msg;
+    const int code = otaHeaderError(req, msg);
+    sendError(req, code ? code : 400, code ? msg : String("empty body: send the firmware .bin as the request body"));
+    return;
+  }
+  String err;
+  size_t bytes = 0;
+  uint32_t ms = 0;
+  if (!Ota::finish(req, err, bytes, ms)) {
+    sendError(req, 400, err);
+    return;
+  }
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["bytes"] = bytes;
+  doc["ms"] = ms;
+  doc["rebooting"] = true;
+  String out;
+  serializeJson(doc, out);
+  sendJson(req, 200, out);
+  xTaskCreate(rebootTask, "reboot", 8192, nullptr, 1, nullptr);
+}
+
 }  // namespace
 
 void begin() {
@@ -967,6 +1060,7 @@ void begin() {
   server.on("/api/devices/on", HTTP_POST, [](AsyncWebServerRequest* req) { onDeviceOp(req, Tuya::Op::On); });
   server.on("/api/devices/off", HTTP_POST, [](AsyncWebServerRequest* req) { onDeviceOp(req, Tuya::Op::Off); });
   server.on("/api/http/test", HTTP_POST, onHttpTest, nullptr, onConfigBody);
+  server.on("/api/ota", HTTP_POST, onOtaPost, nullptr, onOtaBody);
   server.onNotFound([](AsyncWebServerRequest* req) { sendError(req, 404, "not found"); });
   server.begin();
   LOGI(TAG, "web API listening on port 80");

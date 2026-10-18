@@ -44,6 +44,8 @@ def history(dev, limit=10):
     return r.json()["samples"]
 
 
+# Waits for something the monitor does once per cycle are two intervals long: offline devices (1.5 s per connect attempt)
+# shift the moment a cycle gets to a device by several seconds.
 def wait_for(cond, timeout, what, step=0.5):
     end = time.time() + timeout
     while time.time() < end:
@@ -61,15 +63,15 @@ def pushing(dev, fake):
     fake.answer_heartbeat = True
     fake.set(d1=True, d19=480)
     edit(dev, monitor="push", keep_connected=False, ignore=False)
-    wait_for(lambda: fake.open_connections == 1, interval(dev) + 10, "the board did not open the connection of the push device")
-    wait_for(lambda: device(dev)["state"].get("online") is True, interval(dev) + 10, "the push device is not online")
+    wait_for(lambda: fake.open_connections == 1, interval(dev) * 2 + 10, "the board did not open the connection of the push device")
+    wait_for(lambda: device(dev)["state"].get("online") is True, interval(dev) * 2 + 10, "the push device is not online")
     yield
     fake.idle_timeout = 10.0
     fake.answer_heartbeat = True
     fake.start()
     edit(dev, monitor="poll", keep_connected=False, ignore=False)
     # the next test starts with a new connection and its opening query
-    wait_for(lambda: fake.open_connections == 0, interval(dev) + 10, "the push connection was not closed after the test")
+    wait_for(lambda: fake.open_connections == 0, interval(dev) * 2 + 10, "the push connection was not closed after the test")
 
 
 def test_limits_name_the_push_timings(dev):
@@ -126,7 +128,7 @@ def test_when_nothing_is_pushed_for_push_quiet_s_the_device_is_queried(dev, fake
 def test_a_lost_connection_is_opened_again_by_a_query(dev, fake):
     fake.answer_heartbeat = False  # the board closes the connection when the heartbeat goes unanswered
     c0, q0 = fake.connections, fake.queries
-    wait_for(lambda: fake.connections > c0, interval(dev) + 15, "the board did not connect again after the silent heartbeat")
+    wait_for(lambda: fake.connections > c0, interval(dev) * 2 + 15, "the board did not connect again after the silent heartbeat")
     fake.answer_heartbeat = True
     wait_for(lambda: fake.queries > q0, 10, "no status query on the new connection")
     st = device(dev)["state"]
@@ -146,13 +148,13 @@ def test_a_device_that_stops_answering_goes_offline_and_comes_back(dev, fake):
 
 def test_ignore_closes_the_push_connection(dev, fake):
     edit(dev, ignore=True)
-    wait_for(lambda: fake.open_connections == 0, interval(dev) + 10, "the connection of an ignored push device stayed open")
+    wait_for(lambda: fake.open_connections == 0, interval(dev) * 2 + 10, "the connection of an ignored push device stayed open")
     assert fake.push(d1=False) == 0
 
 
 def test_back_to_poll_closes_the_connection_and_each_cycle_queries(dev, fake):
     edit(dev, monitor="poll")
-    wait_for(lambda: fake.open_connections == 0, interval(dev) + 10, "the push connection was not closed in poll mode")
+    wait_for(lambda: fake.open_connections == 0, interval(dev) * 2 + 10, "the push connection was not closed in poll mode")
     q0 = fake.queries
     time.sleep(interval(dev) * 2.2)
     assert fake.queries - q0 >= 2  # polled every cycle again

@@ -42,7 +42,7 @@ def test_ui_page_served_behind_auth(dev):
         assert r.status_code == 200
         assert r.headers["Content-Type"].startswith("text/html")
         assert "<title>" in r.text and "/api/status" in r.text and "/api/config" in r.text
-        assert 5000 < len(r.content) < 125000  # embedded in the firmware: keep an eye on its size
+        assert 5000 < len(r.content) < 135000  # embedded in the firmware: keep an eye on its size
 
 
 # ---- GET /api/status ------------------------------------------------------------------

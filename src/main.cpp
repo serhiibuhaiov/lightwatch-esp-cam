@@ -3,12 +3,14 @@
 // setup() brings up, in order: the LEDs, the logger and the boot history, the storage (SD card + a
 // flash copy of the config), the config, the Tuya device list with its workers and monitor, the worker
 // of the outgoing HTTP requests, Wi-Fi and NTP, the web API, and the scenarios. loop() only watches: boot stages, the clock, a card that
-// shows up late, and the Wi-Fi watchdog (restart after wifi.restart_after_min without Wi-Fi).
+// shows up late, the confirmation of a new firmware (see ota.h), and the Wi-Fi watchdog (restart after wifi.restart_after_min
+// without Wi-Fi).
 //
 // The camera is never initialised.
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <time.h>
 
@@ -18,6 +20,7 @@
 #include "http_out.h"
 #include "indicator.h"
 #include "logger.h"
+#include "ota.h"
 #include "scenario.h"
 #include "storage.h"
 #include "tuya.h"
@@ -102,6 +105,7 @@ void setup() {
 
   BootLog::stage('2');
   Logger::start(cfg.log);
+  Ota::bootInfo();
   Devices::load();  // /devices.json on the SD card only; no card = no devices
   Tuya::begin();
   Tuya::setObserver(Devices::onJobDone);
@@ -137,6 +141,18 @@ void setup() {
 
   // Starts the power_on scenarios after a power-up (and after the Wi-Fi watchdog's restart while they still waited, see scenario.h).
   Scenario::begin(esp_reset_reason(), resetReasonName(esp_reset_reason()), cfg.startup.scenarioDelaySec);
+
+#ifdef OTA_ROLLBACK_TEST
+  // A test build (PLATFORMIO_BUILD_FLAGS=-DOTA_ROLLBACK_TEST, uploaded over OTA only): it restarts before it could be
+  // confirmed, so the bootloader must go back to the previous firmware. Only while unconfirmed: never a restart loop.
+  esp_ota_img_states_t st;
+  if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
+    LOGW(TAG, "OTA_ROLLBACK_TEST build: restarting in 20 s without confirming this firmware");
+    delay(20000);
+    Logger::flushBlocking();
+    ESP.restart();
+  }
+#endif
 }
 
 void loop() {
@@ -160,6 +176,7 @@ void loop() {
     Scenario::sdAvailable();
   }
   sdPrev = sdNow;
+  Ota::loop();  // confirms a new firmware after 60 s of Wi-Fi; the Wi-Fi watchdog below restarts without (= rollback)
   if (WiFi.status() == WL_CONNECTED) {
     gLastWifiOkMs = millis();
   } else if (gRestartAfterMs && gHaveSsid && millis() - gLastWifiOkMs > gRestartAfterMs) {
