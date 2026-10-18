@@ -185,6 +185,14 @@ bool parse(const String& raw, std::vector<Device>& out, String& err, const std::
       }
       d.updatedps = item["updatedps"].as<bool>();
     }
+    if (!item["monitor"].isNull()) {
+      const String mode = item["monitor"].is<const char*>() ? String(item["monitor"].as<const char*>()) : String("");
+      if (mode != "poll" && mode != "push") {
+        err = where + ".monitor must be \"poll\" or \"push\"";
+        return false;
+      }
+      d.push = mode == "push";
+    }
     if (!item["meters"].isNull()) {
       if (!item["meters"].is<JsonObjectConst>()) {
         err = where + ".meters must be an object";
@@ -236,6 +244,7 @@ String fileText(const std::vector<Device>& list) {
     if (d.ignore) o["ignore"] = true;
     if (d.keepConnected) o["keep_connected"] = true;
     if (!d.updatedps) o["updatedps"] = false;
+    if (d.push) o["monitor"] = "push";
     if (d.dpPower >= 0 || d.dpCurrent >= 0 || d.dpVoltage >= 0 || d.dpEnergy >= 0) {
       JsonObject m = o["meters"].to<JsonObject>();
       if (d.dpPower >= 0) m["power"] = d.dpPower;
@@ -347,6 +356,7 @@ String configJson() {
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
     o["updatedps"] = d.updatedps;
+    o["monitor"] = d.push ? "push" : "poll";
     writeMeters(o["meters"].to<JsonObject>(), d);
   }
   String out;
@@ -448,6 +458,8 @@ void limits(JsonObject out) {
   out["history_capacity"] = kHistoryCapacity;
   out["history_span_s"] = static_cast<uint32_t>(kHistoryCapacity) * interval;  // at the current polling interval
   out["poll_interval_s"] = interval;
+  out["push_control_s"] = kPushControlS;
+  out["push_quiet_s"] = kPushQuietS;
 }
 
 namespace {
@@ -562,6 +574,22 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
   return after.online ? 1 : 0;
 }
 
+// A push device with a live connection: its cached state (the last query with the pushes since merged in) becomes a
+// sample of the history, as a poll's answer would. Nothing for a device that was removed or edited meanwhile.
+void recordCached(const String& name, const Tuya::Target& target, uint16_t dp) {
+  Lock lock;
+  const Device* dev = nullptr;
+  for (const Device& x : gList) {
+    if (x.name == name) dev = &x;
+  }
+  if (!dev || dev->ip != target.ip || dev->key != target.key || dev->version != target.version || dev->dp != dp) return;
+  auto it = gStates.find(name);
+  if (it == gStates.end() || !it->second.known) return;
+  JsonDocument dps;
+  const bool ok = it->second.online && !it->second.dpsJson.isEmpty() && !deserializeJson(dps, it->second.dpsJson);
+  appendSample(*dev, ok, dps.as<JsonVariantConst>());
+}
+
 // One TCP connect to the device's Tuya port (no session): tells "the device is up but turns the session away" from
 // "it does not answer at all". Takes up to 1.5 s, so only the monitor task calls it (never a worker or a web handler).
 String probeText(const Device& d) {
@@ -607,6 +635,8 @@ void monitorTask(void* arg) {
   // so the log would say "OFFLINE" and nothing until the device is back).
   constexpr uint32_t kDiagEveryMs = 60000;
   std::map<String, uint32_t> diagAt;
+  // Push devices: millis() of the last successful status query (see kPushControlS).
+  std::map<String, uint32_t> pushQueryAt;
   bool slow = false;  // the last cycle took longer than the interval
 
   vTaskDelay(pdMS_TO_TICKS(5000));  // let Wi-Fi come up
@@ -616,7 +646,7 @@ void monitorTask(void* arg) {
       const std::vector<Device> devices = list();
       std::vector<String> kept;  // the polled devices with keep_connected: the kept connections of any others are closed
       for (const Device& d : devices) {
-        if (d.keepConnected && !d.ignore) kept.push_back(d.ip);
+        if (d.target().keep && !d.ignore) kept.push_back(d.ip);
       }
       Tuya::keepOnly(kept);
       for (auto it = cyclesToSkip.begin(); it != cyclesToSkip.end();) {  // forget the devices that are gone
@@ -633,6 +663,11 @@ void monitorTask(void* arg) {
         bool present = false;
         for (const Device& d : devices) present = present || d.name == it->first;
         it = present ? std::next(it) : diagAt.erase(it);
+      }
+      for (auto it = pushQueryAt.begin(); it != pushQueryAt.end();) {
+        bool present = false;
+        for (const Device& d : devices) present = present || (d.name == it->first && d.push);
+        it = present ? std::next(it) : pushQueryAt.erase(it);
       }
       for (const Device& listed : devices) {
         // The list may have changed since this cycle began (a device removed, edited, ignored): work with the current one.
@@ -653,6 +688,25 @@ void monitorTask(void* arg) {
         // A command is queued or running for this device: it will refresh the cached state itself, and a poll
         // would only collide with it. Leave the device alone this cycle.
         if (Tuya::commandPending(d.ip)) continue;
+
+        // A push device with its connection open reports its changes itself: no query, the history gets the cached
+        // state. A status query only every kPushControlS, or when nothing came from it for kPushQuietS.
+        if (d.push && Tuya::kept(d.ip)) {
+          State st;
+          state(d.name, st);
+          const uint32_t nowMs = millis();
+          auto q = pushQueryAt.find(d.name);
+          const uint32_t sinceQuery = q == pushQueryAt.end() ? UINT32_MAX : nowMs - q->second;
+          const uint32_t sinceHeard = std::min(sinceQuery, st.lastPushMs ? nowMs - st.lastPushMs : UINT32_MAX);
+          const bool controlDue = sinceQuery >= kPushControlS * 1000UL;
+          if (!controlDue && sinceHeard < kPushQuietS * 1000UL) {
+            recordCached(d.name, d.target(), d.dp);
+            continue;
+          }
+          if (!controlDue) {
+            LOGD(TAG, "[%s] nothing pushed for %lu s: status query", d.name.c_str(), static_cast<unsigned long>(sinceHeard / 1000));
+          }
+        }
 
         // A device a power rule watches gets UPDATEDPS + status (fresh readings) instead of the plain query; only
         // those, only while a rule is enabled, and not with updatedps:false. If it does not take that command: plain
@@ -682,7 +736,8 @@ void monitorTask(void* arg) {
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
           }
-          const uint32_t waitUntil = millis() + timeoutMs + 5000;
+          // Over a kept connection a timed-out operation is tried once more on a new one (connect <= 1.5 s, timeout again).
+          const uint32_t waitUntil = millis() + (d.target().keep ? 2 * timeoutMs + 1500 : timeoutMs) + 5000;
           while (!job->done.load(std::memory_order_acquire) && static_cast<int32_t>(waitUntil - millis()) > 0) {
             vTaskDelay(pdMS_TO_TICKS(50));
           }
@@ -716,6 +771,7 @@ void monitorTask(void* arg) {
         // single poll is polled in full again next cycle, to confirm quickly.
         const int online = applyQuery(d.name, d.target(), d.dp, last);
         if (online < 0) continue;  // the device was removed or edited while the poll ran: the answer was dropped
+        if (d.push && last.ok) pushQueryAt[d.name] = millis();
         cyclesToSkip[d.name] = online == 1 ? 0 : kOfflineEvery - 1;
         if (online == 1) {
           diagAt.erase(d.name);
@@ -883,6 +939,39 @@ void onJobDone(const Tuya::Job& job) {
   if (job.background || (job.op != Tuya::Op::Query && job.op != Tuya::Op::Refresh)) return;
   if (job.result.error == "busy" || job.result.error == "cancelled") return;  // the device was never asked: nothing to learn from it
   applyQuery(job.device, job.target, job.dp, job.result);
+}
+
+void onPush(const String& name, const Tuya::Target& target, const String& json) {
+  JsonDocument payload;
+  if (deserializeJson(payload, json)) return;
+  JsonVariantConst pushed = payload["dps"];
+  if (pushed.isNull()) pushed = payload["data"]["dps"];
+  if (!pushed.is<JsonObjectConst>()) return;
+  int was = -1, now = -1;
+  uint16_t dp = 0;
+  {
+    Lock lock;
+    const Device* dev = nullptr;
+    for (const Device& x : gList) {
+      if (x.name == name) dev = &x;
+    }
+    if (!dev || !dev->push || dev->ignore || dev->ip != target.ip || dev->key != target.key || dev->version != target.version) return;
+    dp = dev->dp;
+    State& st = gStates[name];
+    JsonDocument merged;
+    if (st.dpsJson.isEmpty() || deserializeJson(merged, st.dpsJson) || !merged.is<JsonObject>()) merged.to<JsonObject>();
+    const String key = String(dp);
+    if (merged[key].is<bool>()) was = merged[key].as<bool>() ? 1 : 0;
+    for (JsonPairConst kv : pushed.as<JsonObjectConst>()) merged[kv.key()] = kv.value();
+    if (merged[key].is<bool>()) now = merged[key].as<bool>() ? 1 : 0;
+    st.dpsJson = "";
+    serializeJson(merged, st.dpsJson);
+    st.lastPushMs = millis() ? millis() : 1;
+    ++st.pushes;
+  }
+  if (now >= 0 && was != now) {
+    LOGI(TAG, "[%s] switch (dp %u) is now %s (pushed)", name.c_str(), static_cast<unsigned>(dp), now ? "ON" : "OFF");
+  }
 }
 
 void startMonitor(uint16_t intervalSec, uint16_t timeoutMs, uint8_t attempts) {

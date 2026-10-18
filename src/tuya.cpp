@@ -109,12 +109,14 @@ struct Frame {
 };
 
 void noteConnection(const String& ip);  // counts a TCP connection for connections()
+void (*gPushObserver)(const String&, const Target&, const String&) = nullptr;
+constexpr uint32_t kCmdStatus = 0x08;  // a status push the device sends on its own
 
 // One connection to a device. Without Target::keep it carries one operation and is closed (the Session is destroyed);
 // a kept one stays open between operations: run() then skips the connect and the handshake.
 class Session {
  public:
-  Session(const Target& target, const char* label) : target_(target), label_(label ? label : "") {
+  Session(const Target& target, const char* label) : target_(target), label_(label ? label : ""), push_(target.push) {
     tx_ = static_cast<uint8_t*>(malloc(kMaxFrame));
     rx_ = static_cast<uint8_t*>(malloc(kMaxFrame));
   }
@@ -129,6 +131,9 @@ class Session {
 
   const Target& target() const { return target_; }
   void setLabel(const char* label) { label_ = label ? label : ""; }
+  void setPush(bool push) { push_ = push; }
+  bool push() const { return push_; }
+  bool isOpen() const { return open_; }
   uint32_t idleMs() const { return millis() - lastUseMs_; }
 
   void close() {
@@ -149,9 +154,13 @@ class Session {
     Result r;
     r.reused = open_;
     bool ok = execute(op, dp, unixTime, refresh, r);
-    if (!ok && r.reused && errCode_ && strcmp(errCode_, "closed") == 0) {
-      // The device dropped the kept connection while it was idle: once more on a new one (on/off may arrive twice).
-      logf(Logger::Level::Info, "the kept connection was closed by the device, connecting again");
+    const bool closed = errCode_ && strcmp(errCode_, "closed") == 0, timedOut = errCode_ && strcmp(errCode_, "timeout") == 0;
+    if (!ok && r.reused && (closed || timedOut)) {
+      // The device dropped the kept connection while it was idle, or the connection is dead without the TCP knowing it
+      // (the device restarted or left the Wi-Fi: what is sent gets no answer): once more on a new one, with the whole
+      // timeout again (on/off may arrive twice).
+      logf(Logger::Level::Info, closed ? "the kept connection was closed by the device, connecting again"
+                                       : "no answer over the kept connection, connecting again");
       close();
       r = Result();
       connectMs_ = handshakeMs_ = commandMs_ = 0;
@@ -200,8 +209,24 @@ class Session {
       }
       if (f.cmd == kCmdHeartBeat) break;
       logPushed(f);  // a status push that came first
+      pushed(f);
     }
     lastUseMs_ = millis();
+    return true;
+  }
+
+  // A kept connection of a Target::push device (see the heartbeat task): reads what the device has sent since the last
+  // look, if anything. False: the connection is gone (closed here, logged once).
+  bool readPushes() {
+    if (!open_) return false;
+    if (client_.available() <= 0 && client_.connected()) return true;
+    detail_ = Logger::Level::Debug;
+    errCode_ = nullptr;
+    errDetail_ = "";
+    if (!drain()) {
+      close();
+      return false;
+    }
     return true;
   }
 
@@ -279,7 +304,10 @@ class Session {
       const bool got = recvFrame(sessionKey_, f);
       deadline_ = saved;
       if (!got) return false;
-      if (f.cmd != kCmdHeartBeat) logPushed(f);
+      if (f.cmd != kCmdHeartBeat) {
+        logPushed(f);
+        pushed(f);
+      }
     }
     if (!client_.connected()) {
       logf(Logger::Level::Info, "the device closed the kept connection (seen %lu s after the last request)",
@@ -298,6 +326,11 @@ class Session {
             String("rx cmd=0x") + String(static_cast<unsigned>(f.cmd), HEX) + " seq=" + String(static_cast<unsigned long>(f.seq)) +
                 " retcode=" + String(static_cast<unsigned long>(f.retcode)) + " payload=" + String(static_cast<unsigned>(f.len)) + "B (sent while idle)",
             text);
+  }
+
+  // Hands a status push of a Target::push device to the push observer.
+  void pushed(const Frame& f) {
+    if (push_ && gPushObserver && f.cmd == kCmdStatus) gPushObserver(label_, target_, payloadText(f));
   }
 
   bool execute(Op op, uint16_t dp, uint32_t unixTime, const RefreshOpts* refresh, Result& r) {
@@ -499,6 +532,7 @@ class Session {
                            " payload=" + String(static_cast<unsigned>(f.len)) + "B",
               payloadText(f));
       if (wanted) return true;
+      pushed(f);
     }
   }
 
@@ -600,6 +634,7 @@ class Session {
   Logger::Level detail_ = Logger::Level::Info;  // INFO for user actions, DEBUG for the periodic poll
   WiFiClient client_;
   bool open_ = false;           // connected and the session key negotiated
+  bool push_ = false;           // hand the device's status pushes to the push observer
   uint16_t switchDp_ = 0;       // the device's switch data point, 0 = unknown
   uint32_t lastUseMs_ = 0;
   uint8_t* tx_ = nullptr;
@@ -626,7 +661,6 @@ class Session {
 constexpr size_t kCommandLane = 0, kMonitorLane = 1;
 constexpr size_t kCapacity[2] = {kCommandQueueSize, kMonitorQueueSize};
 constexpr uint32_t kLockWaitMs = 5000;  // a command waits at most this long for the device (a poll takes <= timeoutMs)
-constexpr uint32_t kHeartbeatWakeMs = 500;  // the heartbeat task looks at the kept connections this often
 
 struct LaneState {
   std::deque<std::shared_ptr<Job>> jobs;
@@ -639,6 +673,9 @@ std::map<String, uint16_t> gCommandsPending;       // by IP: command jobs queued
 std::map<String, uint32_t> gConnections;           // by IP: TCP connections opened since boot
 // Kept connections by IP. The map is guarded by gListMux; a Session in it is used only by whoever holds its IP's lock.
 std::map<String, Session*> gKept;
+// By IP: whether the kept connection was open when it was last put back (guarded by gListMux). kept() reads this, not
+// gKept, because a Session in use (by a poll, a command or the heartbeat task) is out of gKept for that time.
+std::map<String, bool> gKeptOpen;
 void (*gObserver)(const Job&) = nullptr;
 Stats gStats;  // guarded by gListMux
 
@@ -674,6 +711,15 @@ Session* takeKept(const String& ip) {
 void putKept(const String& ip, Session* s) {
   xSemaphoreTake(gListMux, portMAX_DELAY);
   gKept[ip] = s;
+  gKeptOpen[ip] = s->isOpen();
+  xSemaphoreGive(gListMux);
+}
+
+// Closes and frees a Session taken out with takeKept() for good. The caller holds the IP's lock.
+void dropKept(const String& ip, Session* s) {
+  delete s;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  gKeptOpen.erase(ip);
   xSemaphoreGive(gListMux);
 }
 
@@ -687,6 +733,7 @@ Result runKept(const Job& job, const char* label) {
   }
   if (!s) s = new Session(job.target, label);
   s->setLabel(label);
+  s->setPush(job.target.push);
   Result r;
   if (job.op == Op::Query) {
     r = s->run(Op::Query, job.dp, 0, job.timeoutMs, job.background);
@@ -700,34 +747,41 @@ Result runKept(const Job& job, const char* label) {
   return r;
 }
 
-// The heartbeat task: a heartbeat on every kept connection idle for kHeartbeatIdleMs. A device whose lock is taken is
-// skipped (its connection is in use right now); a connection that does not answer is closed and dropped, and the next
-// poll or command connects again. It never opens a connection itself.
+// The heartbeat task: reads the status pushes of every Target::push connection and sends a heartbeat on every kept
+// connection idle for kHeartbeatIdleMs. A device whose lock is taken is skipped (its connection is in use right now); a
+// connection that does not answer (or that the device closed) is dropped, and the next poll or command connects again.
+// It never opens a connection itself.
 void heartbeats() {
   std::vector<String> due;
   xSemaphoreTake(gListMux, portMAX_DELAY);
   for (const auto& k : gKept) {
-    if (k.second->idleMs() >= kHeartbeatIdleMs) due.push_back(k.first);
+    if (k.second->push() || k.second->idleMs() >= kHeartbeatIdleMs) due.push_back(k.first);
   }
   xSemaphoreGive(gListMux);
   for (const String& ip : due) {
     SemaphoreHandle_t lock = deviceLock(ip);
     if (xSemaphoreTake(lock, 0) != pdTRUE) continue;
     if (Session* s = takeKept(ip)) {
-      if (s->heartbeat()) {
+      bool alive = !s->push() || s->readPushes();
+      if (alive && s->idleMs() >= kHeartbeatIdleMs) alive = s->heartbeat();
+      if (alive) {
         putKept(ip, s);
       } else {
-        delete s;
+        dropKept(ip, s);
       }
     }
     xSemaphoreGive(lock);
   }
 }
 
+std::atomic<uint32_t> gHbStackFreeMin{UINT32_MAX};
+
 void heartbeatTask(void*) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(kHeartbeatWakeMs));
     if (WiFi.status() == WL_CONNECTED) heartbeats();
+    const uint32_t free = uxTaskGetStackHighWaterMark(nullptr);  // bytes on the ESP32 (StackType_t is a byte)
+    if (free < gHbStackFreeMin) gHbStackFreeMin = free;
   }
 }
 
@@ -776,7 +830,9 @@ void worker(void* arg) {
     }
 
     // A device that has just lost keep_connected: its kept connection is closed before a new one is opened.
-    if (locked && !job->target.keep) delete takeKept(job->target.ip);
+    if (locked && !job->target.keep) {
+      if (Session* s = takeKept(job->target.ip)) dropKept(job->target.ip, s);
+    }
     if (cancelled) {
       Result c;
       c.error = "cancelled";
@@ -866,6 +922,19 @@ void begin() {
 
 void setObserver(void (*observer)(const Job&)) { gObserver = observer; }
 
+void setPushObserver(void (*observer)(const String& device, const Target& target, const String& json)) { gPushObserver = observer; }
+
+bool kept(const String& ip) {
+  if (!gListMux) return false;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  auto it = gKeptOpen.find(ip);
+  const bool open = it != gKeptOpen.end() && it->second;
+  xSemaphoreGive(gListMux);
+  return open;
+}
+
+uint32_t heartbeatStackFreeMin() { return gHbStackFreeMin == UINT32_MAX ? 0 : gHbStackFreeMin.load(); }
+
 uint32_t connections(const String& ip) {
   if (!gListMux) return 0;
   xSemaphoreTake(gListMux, portMAX_DELAY);
@@ -886,7 +955,7 @@ void keepOnly(const std::vector<String>& ips) {
   for (const String& ip : drop) {
     SemaphoreHandle_t lock = deviceLock(ip);
     if (xSemaphoreTake(lock, 0) != pdTRUE) continue;  // in use: next time
-    delete takeKept(ip);
+    if (Session* s = takeKept(ip)) dropKept(ip, s);
     LOGI(TAG, "%s: kept connection closed (the device is no longer kept connected or polled)", ip.c_str());
     xSemaphoreGive(lock);
   }

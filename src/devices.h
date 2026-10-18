@@ -18,6 +18,11 @@
 //
 // name: 1..32 chars of a-z 0-9 _ - (used in URLs), unique. key: exactly 16 characters.
 // version: "3.4" or "3.5". dp: the on/off data point, default 1.
+// monitor (optional): "poll" (the default) or "push". A push device keeps its connection open (as keep_connected) and is
+// not polled while it is: the data points it sends on its own go into the cached state at once (see onPush), the
+// history gets that state every monitor.interval_s, and a status query is made only every kPushControlS, when nothing
+// came from it for kPushQuietS, or when the connection is lost (that query opens it again). Only for sockets that push
+// their readings by themselves (the boiler does: power every few seconds while it heats, the others about once a minute).
 // meters (optional): which data point carries the power / current / voltage / energy reading, 0..255;
 // 0 = the socket has none, absent = the usual Tuya socket numbers (19, 18, 20, 17). They label the readings
 // on the page, fill the history, feed the power rules and say which data points UPDATEDPS re-reads;
@@ -51,13 +56,15 @@ struct Device {
   // UPDATEDPS before the poll while a power rule watches it. false: plain status queries only (a socket that keeps its
   // readings fresh by itself, or that misbehaves on UPDATEDPS: the boiler switched itself off during one).
   bool updatedps = true;
+  bool push = false;  // monitor:"push" (see above); implies a kept connection
 
   Tuya::Target target() const {
     Tuya::Target t;
     t.ip = ip;
     t.key = key;
     t.version = version;
-    t.keep = keepConnected;
+    t.keep = keepConnected || push;
+    t.push = push;
     return t;
   }
 };
@@ -84,8 +91,16 @@ struct State {
   uint32_t latencyMs = 0;   // duration of the last successful query
   String error;             // last failure: code ...
   String detail;            // ... and explanation, "" while online
-  String dpsJson;           // the "dps" object of the last success, as JSON text ("" = none yet)
+  String dpsJson;           // the "dps" object of the last success, as JSON text ("" = none yet), with the pushes since merged in
+  uint32_t lastPushMs = 0;  // millis() of the last status push applied (0 = none)
+  uint32_t pushes = 0;      // status pushes applied
 };
+
+// Push devices (monitor:"push"): a status query every kPushControlS while the connection lives, and one as soon as
+// nothing (no push, no answer) came from the device for kPushQuietS: a connection that answers heartbeats does not
+// prove that the data still flows. The boiler sends something about once a minute even when it does not heat.
+constexpr uint32_t kPushControlS = 300;
+constexpr uint32_t kPushQuietS = 120;
 
 // Reads /devices.json. A valid file replaces the list; an invalid one is reported in
 // info().error and the previous list stays. Call from setup() after Storage::begin(),
@@ -155,6 +170,11 @@ PowerCheck checkPower(const String& name, bool below, uint32_t watts, uint32_t f
 // Registered as the Tuya observer: records the result of a user-started status query.
 void onJobDone(const Tuya::Job& job);
 
+// Registered as the Tuya push observer: merges the data points a push device sent on its own into its cached state
+// (a push carries only those that changed) and logs a change of the switch. Dropped for a device that is not (or no
+// longer) in push mode, is ignored, or was edited.
+void onPush(const String& device, const Tuya::Target& target, const String& json);
+
 // Starts the poller. attempts = tries per device and cycle (>= 1). Call once, after Tuya::begin().
 void startMonitor(uint16_t intervalSec, uint16_t timeoutMs, uint8_t attempts);
 uint16_t pollIntervalSec();
@@ -167,7 +187,7 @@ void monitorCycle(uint32_t& lastMs, uint32_t& maxMs);
 constexpr size_t kMaxDevices = 16;
 
 // The limits of the device list and the history, for the API and the page: max, max_file_bytes, history_capacity,
-// history_span_s (capacity x the current polling interval), poll_interval_s.
+// history_span_s (capacity x the current polling interval), poll_interval_s, push_control_s, push_quiet_s.
 void limits(JsonObject out);
 
 }  // namespace Devices

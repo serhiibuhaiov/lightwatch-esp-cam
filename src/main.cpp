@@ -105,6 +105,7 @@ void setup() {
   Devices::load();  // /devices.json on the SD card only; no card = no devices
   Tuya::begin();
   Tuya::setObserver(Devices::onJobDone);
+  Tuya::setPushObserver(Devices::onPush);
   HttpOut::begin();
   Devices::startMonitor(cfg.monitor.intervalSec, cfg.monitor.timeoutMs, cfg.monitor.retries);
 

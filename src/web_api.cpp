@@ -285,6 +285,7 @@ void onStatus(AsyncWebServerRequest* req) {
       c["wait_over_1s"] = ts.waitOver1s[i];
       c["busy"] = ts.busy[i];
     }
+    t["heartbeat_stack_free_min"] = Tuya::heartbeatStackFreeMin();  // the heartbeat task also applies the status pushes
   }
   {
     // The device monitor: a cycle over all the devices longer than the interval polls each of them less often.
@@ -511,6 +512,7 @@ JsonDocument devicesSummary() {
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
     o["updatedps"] = d.updatedps;
+    o["monitor"] = d.push ? "push" : "poll";
     JsonObject meters = o["meters"].to<JsonObject>();  // data points of the readings, null = standard number
     for (const auto& m : {std::make_pair("power", d.dpPower), std::make_pair("current", d.dpCurrent),
                           std::make_pair("voltage", d.dpVoltage), std::make_pair("energy", d.dpEnergy)}) {
@@ -532,6 +534,8 @@ JsonDocument devicesSummary() {
     if (st.lastTryMs) s["last_try_age_s"] = (now - st.lastTryMs) / 1000;
     if (st.latencyMs) s["latency_ms"] = st.latencyMs;
     s["connections"] = Tuya::connections(d.ip);  // TCP connections opened to it since boot
+    s["pushes"] = st.pushes;                      // status pushes applied (push devices)
+    if (st.lastPushMs) s["push_age_s"] = (now - st.lastPushMs) / 1000;
     if (!st.error.isEmpty()) {
       s["error"] = st.error;
       s["detail"] = st.detail;

@@ -4,6 +4,8 @@ The board is told that a device with this computer's IP exists, and talks to thi
 That lets the tests make a device go away and come back, change its readings and switch it, without touching
 a real socket. Only protocol 3.4 is implemented (session key handshake, status query 0x10, control 0x0d, UPDATEDPS 0x12,
 heartbeat 0x09). One connection may carry many requests; it is closed after `idle_timeout` seconds without one.
+`push(**dps)` changes data points and sends them on every open connection as a status push (0x08), the way real
+sockets report their changes over a kept connection.
 
 It also records what the board does: `connections` (every accepted TCP connection), `commands` (the control
 commands received, newest last), `open_connections`, `queries`, `heartbeats`, and it checks the HMAC of every frame the
@@ -68,6 +70,9 @@ class FakeTuya:
         self.ignore_control = False  # acknowledge control commands but do not change anything
         self.updatedps = 0          # UPDATEDPS (0x12) commands received
         self.no_updatedps = False   # close the connection on UPDATEDPS, like a device that does not know the command
+        self.pushes = 0             # status pushes sent (frames, one per open connection)
+        self._mute_upto = 0         # connections numbered up to this read what comes but never answer (see mute_open_connections)
+        self._open = []             # [(socket, session key, send lock)] of the connections past the handshake
         self.lock = threading.Lock()
         self._server = None
         self._thread = None
@@ -83,8 +88,9 @@ class FakeTuya:
                 with fake.lock:
                     fake.connections += 1
                     fake.open_connections += 1
+                    number = fake.connections
                 try:
-                    fake._serve(self.request)
+                    fake._serve(self.request, number)
                 except (ConnectionError, OSError, struct.error):
                     pass
                 finally:
@@ -104,11 +110,44 @@ class FakeTuya:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+        with self.lock:  # like a socket that loses power: the open connections go too
+            conns = list(self._open)
+        for sock, _, _ in conns:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def set(self, **dps):
         with self.lock:
             for k, v in dps.items():
                 self.dps[k.lstrip("d")] = v
+
+    def push(self, **dps):
+        """Changes the data points like set() and sends just those as a status push on every open connection.
+        Returns how many connections got it."""
+        self.set(**dps)
+        body = json.dumps({"protocol": 4, "t": int(time.time()), "data": {"dps": {k.lstrip("d"): v for k, v in dps.items()}}},
+                          separators=(",", ":")).encode()
+        with self.lock:
+            conns = list(self._open)
+        sent = 0
+        for sock, session, send_lock in conns:
+            try:
+                with send_lock:
+                    sock.sendall(self._frame(0, STATUS_PUSH, body, session))
+                sent += 1
+            except OSError:
+                pass
+        with self.lock:
+            self.pushes += sent
+        return sent
+
+    def mute_open_connections(self):
+        """The connections open now stay open but never answer again (a socket that restarted while the board's TCP
+        does not know it); new connections work as usual."""
+        with self.lock:
+            self._mute_upto = self.connections
 
     def get(self, dp):
         with self.lock:
@@ -133,7 +172,7 @@ class FakeTuya:
                 self.hmac_errors += 1
         return seq, cmd, _unpad(_ecb(key, payload, False)) if payload else b""
 
-    def _serve(self, sock):
+    def _serve(self, sock, number=0):
         sock.settimeout(10)
         if self.silent:
             time.sleep(10)
@@ -152,19 +191,36 @@ class FakeTuya:
             return
         mixed = bytes(a ^ b for a, b in zip(local_nonce, device_nonce))
         session = _ecb(self.key, mixed, True)
+        send_lock = threading.Lock()  # push() may send from another thread
+        entry = (sock, session, send_lock)
+        with self.lock:
+            self._open.append(entry)
+        try:
+            self._session(sock, session, send_lock, number)
+        finally:
+            with self.lock:
+                self._open.remove(entry)
+
+    def _session(self, sock, session, send_lock, number):
+        def send(frame):
+            with send_lock:
+                sock.sendall(frame)
+
         while True:
             sock.settimeout(self.idle_timeout)
             seq, cmd, plain = self._read(sock, session)
+            if number <= self._mute_upto:  # a dead connection: nothing is done, nothing answered
+                continue
             if cmd == HEART_BEAT:
                 with self.lock:
                     self.heartbeats += 1
                 if self.answer_heartbeat:
-                    sock.sendall(self._frame(seq, HEART_BEAT, b"", session))
+                    send(self._frame(seq, HEART_BEAT, b"", session))
             elif cmd == DP_QUERY_NEW:
                 with self.lock:
                     self.queries += 1
                     body = json.dumps({"dps": self.dps}, separators=(",", ":")).encode()
-                sock.sendall(self._frame(seq, DP_QUERY_NEW, body, session))
+                send(self._frame(seq, DP_QUERY_NEW, body, session))
             elif cmd == CONTROL_NEW:
                 data = json.loads(plain[15:].decode())
                 changes = data.get("data", {}).get("dps", {})
@@ -172,7 +228,7 @@ class FakeTuya:
                     if not self.ignore_control:
                         self.dps.update({str(k): v for k, v in changes.items()})
                     self.commands.append((time.time(), changes))
-                sock.sendall(self._frame(seq, CONTROL_NEW, b"", session))
+                send(self._frame(seq, CONTROL_NEW, b"", session))
             elif cmd == UPDATEDPS:  # like the real sockets: the fresh values are pushed first, the answer follows
                 with self.lock:
                     self.updatedps += 1
@@ -182,8 +238,8 @@ class FakeTuya:
                 with self.lock:
                     fresh = {k: v for k, v in self.dps.items() if k in wanted}
                 push = json.dumps({"protocol": 4, "t": int(time.time()), "data": {"dps": fresh}}, separators=(",", ":")).encode()
-                sock.sendall(self._frame(0, STATUS_PUSH, push, session))
-                sock.sendall(self._frame(seq, UPDATEDPS, b"", session))
+                send(self._frame(0, STATUS_PUSH, push, session))
+                send(self._frame(seq, UPDATEDPS, b"", session))
             else:
                 return
 

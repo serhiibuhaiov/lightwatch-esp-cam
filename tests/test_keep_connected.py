@@ -1,6 +1,6 @@
 """keep_connected: one connection kept open for every operation of a device, with a heartbeat while it is idle, against
 the fake Tuya device on this computer (no real socket is touched). The heartbeat task sends a heartbeat on a connection idle for
-5 s and closes it when the answer does not come in 2 s; it never connects itself. The board must reach this computer on TCP port 6668;
+10 s and closes it when the answer does not come in 2 s; it never connects itself. The board must reach this computer on TCP port 6668;
 otherwise these tests skip.
 """
 import time
@@ -62,7 +62,7 @@ def test_a_kept_device_is_polled_over_one_connection_with_heartbeats_between(dev
     assert fake.connections == c0, "the board connected again"
     assert fake.open_connections == 1
     assert fake.queries - q0 >= 2, "the monitor did not poll over the kept connection"
-    assert fake.heartbeats - h0 >= 3, "too few heartbeats while the connection was idle (one per 5 s of idling)"
+    assert fake.heartbeats - h0 >= 2, "too few heartbeats while the connection was idle (one per 10 s of idling, polls every 15 s)"
     d = state(dev)
     assert d["keep_connected"] is True and d["state"]["online"] is True and d["state"]["fails"] == 0
     assert d["state"]["connections"] >= 1
@@ -89,6 +89,22 @@ def test_a_connection_the_device_closes_is_opened_again_without_a_failure(dev, f
     assert d["online"] is True and d["fails"] == 0, d  # a dropped idle connection is not a failed poll
     log = dev.get("/api/logs", params={"file": "current", "tail": 8192}).text
     assert f"[{FAKE_NAME}] the device closed the kept connection" in log
+
+
+def test_a_command_over_a_dead_connection_is_sent_again_on_a_new_one(dev, fake):
+    fake.mute_open_connections()  # like a socket that restarted: the old connection takes what is sent, never answers
+    c0, n0 = fake.connections, len(fake.commands)
+    t0 = time.time()
+    r = dev.request("POST", "/api/devices/off", params={"name": FAKE_NAME}, timeout=40)
+    took = time.time() - t0
+    assert r.status_code == 200 and r.json()["ok"], r.text
+    assert fake.get(1) is False and fake.connections == c0 + 1
+    assert took >= 7, f"took {took:.1f} s: the dead connection did not time out first"
+    assert any(c == {"1": False} for _, c in fake.commands[n0:])
+    log = dev.get("/api/logs", params={"file": "current", "tail": 8192}).text
+    assert f"[{FAKE_NAME}] no answer over the kept connection, connecting again" in log
+    r = dev.request("POST", "/api/devices/on", params={"name": FAKE_NAME}, timeout=30)
+    assert r.json()["ok"] and fake.connections == c0 + 1  # the new connection is kept and used
 
 
 def test_without_keep_connected_the_kept_connection_is_closed_and_each_poll_connects(dev, fake):
