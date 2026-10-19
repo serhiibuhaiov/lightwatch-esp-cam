@@ -840,10 +840,10 @@ function viewDevices() {
     if (op !== "status" && !confirm((op === "on" ? "Увімкнути" : "Вимкнути") + " «" + d.name + "» (" + d.ip + ")?")) return;
     busy.add(d.name); msgs[d.name] = { cls: "n", text: "Виконую…" }; render();
     try {
-      // "Оновити зараз" asks the device to re-read its meters (UPDATEDPS) before the query, unless it has updatedps:false;
-      // if the device does not take that command, fall back to the plain status query.
+      // "Оновити зараз" always asks the device to re-read its meters (UPDATEDPS) before the query (updatedps is about the
+      // monitor only); if the device does not take that command, fall back to the plain status query.
       const call = async o => { const x = await api("/api/devices/" + o + "?name=" + encodeURIComponent(d.name), { method: "POST" }); return [x, await x.json().catch(() => ({}))]; };
-      let [r, j] = await call(op === "status" && d.updatedps !== false ? "refresh" : op);
+      let [r, j] = await call(op === "status" ? "refresh" : op);
       if (op === "status" && r.ok && !j.ok && ["closed", "protocol", "device"].includes(j.error)) [r, j] = await call("status");
       if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
       const ph = j.phases_ms || {};
@@ -1119,7 +1119,7 @@ function viewDevConfig() {
           E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Займає одне з їхніх місць для підключень. У режимі push увімкнено завжди.")),
         field("Моніторинг", monIn, "push: розетка сама шле зміни (стан за ≤1 с), опитування лише раз на 5 хв або коли 2 хв нічого не надходило. Лише для розеток, що шлють показники самі."),
         E("div", { class: "f" }, E("label", {}, "UPDATEDPS"), E("label", { style: "font-weight:400" }, upd, " просити переміряти показники"),
-          E("small", {}, "Монітор опитує розетку з UPDATEDPS (свіжий замір замість кешу розетки), незалежно від тригерів, і в «Оновити зараз». Вимкніть, якщо розетка й так дає свіжі показники або збоїть від цього."))),
+          E("small", {}, "Монітор опитує розетку з UPDATEDPS (свіжий замір замість кешу розетки), незалежно від тригерів. «Оновити зараз» шле UPDATEDPS завжди. Вимкніть, якщо розетка й так дає свіжі показники або збоїть від цього."))),
       E("details", { open: Object.values(r.meters).some(v => v !== "") },
         E("summary", {}, "Показники: у яких data points напруга, струм, потужність, енергія"),
         E("div", { class: "fields", style: "margin-top:10px" },
