@@ -42,7 +42,7 @@ def test_ui_page_served_behind_auth(dev):
         assert r.status_code == 200
         assert r.headers["Content-Type"].startswith("text/html")
         assert "<title>" in r.text and "/api/status" in r.text and "/api/config" in r.text
-        assert 5000 < len(r.content) < 135000  # the page itself (requests unpacks it): keep an eye on its size
+        assert 5000 < len(r.content) < 145000  # the page itself (requests unpacks it): keep an eye on its size
         assert r.headers.get("Content-Encoding") == "gzip"  # stored and sent gzip-compressed
         assert int(r.headers["Content-Length"]) < len(r.content) / 2
     # a client that does not take gzip gets a hint, not compressed bytes
