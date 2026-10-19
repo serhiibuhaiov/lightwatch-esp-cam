@@ -19,6 +19,7 @@
 #include "http_out.h"
 #include "http_template.h"
 #include "logger.h"
+#include "online_rule.h"
 #include "power_rule.h"
 #include "psram_alloc.h"
 #include "storage.h"
@@ -54,6 +55,7 @@ const char* kTriggerPowerBelow = "power_below";
 const char* kTriggerPowerAbove = "power_above";
 const char* kTriggerInterval = "interval";
 const char* kTriggerRelay = "relay";
+const char* kTriggerOnline = "online";
 // The history of an interval scenario: a file of its own, a short line per run (see intervalFinished()).
 const char* kIntervalDir = "/runs/interval";
 constexpr size_t kIntervalPendingMax = 65536;  // lines waiting for the card (it is away): later ones are dropped
@@ -81,11 +83,11 @@ struct Def {
   ScenarioEngine::List<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
   ScenarioEngine::List<ScenarioEngine::HttpReq> requests;  // the requests of the HTTP steps (URL up to 2 KB, body up to 16 KB)
   ScenarioEngine::List<Step> steps;
-  // power_below / power_above / relay:
+  // power_below / power_above / relay / online:
   String whenDevice;
-  String whenTo;  // relay only: "on" | "off" | "any"
+  String whenTo;  // relay: "on" | "off" | "any"; online: "offline" | "online" | "any"
   uint32_t watts = 0;
-  uint32_t forS = 0;
+  uint32_t forS = 0;  // power_below / power_above, online
   uint32_t warmupS = kDefaultWarmupS;
   uint32_t everyS = 0;  // interval only
   ScenarioEngine::OnInterrupt onInterrupt;  // what a restart does to a run of this scenario
@@ -93,6 +95,8 @@ struct Def {
   bool isPower() const { return trigger == kTriggerPowerBelow || trigger == kTriggerPowerAbove; }
   bool isInterval() const { return trigger == kTriggerInterval; }
   bool isRelay() const { return trigger == kTriggerRelay; }
+  bool isOnline() const { return trigger == kTriggerOnline; }
+  bool hasWhenDevice() const { return isPower() || isRelay() || isOnline(); }
   const String& device(const Step& s) const { return devices[s.dev]; }
 };
 using Defs = ScenarioEngine::List<Def>;
@@ -134,7 +138,7 @@ bool validName(const String& s) {
 
 bool validTrigger(const String& t) {
   return t == kTriggerPowerOn || t == kTriggerManual || t == kTriggerPowerBelow || t == kTriggerPowerAbove || t == kTriggerInterval ||
-         t == kTriggerRelay;
+         t == kTriggerRelay || t == kTriggerOnline;
 }
 
 // ---- the file ----------------------------------------------------------------------------
@@ -197,7 +201,7 @@ bool parse(const String& raw, Defs& out, String& err) {
     }
     if (!readBool(item["enabled"], where + ".enabled", d.enabled, err)) return false;
     if (!item["trigger"].is<const char*>() || !validTrigger(item["trigger"].as<const char*>())) {
-      err = where + ".trigger must be \"power_on\", \"manual\", \"power_below\", \"power_above\", \"interval\" or \"relay\"";
+      err = where + ".trigger must be \"power_on\", \"manual\", \"power_below\", \"power_above\", \"interval\", \"relay\" or \"online\"";
       return false;
     }
     d.trigger = item["trigger"].as<const char*>();
@@ -257,6 +261,32 @@ bool parse(const String& raw, Defs& out, String& err) {
       }
       d.whenTo = to;
     }
+    if (d.isOnline()) {
+      JsonVariantConst w = item["when"];
+      if (!w.is<JsonObjectConst>()) {
+        err = where + ".when must be an object {device, to, for_s} for the trigger online";
+        return false;
+      }
+      if (!w["device"].is<const char*>() || !validName(w["device"].as<const char*>())) {
+        err = where + ".when.device must be a device name (1..32 chars of a-z 0-9 _ -)";
+        return false;
+      }
+      d.whenDevice = w["device"].as<const char*>();
+      const String to = w["to"].is<const char*>() ? w["to"].as<const char*>() : "";
+      if (to != "offline" && to != "online" && to != "any") {
+        err = where + ".when.to must be \"offline\", \"online\" or \"any\"";
+        return false;
+      }
+      d.whenTo = to;
+      d.forS = 0;
+      if (!w["for_s"].isNull()) {
+        if (!w["for_s"].is<int>() || w["for_s"].as<int>() < 0 || w["for_s"].as<int>() > static_cast<int>(kMaxOnlineForS)) {
+          err = where + ".when.for_s must be an integer 0.." + String(static_cast<unsigned>(kMaxOnlineForS)) + " (seconds)";
+          return false;
+        }
+        d.forS = w["for_s"].as<int>();
+      }
+    }
 
     if (!item["default_pause_s"].isNull()) {
       if (!item["default_pause_s"].is<int>() || item["default_pause_s"].as<int>() < 0 || item["default_pause_s"].as<int>() > kMaxPauseS) {
@@ -310,7 +340,7 @@ bool parse(const String& raw, Defs& out, String& err) {
         HttpOut::Job q;
         if (!HttpOut::parse(sv, q, err, at)) return false;
         std::string why;
-        const bool hasWhen = d.isPower() || d.isRelay();
+        const bool hasWhen = d.hasWhenDevice();
         if (!HttpTemplate::validate(q.url.c_str(), q.url.size(), true, hasWhen, why)) {
           err = at + ".url: " + why.c_str();
           return false;
@@ -441,10 +471,11 @@ String fileText(const Defs& list, bool pretty) {
       w["warmup_s"] = d.warmupS;
     }
     if (d.isInterval()) o["when"].to<JsonObject>()["every_s"] = d.everyS;
-    if (d.isRelay()) {
+    if (d.isRelay() || d.isOnline()) {
       JsonObject w = o["when"].to<JsonObject>();
       w["device"] = d.whenDevice;
       w["to"] = d.whenTo;
+      if (d.isOnline()) w["for_s"] = d.forS;
     }
     o["default_pause_s"] = d.defaultPauseS;
     writeOnInterrupt(o["on_interrupt"].to<JsonObject>(), d.onInterrupt);
@@ -714,6 +745,19 @@ struct RelayWatch {
 };
 std::map<String, RelayWatch> gRelay;  // by scenario name
 
+// The state of an online trigger (the decision is OnlineRule::look).
+struct OnlineWatch {
+  String device, to;            // what it watched when it began: an edit of `when` begins again from now
+  uint32_t forS = 0;
+  OnlineRule::Watch rule;
+  bool pending = false;         // happened while its scenario was running: starts when that run ends
+  String pendingTrigger;        // device-offline | device-online
+  int online = -1;              // the socket at the last look: 1 online, 0 offline, -1 unknown
+  String reason = "watching";   // watching | holding | not-seen-online | ignored | no-device
+  uint32_t heldS = 0;
+};
+std::map<String, OnlineWatch> gOnline;  // by scenario name
+
 // ---- the state of the interval scenarios -------------------------------------------------------------------------------
 
 // The schedule and the counters since boot (in RAM: an interval scenario carries nothing over a restart).
@@ -928,7 +972,7 @@ void intervalFinished(const String& name, const ScenarioEngine::Run& r);  // bel
 
 bool BoardEnv::fillRun(HttpOut::Job& job, const std::string& scenario, const std::string& trigger) {
   const Def* d = findDef(String(scenario.c_str()));
-  const String when = d && (d->isPower() || d->isRelay()) ? d->whenDevice : String();
+  const String when = d && d->hasWhenDevice() ? d->whenDevice : String();
   return fillPlaceholders(job, String(scenario.c_str()), String(trigger.c_str()), when);
 }
 
@@ -1108,6 +1152,7 @@ void wake() {
 
 void watchTick();  // the power rules, below
 void relayTick();  // the relay triggers, below
+void onlineTick();  // the online triggers, below
 bool intervalTick();  // the interval scenarios, below
 
 // One task drives every run (the engine) and looks at the power rules every kWatchTickMs.
@@ -1157,6 +1202,7 @@ void engineTask(void*) {
       nextWatch = millis() + kWatchTickMs;
       watchTick();  // takes the lock itself; reads the history without it
       relayTick();
+      onlineTick();
       continue;
     }
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::min<uint32_t>(sleepMs, static_cast<uint32_t>(toWatch))));
@@ -1329,6 +1375,84 @@ void relayTick() {
   }
 }
 
+// ---- online triggers ----------------------------------------------------------------------------------------------------
+
+void onlineTick() {
+  struct Rule {
+    String name, device, to;
+    uint32_t forS;
+  };
+  std::vector<Rule> rules;
+  {
+    Lock lock;
+    for (const Def& d : gDefs) {
+      if (d.enabled && d.isOnline()) rules.push_back(Rule{d.name, d.whenDevice, d.whenTo, d.forS});
+    }
+    for (auto it = gOnline.begin(); it != gOnline.end();) {  // forget the triggers that are gone or switched off
+      bool present = false;
+      for (const Rule& d : rules) present = present || d.name == it->first;
+      it = present ? std::next(it) : gOnline.erase(it);
+    }
+  }
+  for (const Rule& d : rules) {
+    Devices::Device dev;
+    Devices::State st;
+    const bool found = Devices::find(d.device, dev) && Devices::state(d.device, st);
+    OnlineRule::Device od;
+    od.everOnline = st.everOnline;
+    od.online = st.online;
+    od.sinceMs = st.changedMs;
+    const OnlineRule::To to = d.to == "offline" ? OnlineRule::To::Offline : d.to == "online" ? OnlineRule::To::Online : OnlineRule::To::Any;
+    String trigger;  // the run to start now ("" = none)
+    bool happened = false;
+    {
+      Lock lock;
+      OnlineWatch& w = gOnline[d.name];
+      if (w.device != d.device || w.to != d.to || w.forS != d.forS) {  // new, enabled again or edited: from the state now on
+        w = OnlineWatch();
+        w.device = d.device;
+        w.to = d.to;
+        w.forS = d.forS;
+      }
+      w.online = found && st.known ? (st.online ? 1 : 0) : -1;
+      if (!found || dev.ignore) {
+        w.rule = OnlineRule::Watch();
+        w.pending = false;
+        w.reason = !found ? "no-device" : "ignored";
+        w.heldS = 0;
+      } else {
+        const OnlineRule::Look l = OnlineRule::look(w.rule, od, millis(), d.forS, to);
+        w.reason = l.reason;
+        w.heldS = l.heldS;
+        if (l.fire >= 0) {
+          trigger = l.fire ? "device-online" : "device-offline";
+          happened = true;
+        } else if (w.pending) {
+          trigger = w.pendingTrigger;
+        }
+      }
+    }
+    if (trigger.isEmpty()) continue;
+    const RunResult started = runWith(d.name, trigger.c_str());
+    {
+      Lock lock;
+      OnlineWatch& w = gOnline[d.name];
+      if (started == RunResult::Started) {
+        w.pending = false;
+      } else if (started == RunResult::AlreadyRunning) {
+        w.pending = true;
+        w.pendingTrigger = trigger;
+      }
+    }
+    const char* what = trigger == "device-online" ? "came online" : "went offline";
+    if (started == RunResult::Started) {
+      LOGI(TAG, "[%s] %s %s%s: started", d.name.c_str(), d.device.c_str(), what, happened ? "" : " during the run before");
+    } else if (started == RunResult::AlreadyRunning && happened) {
+      LOGI(TAG, "[%s] %s %s while the scenario is running: starts again when the run ends", d.name.c_str(), d.device.c_str(), what);
+    }
+  }
+}
+
 // ---- interval triggers ---------------------------------------------------------------------------------------------------
 
 // Starts the interval scenarios that are due; true if one was started. Called by the engine task on every look (about once
@@ -1466,6 +1590,24 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
       } else {
         ws["power_w"] = it->second.power / 10.0;
       }
+    }
+  }
+  if (d.isOnline()) {
+    JsonObject w = o["when"].to<JsonObject>();
+    w["device"] = d.whenDevice;
+    w["to"] = d.whenTo;
+    w["for_s"] = d.forS;
+    auto it = gOnline.find(d.name);
+    if (it != gOnline.end()) {
+      JsonObject ws = o["watch"].to<JsonObject>();
+      ws["reason"] = it->second.reason;
+      if (it->second.online < 0) {
+        ws["online"] = nullptr;
+      } else {
+        ws["online"] = it->second.online == 1;
+      }
+      ws["held_s"] = it->second.heldS;     // how long the socket has been in its current state
+      ws["pending"] = it->second.pending;  // happened during a run of this scenario: starts when that run ends
     }
   }
   if (d.isRelay()) {
@@ -1664,7 +1806,7 @@ std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
   };
   Lock lock;
   for (const Def& d : gDefs) {
-    if ((d.isPower() || d.isRelay()) && !known(d.whenDevice)) {
+    if (d.hasWhenDevice() && !known(d.whenDevice)) {
       out.push_back(String("scenario '") + d.name + "', trigger: device '" + d.whenDevice + "' is not in the list");
     }
     for (size_t i = 0; i < d.steps.size(); ++i) {
@@ -1896,6 +2038,7 @@ void limits(JsonObject out) {
   iv["max_every_s"] = kMaxEveryS;
   iv["history_flush_s"] = kIntervalFlushS;  // successes reach the card this often, a failure at once
   iv["history_file_bytes"] = kHistoryFileBytes;  // per scenario, two files
+  out["online"].to<JsonObject>()["max_for_s"] = kMaxOnlineForS;  // trigger "online": when.for_s 0..max_for_s
   JsonObject h = out["http_step"].to<JsonObject>();  // an HTTP step's request (the same limits as POST /api/http/test)
   h["max_url_bytes"] = HttpOut::kMaxUrlBytes;
   h["max_body_bytes"] = HttpOut::kMaxBodyBytes;
@@ -1919,6 +2062,7 @@ String configJson(bool stateOnly) {
   triggers.add(kTriggerPowerAbove);
   triggers.add(kTriggerInterval);
   triggers.add(kTriggerRelay);
+  triggers.add(kTriggerOnline);
   {
     Lock lock;
     doc["sd"] = gInfo.sd;

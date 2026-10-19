@@ -86,7 +86,8 @@ struct LoadInfo {
 
 // "online" has a hysteresis: a device that was online is only called offline after kOfflineAfterFails failed status
 // queries in a row (polls, one per monitor cycle, and user queries count alike). A device that was never queried or was
-// offline needs no such confirmation: its first failure keeps it offline. One success makes it online again.
+// offline needs no such confirmation: its first failure keeps it offline. One success makes it online again. A query that
+// failed while the board itself had no Wi-Fi says nothing about the device: it changes nothing (as "busy").
 constexpr uint8_t kOfflineAfterFails = 2;
 
 struct State {
@@ -105,6 +106,10 @@ struct State {
   // A change counts only when the device was online before it: not the first reading after a boot or an edit of the
   // device, nor the first answer after it was offline (the switch may have changed at any time while it was away).
   uint32_t onSeq = 0, offSeq = 0;
+  // For the trigger "online": answered at least once (since boot, or since the device was edited), and the millis() of
+  // the last change of `online` (or of the first query).
+  bool everOnline = false;
+  uint32_t changedMs = 0;
 };
 
 // Reads /devices.json. A valid file replaces the list; an invalid one is reported in

@@ -327,7 +327,7 @@ function viewStatus() {
 }
 
 // ---------------------------------------------------------------- scenarios
-const TRIGGERS = { power_on: "З'явилося живлення", manual: "Лише вручну", power_below: "Споживання розетки нижче порогу", power_above: "Споживання розетки вище порогу", interval: "Кожні N секунд", relay: "Реле розетки перемкнулось" };
+const TRIGGERS = { power_on: "З'явилося живлення", manual: "Лише вручну", power_below: "Споживання розетки нижче порогу", power_above: "Споживання розетки вище порогу", interval: "Кожні N секунд", relay: "Реле розетки перемкнулось", online: "Розетка офлайн / онлайн" };
 const WATCH_REASON = { met: "умова виконана", waiting: "умова виконується, лічильник іде", warmup: "розігрів після вмикання", "not-met": "потужність по інший бік порогу",
   "relay-off": "розетка вимкнена", "relay-unknown": "стан реле невідомий", unanswered: "остання спроба опитування невдала", stale: "давно немає відповіді розетки",
   "no-data": "ще немає даних", "no-power-dp": "у розетки не вказано DP потужності або його немає", ignored: "розетка ігнорується", "no-device": "такої розетки немає в списку пристроїв",
@@ -341,8 +341,12 @@ const OI_CAUSES = [["power", "Світло зникало", "вмикання ж
 const OI_POLICY = [["resume", "продовжити"], ["restart", "почати спочатку"], ["drop", "не продовжувати"]];
 const OI_DEFAULT = { power: "restart", software: "resume", crash: "resume", brownout: "resume", resume_within_min: 120 };
 const RUN_RESULT = { done: ["ok", "виконано"], stopped: ["warn", "зупинено"], interrupted: ["err", "перервано"], skipped: ["n", "не стартував"] };
-const TRIGGER_RUN = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу", interval: "за інтервалом", "relay-on": "реле ввімкнулось", "relay-off": "реле вимкнулось" };
+const TRIGGER_RUN = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу", interval: "за інтервалом", "relay-on": "реле ввімкнулось", "relay-off": "реле вимкнулось",
+  "device-offline": "розетка офлайн", "device-online": "розетка знову онлайн" };
 const RELAY_TO = [["any", "увімкнулось чи вимкнулось"], ["on", "увімкнулось"], ["off", "вимкнулось"]];
+const ONLINE_TO = [["any", "зникла чи з'явилась"], ["offline", "зникла (офлайн)"], ["online", "з'явилась знову (онлайн)"]];
+const ONLINE_REASON = { watching: "чекає на зміну", holding: "стан змінився, чекає, чи протримається", "not-seen-online": "від старту плати розетку ще не бачили онлайн",
+  ignored: "розетка ігнорується", "no-device": "такої розетки немає в списку пристроїв" };
 const fmtEpoch = e => e ? new Date(e * 1000).toLocaleString() : "час невідомий";
 const STEP_STATE = { pending: ["n", "очікує"], disabled: ["n", "крок вимкнено"], running: ["warn", "виконується"], ok: ["ok", "виконано"],
   skipped: ["n", "пропущено (пристрій ігнорувався)"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
@@ -380,13 +384,14 @@ function viewScenarios() {
 
   const blankHttp = () => ({ method: "GET", url: "", content_type: "application/json", body: "", timeout: "" });
   const blankStep = () => ({ device: devNames[0] || "", action: devNames.length ? "on" : "http", enabled: true, pause: "", seconds: "60", ...blankHttp() });
-  const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60", every_s: "60", to: "any" });
+  const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60", every_s: "60", to: "any", hold_s: "0" });
   const blankOi = () => ({ ...OI_DEFAULT, resume_within_min: String(OI_DEFAULT.resume_within_min) });
   const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), oi: blankOi(), steps: [] });
   const fromServer = s => ({ orig: s.name, name: s.name, enabled: s.enabled, trigger: s.trigger, pause: String(s.default_pause_s),
     oi: s.on_interrupt ? { ...s.on_interrupt, resume_within_min: String(s.on_interrupt.resume_within_min) } : blankOi(),
     when: s.when && s.trigger === "interval" ? { ...blankWhen(), every_s: String(s.when.every_s) }
       : s.when && s.trigger === "relay" ? { ...blankWhen(), device: s.when.device, to: s.when.to }
+      : s.when && s.trigger === "online" ? { ...blankWhen(), device: s.when.device, to: s.when.to, hold_s: String(s.when.for_s) }
       : s.when ? { device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s), every_s: "60" } : blankWhen(),
     steps: s.steps.map(x => ({ device: x.device || "", action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s),
       seconds: x.action === "wait" ? String(x.seconds) : "60",
@@ -405,6 +410,7 @@ function viewScenarios() {
       limits.wait = l.max_wait_s || 3600;
       const iv = l.interval || {};
       Object.assign(limits, { everyMin: iv.min_every_s || 10, everyMax: iv.max_every_s || 86400, flushS: iv.history_flush_s || 300 });
+      limits.onlineFor = (l.online || {}).max_for_s || 3600;
       const h = l.http_step || {};
       Object.assign(limits, { httpUrl: h.max_url_bytes || 2048, httpBody: h.max_body_bytes || 16384, httpTimeout: h.timeout_ms || 10000,
         httpTimeoutMin: h.min_timeout_ms || 1000, httpTimeoutMax: h.max_timeout_ms || 30000, httpInFlight: h.max_in_flight || 2 });
@@ -434,7 +440,12 @@ function viewScenarios() {
       E("button", { class: "d", disabled: !active, onclick: () => act(s.name, "stop") }, "Зупинити"))];
     if (s.state === "interrupted" && s.interrupt_reason) out.push(E("div", { class: "mut", style: "margin:6px 0" }, s.interrupt_reason));
     if (s.resumed) out.push(E("div", { class: "mut", style: "margin:6px 0" }, "Продовжено після перезапуску: " + s.resumed));
-    if (s.watch && s.trigger === "relay") {
+    if (s.watch && s.trigger === "online") {
+      const w = s.watch;
+      out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(w.online == null ? "n" : w.online ? "ok" : "err", w.online == null ? "стан невідомий" : w.online ? "онлайн" : "офлайн"),
+        " · ", ONLINE_REASON[w.reason] || w.reason, w.reason === "holding" ? " (" + w.held_s + " з " + s.when.for_s + " с)" : w.online != null ? " · у цьому стані " + fmtDur(w.held_s) : "",
+        w.pending ? " · подія під час запуску: сценарій запуститься ще раз, коли запуск закінчиться" : ""));
+    } else if (s.watch && s.trigger === "relay") {
       const w = s.watch;
       out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(w.relay == null ? "n" : w.relay ? "ok" : "warn", w.relay == null ? "реле невідоме" : w.relay ? "реле ввімкнене" : "реле вимкнене"),
         " · ", w.reason === "watching" ? "чекає на зміну" : WATCH_REASON[w.reason] || w.reason,
@@ -490,7 +501,9 @@ function viewScenarios() {
           return at + "тривалість має бути цілим числом секунд " + limits.forMin + "–" + limits.forMax + " (не довше за історію показників).";
         if (!/^\d{1,4}$/.test(w.warmup_s) || Number(w.warmup_s) > limits.warmup) return at + "розігрів має бути цілим числом секунд 0–" + limits.warmup + ".";
       }
-      if (r.trigger === "relay" && !NAME_RE.test(r.when.device)) return at + "оберіть розетку, за якою стежить тригер.";
+      if ((r.trigger === "relay" || r.trigger === "online") && !NAME_RE.test(r.when.device)) return at + "оберіть розетку, за якою стежить тригер.";
+      if (r.trigger === "online" && !(/^\d{1,4}$/.test(r.when.hold_s) && Number(r.when.hold_s) <= limits.onlineFor))
+        return at + "«протягом» має бути цілим числом секунд 0–" + limits.onlineFor + ".";
       if (r.trigger === "interval" && !(/^\d{1,5}$/.test(r.when.every_s) && Number(r.when.every_s) >= limits.everyMin && Number(r.when.every_s) <= limits.everyMax))
         return at + "інтервал має бути цілим числом секунд " + limits.everyMin + "–" + limits.everyMax + ".";
       if (!/^\d{1,4}$/.test(r.oi.resume_within_min) || Number(r.oi.resume_within_min) > limits.resumeMax)
@@ -518,6 +531,7 @@ function viewScenarios() {
         ...(r.trigger === "power_below" || r.trigger === "power_above" ? { when: { device: r.when.device, watts: Number(r.when.watts), for_s: Number(r.when.for_s), warmup_s: Number(r.when.warmup_s) } } : {}),
         ...(r.trigger === "interval" ? { when: { every_s: Number(r.when.every_s) } } : {}),
         ...(r.trigger === "relay" ? { when: { device: r.when.device, to: r.when.to } } : {}),
+        ...(r.trigger === "online" ? { when: { device: r.when.device, to: r.when.to, for_s: Number(r.when.hold_s) } } : {}),
         on_interrupt: { power: r.oi.power, software: r.oi.software, crash: r.oi.crash, brownout: r.oi.brownout, resume_within_min: Number(r.oi.resume_within_min) },
         steps: r.steps.map(st => {
           if (st.action === "wait") return { action: "wait", seconds: Number(st.seconds), enabled: st.enabled };
@@ -659,6 +673,7 @@ function viewScenarios() {
   // The condition of a relay trigger: which socket, and which change of its switch.
   function relayFields(r) {
     const w = r.when;
+    if (!RELAY_TO.some(([v]) => v === w.to)) w.to = "any";  // the trigger was another one
     const to = E("select", {}, RELAY_TO.map(([v, l]) => E("option", { value: v, selected: v === w.to }, l)));
     to.addEventListener("change", () => { w.to = to.value; });
     return E("div", {},
@@ -668,6 +683,24 @@ function viewScenarios() {
         "Розетка з «Тримати з'єднання» повідомляє зміну одразу; без нього плата бачить її лише під час опитування, і коротке вимкнення між двома опитуваннями непомітне. " +
         "Перша відповідь після старту плати чи після того, як розетка була офлайн, зміною не вважається. Зміна під час запуску цього сценарію запускає його ще раз, коли запуск закінчиться: " +
         "сценарій, що сам перемикає цю розетку так, як чекає тригер, запускатиме себе знову й знову."));
+  }
+
+  // The condition of an online trigger: which socket, which change, and how long the new state must hold.
+  function onlineFields(r) {
+    const w = r.when;
+    if (!ONLINE_TO.some(([v]) => v === w.to)) w.to = "any";  // the trigger was another one
+    const to = E("select", {}, ONLINE_TO.map(([v, l]) => E("option", { value: v, selected: v === w.to }, l)));
+    to.addEventListener("change", () => { w.to = to.value; });
+    const hold = E("input", { type: "number", min: 0, max: limits.onlineFor, value: w.hold_s });
+    hold.addEventListener("input", () => { w.hold_s = hold.value.trim(); });
+    return E("div", {},
+      E("h2", { style: "margin-top:14px" }, "Умова спрацьовування"),
+      E("div", { class: "fields" }, field("Розетка", whenDevice(w), "за її зв'язком стежить тригер"), field("Подія", to, "яка зміна запускає сценарій"),
+        field("Протягом, с", hold, "0–" + limits.onlineFor + " с; скільки новий стан має протриматись")),
+      E("p", { class: "mut", style: "margin:8px 0 0" }, "Онлайн чи офлайн — як на вкладці «Пристрої»: офлайн після двох невдалих опитувань поспіль, онлайн після першої відповіді. " +
+        "Зникнення коротше за «протягом» подією не вважається, і повернення після нього теж. Поки від старту плати розетку не бачили онлайн (після відключення світла вона піднімається довше, " +
+        "або мертва від початку), подій немає. Невдалі запити, поки в самої плати немає Wi-Fi, стан розетки не змінюють. Як швидко видно зміну, залежить від опитування розетки: " +
+        "з «Тримати з'єднання» — за пів хвилини, без нього — раз на «Опитувати раз на». У сценарії на «з'явилась» {{when.relay}} у HTTP-кроці покаже стан реле після повернення."));
   }
 
   // An interval scenario: how often it runs, and what that means for its log and its history.
@@ -729,6 +762,7 @@ function viewScenarios() {
       r.trigger === "power_below" || r.trigger === "power_above" ? whenFields(r) : null,
       r.trigger === "interval" ? everyFields(r) : null,
       r.trigger === "relay" ? relayFields(r) : null,
+      r.trigger === "online" ? onlineFields(r) : null,
       r.trigger === "interval" ? null : interruptFields(r),
       E("h2", { style: "margin-top:14px" }, "Кроки по черзі"),
       r.steps.length ? r.steps.map((st, k) => stepRow(r, st, k)) : E("p", { class: "mut", style: "margin:0 0 8px" }, "Кроків ще немає."),

@@ -524,7 +524,7 @@ void appendSample(const Device& d, bool ok, JsonVariantConst dps) {
 // cycle, after its retries) and by the observer (every user query). `target` and `dp` are what the query was sent
 // with. Returns 1 if the device is online afterwards (see kOfflineAfterFails), 0 if not, and -1 if the answer was
 // dropped: the device was removed or edited (ip, key, version, switch dp) while the query was running, so the answer
-// belongs to a device that no longer exists under this name.
+// belongs to a device that no longer exists under this name, or the query failed while the board had no Wi-Fi.
 int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, const Tuya::Result& r) {
   String dps;
   JsonDocument dpsDoc;  // the data points of the answer
@@ -540,6 +540,10 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
     }
   }
 
+  if (!r.ok && WiFi.status() != WL_CONNECTED) {  // the board was away, not the device (a scenario step's check)
+    LOGD(TAG, "[%s] query failed while the board has no Wi-Fi (%s): not counted", name.c_str(), r.error.c_str());
+    return -1;
+  }
   State before, after;
   int was = -1, now = -1;  // the switch before and after
   {
@@ -573,6 +577,8 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
       st.error = r.error;
       st.detail = r.detail;
     }
+    if (r.ok) st.everOnline = true;
+    if (!before.known || before.online != st.online) st.changedMs = st.lastTryMs ? st.lastTryMs : 1;
     after = st;
     appendSample(*dev, r.ok, dpsDoc.as<JsonVariantConst>());  // same lock: the device cannot vanish in between
   }

@@ -35,6 +35,11 @@
 //             looked at every 3 s, several changes in between start one run. Not a change: the first reading after a
 //             boot or an edit of the device, the first answer after the device was offline. A change while its run is
 //             going starts it again once that run ends. Nothing is kept over a restart.
+//   online    starts when a socket went offline or came online (the monitor's state, with its hysteresis), with `when`:
+//             { "device", "to": "offline" | "online" | "any", "for_s": 0..3600 (default 0) }: the new state must hold
+//             for_s; a loss shorter than that is no event, nor is the way back. Nothing counts before the socket has been
+//             seen online since boot (or since the device was edited). A query that failed while the board had no Wi-Fi
+//             changes nothing (Devices). See lib/online_rule. Overlapping runs and restarts as for relay.
 // Any scenario, enabled or not, can be started by hand (runNow) and stopped (stop).
 //
 // A step always sends its action (3 s timeout; the cached state is not trusted: it can be old or empty after a
@@ -77,6 +82,7 @@ constexpr uint32_t kMaxWatts = 20000;      // power rule threshold
 constexpr uint32_t kMinForS = 10, kMaxForS = 900;
 constexpr uint32_t kMaxWarmupS = 3600;
 constexpr uint32_t kMinEveryS = 10, kMaxEveryS = 86400;  // trigger "interval": when.every_s
+constexpr uint32_t kMaxOnlineForS = 3600;  // trigger "online": when.for_s
 constexpr uint32_t kIntervalFlushS = 300;  // the history of an interval scenario: successes reach the card this often
 constexpr size_t kHistoryFileBytes = 131072;  // the history of the runs: a file this big becomes the old one
 
