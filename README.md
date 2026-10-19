@@ -184,7 +184,7 @@ curl -u admin:PASS -X PUT -H "Content-Type: application/json" --data-binary @con
 |---|---|
 | `src/` | прошивка: `tuya` (протокол), `devices` (список, монітор, історія), `scenario`, `web_api`, `config`, `storage`, `logger`, `bootlog`, `indicator` |
 | `lib/scenario_engine/` | рушій сценаріїв: усі запуски як машини станів в одному завданні, чистий C++, тестується на комп'ютері |
-| `web/` | `index.html` (сторінка) і `openapi.json` (опис API), обидва вбудовуються в прошивку |
+| `web/` | `index.html` (сторінка; вбудовується стиснутою gzip, `scripts/gzip_web.py`) і `openapi.json` (опис API), обидва вбудовуються в прошивку |
 | `sdcard/` | шаблони `config.json` і `devices.json` |
 | `lib/power_rule/` | рішення тригера споживання: чистий C++ без Arduino, тестується на комп'ютері |
 | `tests/` | автотести на пристрої, `fake_tuya.py` (фальшивий пристрій Tuya); `tests/native/` тести на комп'ютері |

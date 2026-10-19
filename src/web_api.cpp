@@ -23,9 +23,9 @@
 #include "storage.h"
 #include "tuya.h"
 
-// web/index.html, embedded by PlatformIO (board_build.embed_txtfiles); NUL terminated.
-extern const char kIndexStart[] asm("_binary_web_index_html_start");
-extern const char kIndexEnd[] asm("_binary_web_index_html_end");
+// web/index.html gzip-compressed (scripts/gzip_web.py), embedded by PlatformIO (board_build.embed_files); not NUL terminated.
+extern const uint8_t kIndexGzStart[] asm("_binary_web_index_html_gz_start");
+extern const uint8_t kIndexGzEnd[] asm("_binary_web_index_html_gz_end");
 // web/openapi.json, the same way.
 extern const char kSpecStart[] asm("_binary_web_openapi_json_start");
 extern const char kSpecEnd[] asm("_binary_web_openapi_json_end");
@@ -107,11 +107,19 @@ bool authorize(AsyncWebServerRequest* req) {
 
 // The page holds no secrets, but it sits behind the same Basic auth as the API, so the
 // browser asks for the password once and then sends it with every fetch() the page makes.
+// It is stored gzip-compressed (a quarter of the flash) and sent as it is: every browser takes that. A client that
+// does not say it does (curl without --compressed) gets 406 with a hint instead of compressed bytes.
 void onIndex(AsyncWebServerRequest* req) {
   if (!authorize(req)) return;
-  AsyncWebServerResponse* r = req->beginResponse(
-      200, "text/html; charset=utf-8", reinterpret_cast<const uint8_t*>(kIndexStart),
-      static_cast<size_t>(kIndexEnd - kIndexStart) - 1);
+  const AsyncWebHeader* accept = req->getHeader("Accept-Encoding");
+  if (!accept || accept->value().indexOf("gzip") < 0) {
+    sendBody(req, 406, "text/plain; charset=utf-8",
+             "the page is stored gzip-compressed: send Accept-Encoding: gzip (every browser does; curl --compressed)\n");
+    return;
+  }
+  AsyncWebServerResponse* r = req->beginResponse(200, "text/html; charset=utf-8", kIndexGzStart,
+                                                 static_cast<size_t>(kIndexGzEnd - kIndexGzStart));
+  r->addHeader("Content-Encoding", "gzip");
   r->addHeader("Cache-Control", "no-cache");
   req->send(r);
 }
