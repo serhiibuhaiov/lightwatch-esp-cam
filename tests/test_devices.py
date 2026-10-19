@@ -297,7 +297,7 @@ def test_editor_updatedps_flag_round_trip_and_reload(dev, guard):
     assert {d["name"]: d["updatedps"] for d in get_config(dev)["devices"]}["zz-test"] is False
 
 
-@pytest.mark.parametrize("bad", ["15", 0, 3601, -1, 1.5, True, []])
+@pytest.mark.parametrize("bad", ["15", 3601, -1, 1.5, True, []])
 def test_editor_rejects_a_bad_poll_s(dev, guard, bad):
     before = get_config(dev)
     r = put_config(dev, guard + [fake("zz-test", poll_s=bad)])
@@ -315,6 +315,17 @@ def test_editor_poll_s_round_trip_and_reload(dev, guard):
     assert {d["name"]: d for d in dev.get("/api/devices").json()["devices"]}["zz-test"]["poll_s"] == 300
     assert dev.request("POST", "/api/devices/reload").status_code == 200  # it is in the file
     assert {d["name"]: d["poll_s"] for d in get_config(dev)["devices"]}["zz-test"] == 300
+
+
+def test_editor_poll_s_0_needs_keep_connected(dev, guard):
+    before = get_config(dev)
+    r = put_config(dev, guard + [fake("zz-test", poll_s=0)])  # no polling and no kept connection: it would never get data
+    assert r.status_code == 400 and "keep_connected" in r.json()["error"]
+    assert get_config(dev) == before
+    r = put_config(dev, guard + [fake("zz-test", poll_s=0, keep_connected=True)])
+    assert r.status_code == 200, r.text
+    assert dev.request("POST", "/api/devices/reload").status_code == 200  # it is in the file
+    assert {d["name"]: d["poll_s"] for d in get_config(dev)["devices"]}["zz-test"] == 0
 
 
 def test_editor_ignores_the_old_monitor_field(dev, guard):

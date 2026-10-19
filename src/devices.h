@@ -18,12 +18,14 @@
 //
 // name: 1..32 chars of a-z 0-9 _ - (used in URLs), unique. key: exactly 16 characters.
 // version: "3.4" or "3.5". dp: the on/off data point, default 1.
-// poll_s (optional, 1..3600): the monitor queries the device once every poll_s seconds instead of every cycle
+// poll_s (optional, 0..3600): the monitor queries the device once every poll_s seconds instead of every cycle
 // (monitor.interval_s; absent, or not more than the interval: every cycle), whether it sends status pushes or not. Between
 // two queries a device with a live kept connection gets a history sample of its cached state every cycle (the data points
 // it sends on its own go into that state at once, see onPush); without a live kept connection it gets a sample only from a
 // real query (the power rules take their gap from the real step). A kept connection that was lost is opened again by a
-// query in the next cycle, poll_s or not. The old field "monitor" ("poll"/"push") is no longer read.
+// query in the next cycle, poll_s or not. poll_s 0: no polling at all, only that query whenever the kept connection is
+// (re)opened (or the device is offline); the rest comes from the pushes, so only with keep_connected (else it would never
+// get any data). The old field "monitor" ("poll"/"push") is no longer read.
 // meters (optional): which data point carries the power / current / voltage / energy reading, 0..255;
 // 0 = the socket has none, absent = the usual Tuya socket numbers (19, 18, 20, 17). They label the readings
 // on the page, fill the history, feed the power rules and say which data points UPDATEDPS re-reads;
@@ -45,6 +47,8 @@
 
 namespace Devices {
 
+constexpr uint16_t kPollOnConnect = UINT16_MAX;  // poll_s 0: queried only when the kept connection is (re)opened
+
 struct Device {
   String name;
   String ip;
@@ -58,7 +62,9 @@ struct Device {
   // earlier), whether a power rule waits for it or not. false: plain status queries only (a socket that keeps its
   // readings fresh by itself, or that misbehaves on UPDATEDPS: the boiler switched itself off during one).
   bool updatedps = true;
-  uint16_t pollS = 0;  // poll_s (see above); 0 = every monitor cycle
+  uint16_t pollS = 0;  // poll_s (see above); 0 = every monitor cycle, kPollOnConnect = poll_s 0
+  // poll_s as the API and the file show it: 0 (only on connect), the seconds, or -1 for every cycle (null / absent).
+  int32_t pollSField() const { return pollS == kPollOnConnect ? 0 : pollS ? pollS : -1; }
 
   Tuya::Target target() const {
     Tuya::Target t;

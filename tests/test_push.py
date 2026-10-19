@@ -143,6 +143,25 @@ def test_without_poll_s_it_is_queried_every_cycle_and_pushes_still_count(dev, fa
     assert device(dev)["poll_s"] is None
 
 
+def test_with_poll_s_0_it_is_queried_only_when_the_connection_is_opened(dev, fake):
+    step = interval(dev)
+    edit(dev, poll_s=0)
+    q0, c0 = fake.queries, fake.connections
+    time.sleep(step * 2.5)
+    assert fake.queries == q0, "polled with poll_s 0"
+    assert fake.push(d19=900) == 1  # the data comes from the pushes
+    wait_for(lambda: device(dev)["state"]["dps"].get("19") == 900, 5, "the pushed reading did not reach the state", step=0.1)
+    assert all(s["ok"] for s in history(dev, 2))  # the history gets the cached state
+    fake.answer_heartbeat = False  # the heartbeat closes the connection; the next cycle connects with one query
+    wait_for(lambda: fake.connections > c0, step * 2 + 15, "the board did not connect again after the silent heartbeat")
+    fake.answer_heartbeat = True
+    wait_for(lambda: fake.queries > q0, 10, "no query when the connection was opened again")
+    q1 = fake.queries
+    time.sleep(step * 2.2)
+    assert fake.queries == q1, "polled again after the opening query"
+    assert device(dev)["poll_s"] == 0
+
+
 def test_without_a_kept_connection_there_are_no_cached_samples_between_queries(dev, fake):
     step = interval(dev)
     edit(dev, keep_connected=False, poll_s=60)

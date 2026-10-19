@@ -186,11 +186,17 @@ bool parse(const String& raw, std::vector<Device>& out, String& err, const std::
     }
     // "monitor" ("poll"/"push") of older firmware is not read any more: poll_s says how often the device is queried.
     if (!item["poll_s"].isNull()) {
-      if (!item["poll_s"].is<long>() || item["poll_s"].as<long>() < 1 || item["poll_s"].as<long>() > kMaxPollS) {
-        err = where + ".poll_s must be a number of seconds, 1.." + String(static_cast<unsigned>(kMaxPollS)) + " (or null: every cycle)";
+      if (!item["poll_s"].is<long>() || item["poll_s"].as<long>() < 0 || item["poll_s"].as<long>() > kMaxPollS) {
+        err = where + ".poll_s must be a number of seconds, 0.." + String(static_cast<unsigned>(kMaxPollS)) +
+              " (0: only when the connection is opened; null: every cycle)";
         return false;
       }
-      d.pollS = static_cast<uint16_t>(item["poll_s"].as<long>());
+      const long s = item["poll_s"].as<long>();
+      if (s == 0 && !d.keepConnected) {
+        err = where + ".poll_s 0 (no polling, only pushes) needs keep_connected: true";
+        return false;
+      }
+      d.pollS = s == 0 ? kPollOnConnect : static_cast<uint16_t>(s);
     }
     if (!item["meters"].isNull()) {
       if (!item["meters"].is<JsonObjectConst>()) {
@@ -243,7 +249,7 @@ String fileText(const std::vector<Device>& list) {
     if (d.ignore) o["ignore"] = true;
     if (d.keepConnected) o["keep_connected"] = true;
     if (!d.updatedps) o["updatedps"] = false;
-    if (d.pollS) o["poll_s"] = d.pollS;
+    if (d.pollSField() >= 0) o["poll_s"] = d.pollSField();
     if (d.dpPower >= 0 || d.dpCurrent >= 0 || d.dpVoltage >= 0 || d.dpEnergy >= 0) {
       JsonObject m = o["meters"].to<JsonObject>();
       if (d.dpPower >= 0) m["power"] = d.dpPower;
@@ -355,8 +361,8 @@ String configJson() {
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
     o["updatedps"] = d.updatedps;
-    if (d.pollS) {
-      o["poll_s"] = d.pollS;
+    if (d.pollSField() >= 0) {
+      o["poll_s"] = d.pollSField();
     } else {
       o["poll_s"] = nullptr;  // every monitor cycle
     }
@@ -695,11 +701,14 @@ void monitorTask(void* arg) {
         // poll_s: a query only once every poll_s, whether the device pushes or not (half a cycle of slack, so that 60 s
         // at a 15 s interval is every 4th cycle and not, after a little delay, the 5th). Between two queries a device with
         // a live kept connection gets its cached state as a history sample (what it pushes goes into that state); one
-        // without gets nothing: there is no new information. A lost kept connection is opened again by a query now.
+        // without gets nothing: there is no new information. A lost kept connection is opened again by a query now, and
+        // a device counted offline is queried although its connection lives (a command may have opened it). poll_s 0
+        // (kPollOnConnect): only those queries.
         auto q = queriedAt.find(d.name);
-        const bool due = d.pollS <= p.intervalSec || q == queriedAt.end() || millis() - q->second + period / 2 >= d.pollS * 1000UL;
+        const bool due = d.pollS != kPollOnConnect &&
+                         (d.pollS <= p.intervalSec || q == queriedAt.end() || millis() - q->second + period / 2 >= d.pollS * 1000UL);
         if (!due) {
-          if (Tuya::kept(d.ip)) {
+          if (Tuya::kept(d.ip) && !wasOffline) {
             recordCached(d.name, d.target(), d.dp);
             continue;
           }

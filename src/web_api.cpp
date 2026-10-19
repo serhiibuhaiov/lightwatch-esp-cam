@@ -515,8 +515,8 @@ JsonDocument devicesSummary() {
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
     o["updatedps"] = d.updatedps;
-    if (d.pollS) {
-      o["poll_s"] = d.pollS;
+    if (d.pollSField() >= 0) {
+      o["poll_s"] = d.pollSField();
     } else {
       o["poll_s"] = nullptr;  // every monitor cycle
     }

@@ -871,7 +871,7 @@ function viewDevices() {
     const sw = !st.known || !st.dps ? badge("n", "невідомо") : on === undefined ? badge("n", "немає даних") : on ? badge("ok", "ввімкнено") : badge("n", "вимкнено");
     const parts = [E("div", { class: "dh" }, E("h3", {}, d.name), online, sw,
       E("span", { class: "mut" }, d.ip + " · протокол " + d.version + " · DP " + d.dp +
-        (d.poll_s ? " · опитування раз на " + fmtDur(d.poll_s) : "") +
+        (d.poll_s === 0 ? " · опитування лише при підключенні" : d.poll_s ? " · опитування раз на " + fmtDur(d.poll_s) : "") +
         (d.keep_connected ? " · з'єднання тримається" + (st.push_age_s != null ? ", push востаннє " + fmtAge(st.push_age_s) + " (" + st.pushes + " від старту)" : "") : "") + (st.connections != null ? " · підключень від старту: " + st.connections : "")))];
 
     if (d.ignore) {
@@ -1074,7 +1074,7 @@ function viewDevConfig() {
     ign.addEventListener("change", () => { r.ignore = ign.checked; });
     const keep = E("input", { type: "checkbox", checked: r.keep_connected });
     keep.addEventListener("change", () => { r.keep_connected = keep.checked; });
-    const pollIn = E("input", { type: "number", value: r.poll_s, min: 1, max: 3600, placeholder: "кожен цикл" });
+    const pollIn = E("input", { type: "number", value: r.poll_s, min: 0, max: 3600, placeholder: "кожен цикл" });
     pollIn.addEventListener("input", () => { r.poll_s = pollIn.value.trim(); });
     const upd = E("input", { type: "checkbox", checked: r.updatedps });
     upd.addEventListener("change", () => { r.updatedps = upd.checked; });
@@ -1113,7 +1113,7 @@ function viewDevConfig() {
           E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати.")),
         E("div", { class: "f" }, E("label", {}, "Тримати з'єднання"), E("label", { style: "font-weight:400" }, keep, " одне з'єднання на всі запити"),
           E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Те, що розетка шле сама (push), одразу потрапляє в стан. Займає одне з їхніх місць для підключень.")),
-        field("Опитувати раз на, с", pollIn, "порожнє: кожен цикл монітора. Між опитуваннями з живим з'єднанням в історію йде стан із кешу (з push), без з'єднання — нічого. Розетці з тригером споживання, що сама не шле показники, лишіть порожнім і з UPDATEDPS."),
+        field("Опитувати раз на, с", pollIn, "порожнє: кожен цикл монітора; 0: без опитування, лише запит при підключенні, далі тільки push (потрібне «Тримати з'єднання»). Між опитуваннями з живим з'єднанням в історію йде стан із кешу (з push), без з'єднання — нічого. Розетці з тригером споживання, що сама не шле показники, лишіть порожнім і з UPDATEDPS."),
         E("div", { class: "f" }, E("label", {}, "UPDATEDPS"), E("label", { style: "font-weight:400" }, upd, " просити переміряти показники"),
           E("small", {}, "Монітор опитує розетку з UPDATEDPS (свіжий замір замість кешу розетки), незалежно від тригерів. «Оновити зараз» шле UPDATEDPS завжди. Вимкніть, якщо розетка й так дає свіжі показники або збоїть від цього."))),
       E("details", { open: Object.values(r.meters).some(v => v !== "") },
