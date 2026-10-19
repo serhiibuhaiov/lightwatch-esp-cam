@@ -56,6 +56,10 @@
 
 #include <vector>
 
+namespace HttpOut {
+struct Job;
+}
+
 namespace Scenario {
 
 // How many scenarios, and how big their file and PUT body may be, depends on the memory: with PSRAM the documents live
@@ -94,6 +98,12 @@ void sdAvailable();
 // Which scenarios name a device that is not in `deviceNames`: one text per enabled step (and per power rule) such as
 // "scenario 'power-restored', step 3: device 'heater1' is not in the list". For the warning after the device list is edited.
 std::vector<String> missingDevices(const std::vector<String>& deviceNames);
+
+// Fills in the placeholders of the url and the body of `job` (lib/http_template): the cached readings of the sockets, the
+// local time, and the run: `scenario`, `trigger` and the socket of its `when` ("" = none: "-"). False with `err` when
+// the url or the body gets too long (HttpOut::kMaxUrlBytes / kMaxBodyBytes) or there is no memory: then also in
+// job.result (error "url" or "body").
+bool fillPlaceholders(HttpOut::Job& job, const String& scenario, const String& trigger, const String& whenDevice);
 
 enum class RunResult { Started, NotFound, AlreadyRunning };
 

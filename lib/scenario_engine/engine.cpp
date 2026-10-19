@@ -704,7 +704,7 @@ void Engine::grantSlots(uint32_t now) {
     Run& r = *asking[k];
     if (r.def.isHttp(r.step)) {  // the HTTP lane: its own places, no slot statistics (those are about the sockets)
       if (httpFull || httpInFlight_ >= kMaxHttpInFlight) continue;
-      const uint32_t id = env_.submitHttp(r.def.request(r.step), r.quiet);
+      const uint32_t id = env_.submitHttp(r.def.request(r.step), r.quiet, r.def.name, r.trigger);
       if (!id) {  // its list is full (the API's test requests): try again on the next look
         httpFull = true;
         continue;

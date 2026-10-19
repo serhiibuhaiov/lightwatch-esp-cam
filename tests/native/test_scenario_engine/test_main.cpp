@@ -111,9 +111,11 @@ class FakeEnv : public Env {
     return n;
   }
   std::vector<bool> httpQuiet;  // `quiet` of every request submitted, in order
-  uint32_t submitHttp(const HttpReq& req, bool quiet) override {
+  std::vector<std::string> httpRuns;  // "scenario/trigger" of every request submitted, in order
+  uint32_t submitHttp(const HttpReq& req, bool quiet, const std::string& scenario, const std::string& trigger) override {
     if (httpPending() >= httpCapacity) return 0;
     httpQuiet.push_back(quiet);
+    httpRuns.push_back(scenario + "/" + trigger);
     FakeRequest q;
     q.req = req;
     q.endMs = std::max(now, httpFreeMs) + 800;
@@ -778,6 +780,7 @@ void test_an_http_step_sends_its_request_with_no_status_query_and_keeps_its_paus
   TEST_ASSERT_EQUAL_UINT32(2, eng->stats().httpRequests);
   TEST_ASSERT_EQUAL_UINT32(2, eng->stats().jobs);  // the socket's command and query only
   TEST_ASSERT_TRUE(env->httpQuiet == std::vector<bool>({false, false}));  // an ordinary run's requests are logged as usual
+  TEST_ASSERT_TRUE(env->httpRuns == std::vector<std::string>({"s/manual", "s/manual"}));  // the run, for the placeholders
   TEST_ASSERT_TRUE(env->requests.empty());  // every request released
 }
 

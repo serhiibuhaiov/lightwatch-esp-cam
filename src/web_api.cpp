@@ -16,6 +16,7 @@
 #include "config.h"
 #include "devices.h"
 #include "http_out.h"
+#include "http_template.h"
 #include "logger.h"
 #include "ota.h"
 #include "psram_alloc.h"
@@ -826,6 +827,21 @@ void onHttpTest(AsyncWebServerRequest* req) {
   String err;
   if (!HttpOut::parse(in.as<JsonVariantConst>(), *job, err)) {
     sendError(req, 400, err);
+    return;
+  }
+  // The placeholders as a step would fill them in, from no run: the sockets' readings and the time; scenario, trigger
+  // and when.* give "-".
+  std::string why;
+  if (!HttpTemplate::validate(job->url.c_str(), job->url.size(), true, true, why)) {
+    sendError(req, 400, String("url: ") + why.c_str());
+    return;
+  }
+  if (!HttpTemplate::validate(job->body.c_str(), job->body.size(), false, true, why)) {
+    sendError(req, 400, String("body: ") + why.c_str());
+    return;
+  }
+  if (!Scenario::fillPlaceholders(*job, String(), String(), String())) {
+    sendError(req, 400, job->result.error + ": " + job->result.detail);
     return;
   }
   if (!HttpOut::submit(job)) {

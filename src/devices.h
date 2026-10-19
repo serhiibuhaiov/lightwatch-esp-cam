@@ -136,6 +136,10 @@ bool state(const String& name, State& out);   // false: no such device
 // The cached on/off state of the device's switch data point: 1 on, 0 off, -1 unknown (never queried, offline,
 // no such device, or the data point is not a boolean). Reads the cache; never touches the device.
 int switchState(const String& name);
+// The cached readings of `name` for the placeholders of an HTTP step: raw power, current, voltage, energy by its meters
+// (INT32_MIN = none) and the switch (1 on, 0 off, -1 unknown). Only for a device that is online and not ignored: false,
+// and everything none, otherwise. Reads the cache; never touches the device.
+bool readings(const String& name, int32_t values[4], int& relay);
 // The number of the last change of a switch on any device (0 = none since boot): every change takes the next number, so a
 // change after a look at this number has a greater one (State::onSeq / offSeq), even on a device whose state was reset.
 uint32_t relaySeq();

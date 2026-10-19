@@ -827,6 +827,26 @@ void monitorTask(void* arg) {
 
 }  // namespace
 
+bool readings(const String& name, int32_t values[4], int& relay) {
+  for (size_t i = 0; i < 4; ++i) values[i] = INT32_MIN;
+  relay = -1;
+  Lock lock;
+  const Device* dev = nullptr;
+  for (const Device& x : gList) {
+    if (x.name == name) dev = &x;
+  }
+  auto it = gStates.find(name);
+  if (!dev || dev->ignore || it == gStates.end() || !it->second.known || !it->second.online || it->second.dpsJson.isEmpty()) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, it->second.dpsJson)) return false;
+  const int16_t standard[4] = {19, 18, 20, 17};  // power, current, voltage, energy (as in appendSample)
+  const int16_t chosen[4] = {dev->dpPower, dev->dpCurrent, dev->dpVoltage, dev->dpEnergy};
+  for (size_t i = 0; i < 4; ++i) values[i] = numberAt(doc.as<JsonVariantConst>(), chosen[i] < 0 ? standard[i] : chosen[i]);
+  JsonVariantConst sw = doc[String(dev->dp)];
+  if (sw.is<bool>()) relay = sw.as<bool>() ? 1 : 0;
+  return true;
+}
+
 uint32_t relaySeq() {
   Lock lock;
   return gRelaySeq;

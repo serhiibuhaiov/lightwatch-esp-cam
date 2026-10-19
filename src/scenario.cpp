@@ -17,6 +17,7 @@
 #include "devices.h"
 #include "engine.h"
 #include "http_out.h"
+#include "http_template.h"
 #include "logger.h"
 #include "power_rule.h"
 #include "psram_alloc.h"
@@ -308,6 +309,16 @@ bool parse(const String& raw, Defs& out, String& err) {
         }
         HttpOut::Job q;
         if (!HttpOut::parse(sv, q, err, at)) return false;
+        std::string why;
+        const bool hasWhen = d.isPower() || d.isRelay();
+        if (!HttpTemplate::validate(q.url.c_str(), q.url.size(), true, hasWhen, why)) {
+          err = at + ".url: " + why.c_str();
+          return false;
+        }
+        if (!HttpTemplate::validate(q.body.c_str(), q.body.size(), false, hasWhen, why)) {
+          err = at + ".body: " + why.c_str();
+          return false;
+        }
         ScenarioEngine::HttpReq req;
         req.post = q.method == HttpOut::Method::Post;
         req.url.assign(q.url.c_str(), q.url.size());
@@ -587,7 +598,8 @@ class BoardEnv : public ScenarioEngine::Env {
     return nextId_;
   }
 
-  uint32_t submitHttp(const ScenarioEngine::HttpReq& req, bool quiet) override {
+  // Called by the engine with gMux held (the definitions are there for `when`).
+  uint32_t submitHttp(const ScenarioEngine::HttpReq& req, bool quiet, const std::string& scenario, const std::string& trigger) override {
     auto job = std::make_shared<HttpOut::Job>();
     job->quiet = quiet;  // an interval scenario's ping: not a line in the usual log every time (intervalFinished reports the changes)
     job->method = req.post ? HttpOut::Method::Post : HttpOut::Method::Get;
@@ -597,6 +609,8 @@ class BoardEnv : public ScenarioEngine::Env {
       job->result.error = "memory";
       job->result.detail = "no memory for the request";
       job->done.store(true, std::memory_order_release);
+    } else if (!fillRun(*job, scenario, trigger)) {
+      job->done.store(true, std::memory_order_release);  // the error is in the result
     } else if (!HttpOut::submit(job)) {
       return 0;  // its list is full
     }
@@ -652,6 +666,10 @@ class BoardEnv : public ScenarioEngine::Env {
     if (withdraw) it->second->cancelled.store(true);  // still queued: dropped, never reaches the socket
     jobs_.erase(it);
   }
+
+  // The placeholders of a run's request: its scenario, trigger and `when` device (below: needs findDef). False: the
+  // reason is in the job's result.
+  bool fillRun(HttpOut::Job& job, const std::string& scenario, const std::string& trigger);
 
   void log(bool warn, const std::string& line) override {
     Logger::log(warn ? Logger::Level::Warn : Logger::Level::Info, TAG, "%s", line.c_str());
@@ -907,6 +925,12 @@ String gHistoryPending;
 constexpr size_t kHistoryPendingMax = 65536;  // the card is away for long: later lines are dropped
 
 void intervalFinished(const String& name, const ScenarioEngine::Run& r);  // below
+
+bool BoardEnv::fillRun(HttpOut::Job& job, const std::string& scenario, const std::string& trigger) {
+  const Def* d = findDef(String(scenario.c_str()));
+  const String when = d && (d->isPower() || d->isRelay()) ? d->whenDevice : String();
+  return fillPlaceholders(job, String(scenario.c_str()), String(trigger.c_str()), when);
+}
 
 void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
   const Def* def = findDef(String(name.c_str()));
@@ -1790,6 +1814,54 @@ bool history(const String& name, size_t limit, uint32_t before, bool failedOnly,
   out += interval ? ",\"interval\":true" : "";
   out += sd ? ",\"sd\":true}" : ",\"sd\":false}";
   return sd;
+}
+
+bool fillPlaceholders(HttpOut::Job& job, const String& scenario, const String& trigger, const String& whenDevice) {
+  char now[24] = "-";
+  const time_t t = time(nullptr);
+  if (t > 1700000000) {
+    struct tm lt;
+    localtime_r(&t, &lt);
+    strftime(now, sizeof(now), "%Y-%m-%dT%H:%M:%S", &lt);
+  }
+  auto resolve = [&](const HttpTemplate::Ref& r) -> std::string {
+    using Kind = HttpTemplate::Ref::Kind;
+    switch (r.kind) {
+      case Kind::Time: return now;
+      case Kind::Scenario: return scenario.isEmpty() ? "-" : scenario.c_str();
+      case Kind::Trigger: return trigger.isEmpty() ? "-" : trigger.c_str();
+      case Kind::Device:
+      case Kind::When: {
+        const String name = r.kind == Kind::When ? whenDevice : String(r.device.c_str());
+        int32_t v[4];
+        int relay = -1;
+        if (!name.isEmpty()) Devices::readings(name, v, relay);
+        if (r.field == HttpTemplate::Field::Relay) return HttpTemplate::format(r.field, relay);
+        return name.isEmpty() ? "-" : HttpTemplate::format(r.field, v[static_cast<int>(r.field)]);
+      }
+    }
+    return "-";
+  };
+  struct Part {
+    HttpOut::Text& text;
+    size_t max;
+    const char* name;
+  } parts[] = {{job.url, HttpOut::kMaxUrlBytes, "url"}, {job.body, HttpOut::kMaxBodyBytes, "body"}};
+  for (Part& p : parts) {
+    if (!strstr(p.text.c_str(), "{{")) continue;  // nothing to fill in (the text holds no NUL: it came from JSON)
+    std::string out;
+    if (!HttpTemplate::expand(p.text.c_str(), p.text.size(), resolve, p.max, out)) {
+      job.result.error = p.name;
+      job.result.detail = String("longer than ") + static_cast<unsigned>(p.max) + " bytes with the placeholders filled in";
+      return false;
+    }
+    if (!p.text.assign(out.data(), out.size())) {
+      job.result.error = "memory";
+      job.result.detail = "no memory for the request";
+      return false;
+    }
+  }
+  return true;
 }
 
 size_t maxScenarios() { return psramAvailable() ? kMaxScenariosPsram : kMaxScenariosNoPsram; }

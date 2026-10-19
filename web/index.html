@@ -623,6 +623,9 @@ function viewScenarios() {
       upd();
       parts.push(ct, body, count);
     }
+    parts.push(E("small", { class: "mut", style: "flex:1 1 100%" }, "Підстановки в шляху й параметрах адреси та в тілі: {{розетка.power}} (Вт), .voltage (В), .current (А), .energy (кВт·год), .relay (on/off) — " +
+      "з останнього стану розетки; {{when.power}} тощо — розетка з умови тригера; {{time}}, {{scenario}}, {{trigger}}. Немає значення (офлайн, ігнорується) — «-». " +
+      "«Перевірити» підставляє показники й час, а сценарій, тригер і when дають «-»."));
     parts.push(res);
     return E("div", { class: "hreq" }, ...parts);
   }

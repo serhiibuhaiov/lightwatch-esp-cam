@@ -140,8 +140,9 @@ class Env {
   virtual uint32_t submit(Op op, const std::string& device) = 0;
   // Queues the request of an HTTP step in the HTTP lane; 0 = its list is full right now. The ids share one space with submit().
   // JobStatus::detail of a request that succeeded says what the server answered ("answered 200 in 812 ms").
-  // `quiet`: the request of a quiet run (Run::quiet): the HTTP lane logs it at DEBUG, failures too.
-  virtual uint32_t submitHttp(const HttpReq& req, bool quiet) = 0;
+  // `quiet`: the request of a quiet run (Run::quiet): the HTTP lane logs it at DEBUG, failures too. `scenario` and
+  // `trigger`: the run it belongs to (for the placeholders of the request, see lib/http_template).
+  virtual uint32_t submitHttp(const HttpReq& req, bool quiet, const std::string& scenario, const std::string& trigger) = 0;
   virtual JobStatus poll(uint32_t job) = 0;
   // The engine is done with the job. `withdraw`: it has not finished, drop it if it has not started yet.
   virtual void release(uint32_t job, bool withdraw) = 0;
