@@ -140,7 +140,9 @@ def fake_registered(dev, with_dead=False):
         fake.start()
     except OSError as e:
         pytest.skip(f"cannot listen on port 6668 here: {e}")
-    added = [{"name": FAKE_NAME, "ip": lan_ip_towards(dev.url.split("//")[1].split(":")[0]), "key": FAKE_KEY, "version": "3.4", "dp": 1}]
+    # updatedps off: plain status queries, as most tests expect (the tests of UPDATEDPS switch it on)
+    added = [{"name": FAKE_NAME, "ip": lan_ip_towards(dev.url.split("//")[1].split(":")[0]), "key": FAKE_KEY, "version": "3.4", "dp": 1,
+              "updatedps": False}]
     if with_dead:
         added.append({"name": DEAD_NAME, "ip": DEAD_IP, "key": FAKE_KEY, "version": "3.4", "dp": 1})
     try:

@@ -1102,21 +1102,6 @@ void engineTask(void*) {
 
 RunResult runWith(const String& name, const char* trigger);  // below
 
-// Tells the monitor which devices need UPDATEDPS: the ones an enabled power rule waits for. Caller holds no lock.
-void refreshWatched() {
-  std::vector<String> names;
-  {
-    Lock lock;
-    for (const Def& d : gDefs) {
-      if (!d.enabled || !d.isPower()) continue;
-      bool have = false;
-      for (const String& n : names) have = have || n == d.whenDevice;
-      if (!have) names.push_back(d.whenDevice);
-    }
-  }
-  Devices::setWatched(names);
-}
-
 // The last run of `name` ended with a step that failed (not stopped by hand). The caller holds gMux.
 bool lastRunFailed(const String& name) {
   const ScenarioEngine::Run* r = gEngine ? gEngine->run(name.c_str()) : nullptr;
@@ -1411,7 +1396,6 @@ void begin(esp_reset_reason_t reason, const char* reasonName, uint16_t delaySec)
     }
   }
   load();
-  refreshWatched();
 
   using ScenarioEngine::Cause;
   using ScenarioEngine::Policy;
@@ -1503,7 +1487,6 @@ void sdAvailable() {
   }
   LOGI(TAG, "the SD card is available now: reading %s", kPath);
   load();
-  refreshWatched();
 }
 
 std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
@@ -1800,7 +1783,6 @@ SaveResult save(const String& json) {
     gInfo.error = "";
   }
   wake();
-  refreshWatched();  // which devices need UPDATEDPS may have changed
   r.ok = true;
   r.count = next.size();
   LOGI(TAG, "scenarios saved from the web page: %u scenario(s)", static_cast<unsigned>(r.count));

@@ -38,7 +38,6 @@ struct History {
   size_t head = 0;          // the oldest sample when full
 };
 std::map<String, History> gHistory;  // by device name; lives and dies with the state
-std::vector<String> gWatched;        // devices a power rule waits for (see setWatched)
 uint16_t gIntervalSec = 30;
 std::atomic<uint32_t> gLastCycleMs{0}, gMaxCycleMs{0};  // see monitorCycle()
 
@@ -628,7 +627,7 @@ void monitorTask(void* arg) {
   // Whether a device is "offline" is read from its state (not remembered here), so a device that was removed, edited
   // or added again starts as a new one: polled in full at once, with no skipping left over from its previous life.
   std::map<String, uint8_t> cyclesToSkip;
-  // A watched device that does not take UPDATEDPS gets plain queries for this many cycles before it is tried again.
+  // A device with updatedps that does not take UPDATEDPS gets plain queries for this many cycles before it is tried again.
   constexpr uint16_t kRefreshRetryCycles = 20;
   std::map<String, uint16_t> noRefresh;
   // A device that stays offline: one line about why, at most this often (a failed poll is otherwise only a debug line,
@@ -708,10 +707,9 @@ void monitorTask(void* arg) {
           }
         }
 
-        // A device a power rule watches gets UPDATEDPS + status (fresh readings) instead of the plain query; only
-        // those, only while a rule is enabled, and not with updatedps:false. If it does not take that command: plain
-        // queries for a while.
-        const String meters = isWatched(d.name) && d.updatedps ? meterDps(d) : String();
+        // updatedps (the device's own setting, not whether a power rule waits for it): UPDATEDPS + status (fresh
+        // readings) instead of the plain query. If it does not take that command: plain queries for a while.
+        const String meters = d.updatedps ? meterDps(d) : String();
         bool useRefresh = !meters.isEmpty();
         auto skipIt = noRefresh.find(d.name);
         if (skipIt != noRefresh.end()) {
@@ -815,19 +813,6 @@ int switchState(const String& name) {
   State st;
   if (!find(name, d) || !state(name, st) || !st.known || !st.online) return -1;
   return switchValue(st.dpsJson, d.dp);
-}
-
-void setWatched(const std::vector<String>& names) {
-  Lock lock;
-  gWatched = names;
-}
-
-bool isWatched(const String& name) {
-  Lock lock;
-  for (const String& n : gWatched) {
-    if (n == name) return true;
-  }
-  return false;
 }
 
 PowerCheck checkPower(const String& name, bool below, uint32_t watts, uint32_t forS, uint32_t warmupS) {

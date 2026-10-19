@@ -1,5 +1,5 @@
 """Power triggers (power_below / power_above) against a fake Tuya device on this computer: validation, when they fire and
-when they must not, fire-once and re-arming, and when the monitor sends UPDATEDPS. See fake_tuya.py and, for a real
+when they must not, fire-once and re-arming, and that UPDATEDPS follows the device's flag, not the rules. See fake_tuya.py and, for a real
 socket, test_power_trigger_real.py.
 
 Power in the fake is a raw DP 19 value in 0.1 W: 300 = 30 W. The rules here use 10 s for `for_s`, the shortest allowed;
@@ -337,61 +337,48 @@ def test_an_ignored_device_is_never_fired_on(dev, guard, fake):
         put_devices(dev, devices)
 
 
-# ---- UPDATEDPS: only for a device an enabled rule waits for -----------------------------------------------------------------
+# ---- UPDATEDPS: the device's own flag, not the rules -----------------------------------------------------------------------
 
-def test_updatedps_is_sent_only_while_a_rule_waits_for_the_device(dev, guard, fake):
+def set_updatedps(dev, value):
+    devices = device_list(dev)
+    for d in devices:
+        if d["name"] == FAKE_NAME:
+            d["updatedps"] = value
+    assert put_devices(dev, devices).status_code == 200
+
+
+def test_updatedps_follows_the_device_flag_without_any_rule(dev, guard, fake):
     gap = dev.get("/api/devices").json()["poll_interval_s"]
     fake.updatedps = 0
-    time.sleep(gap + 5)  # a plain poll or two, no rule at all
-    assert fake.updatedps == 0, "UPDATEDPS without any rule"
-
-    assert put(dev, guard + [rule(TEST + "watch", watts=1, for_s=900)]).status_code == 200  # never fires: 1 W
-    assert wait_until(lambda: fake.updatedps > 0, gap + 10), "no UPDATEDPS for a watched device"
-    state = next(d for d in dev.get("/api/devices").json()["devices"] if d["name"] == FAKE_NAME)["state"]
-    assert state["online"] is True and state["fails"] == 0
-
-    assert put(dev, guard + [rule(TEST + "watch", watts=1, for_s=900, enabled=False)]).status_code == 200
-    time.sleep(3)
-    settled = fake.updatedps
-    time.sleep(gap + 5)
-    assert fake.updatedps == settled, "UPDATEDPS went on after the rule was switched off"
-
-
-def test_a_device_with_updatedps_off_gets_plain_queries_even_when_watched(dev, guard, fake):
-    gap = dev.get("/api/devices").json()["poll_interval_s"]
-
-    def flag(value):
-        devices = device_list(dev)
-        for d in devices:
-            if d["name"] == FAKE_NAME:
-                d["updatedps"] = value
-        assert put_devices(dev, devices).status_code == 200
-
-    flag(False)
+    time.sleep(gap + 5)  # registered with updatedps off: plain polls
+    assert fake.updatedps == 0, "UPDATEDPS to a device with updatedps:false"
+    set_updatedps(dev, True)
     try:
-        assert put(dev, guard + [rule(TEST + "plain", watts=1, for_s=900)]).status_code == 200  # never fires: 1 W
-        fake.updatedps = 0
-        time.sleep(gap * 2 + 5)
-        assert fake.updatedps == 0, "UPDATEDPS to a device with updatedps:false"
-        assert reason(dev, TEST + "plain") == "not-met"  # the rule still gets fresh answers from the plain queries
+        assert wait_until(lambda: fake.updatedps > 0, gap + 10), "no UPDATEDPS for a device with updatedps:true"
+        state = next(d for d in dev.get("/api/devices").json()["devices"] if d["name"] == FAKE_NAME)["state"]
+        assert state["online"] is True and state["fails"] == 0
     finally:
-        flag(True)
+        set_updatedps(dev, False)
 
 
-def test_a_rule_on_another_device_does_not_make_this_one_get_updatedps(dev, guard, fake):
+def test_a_rule_does_not_bring_updatedps_to_a_device_with_the_flag_off(dev, guard, fake):
     gap = dev.get("/api/devices").json()["poll_interval_s"]
-    assert put(dev, guard + [rule(TEST + "other", device="zz-no-such-device", watts=1, for_s=900)]).status_code == 200
+    assert put(dev, guard + [rule(TEST + "plain", watts=1, for_s=900)]).status_code == 200  # never fires: 1 W
     fake.updatedps = 0
-    time.sleep(gap + 6)
-    assert fake.updatedps == 0
+    time.sleep(gap * 2 + 5)
+    assert fake.updatedps == 0, "a power rule made the monitor send UPDATEDPS"
+    assert reason(dev, TEST + "plain") == "not-met"  # the rule still gets its answers from the plain queries
 
 
 def test_a_device_that_does_not_know_updatedps_is_polled_plainly(dev, guard, fake):
     gap = dev.get("/api/devices").json()["poll_interval_s"]
     fake.no_updatedps = True
     fake.updatedps = 0
-    assert put(dev, guard + [rule(TEST + "unsup", watts=1, for_s=900)]).status_code == 200
-    time.sleep(gap * 2 + 8)  # at least two cycles
+    set_updatedps(dev, True)
+    try:
+        time.sleep(gap * 2 + 8)  # at least two cycles
+    finally:
+        set_updatedps(dev, False)
     state = next(d for d in dev.get("/api/devices").json()["devices"] if d["name"] == FAKE_NAME)["state"]
     assert state["online"] is True and state["fails"] == 0, state  # not marked offline: it falls back to a plain query
     assert 1 <= fake.updatedps <= 2, fake.updatedps  # tried once, then plain queries for a while

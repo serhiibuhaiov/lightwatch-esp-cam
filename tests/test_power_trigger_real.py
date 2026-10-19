@@ -2,7 +2,8 @@
 
 The socket must be online, switched on and drawing some power (the towel dryer takes ~45 W). The tests switch it off and on
 again through the triggers and the API and leave it switched ON at the end. They use the real cadence of the monitor
-(a poll every monitor.interval_s) and the real UPDATEDPS, so they also show how late the board reacts.
+(a poll every monitor.interval_s) and the real UPDATEDPS (the socket needs updatedps:true and poll monitoring: UPDATEDPS
+follows the device's flag, not the rules), so they also show how late the board reacts.
 """
 import os
 import time

@@ -53,7 +53,8 @@ struct Device {
   int16_t dpPower = -1, dpCurrent = -1, dpVoltage = -1, dpEnergy = -1;  // -1 = standard number, 0 = none
   bool ignore = false;  // not polled by the monitor (and no kept connection); scenario steps and buttons still switch it
   bool keepConnected = false;  // one connection kept open for every operation (see Tuya::Target::keep)
-  // UPDATEDPS before the poll while a power rule watches it. false: plain status queries only (a socket that keeps its
+  // The monitor polls it with UPDATEDPS + status (fresh readings: a plain status query returns what the device cached
+  // earlier), whether a power rule waits for it or not. false: plain status queries only (a socket that keeps its
   // readings fresh by itself, or that misbehaves on UPDATEDPS: the boiler switched itself off during one).
   bool updatedps = true;
   bool push = false;  // monitor:"push" (see above); implies a kept connection
@@ -144,13 +145,6 @@ String meterDps(const Device& d);
 // Newest last. limit 0 = all. False: no such device.
 constexpr size_t kHistoryCapacity = 80;
 bool historyJson(const String& name, size_t limit, String& out);
-
-// Devices that need fresh readings because an enabled scenario waits for their power (see Scenario): the monitor polls
-// them with UPDATEDPS + status instead of the plain status query, which only returns what the device cached earlier
-// (tens of seconds old). Set by the scenarios whenever they are loaded or saved; names only, so devices that are added,
-// removed, edited or ignored later are handled by the monitor itself. Other devices never get an UPDATEDPS.
-void setWatched(const std::vector<String>& names);
-bool isWatched(const String& name);
 
 // Does the power of `name` satisfy a rule for long enough? Read from the history (the answers of the status queries):
 // the newest answers must all be on the right side of `watts` (below or above), the relay on, with no unanswered query
