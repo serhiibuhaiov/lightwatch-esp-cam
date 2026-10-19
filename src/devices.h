@@ -51,7 +51,7 @@ struct Device {
   Tuya::Version version = Tuya::Version::V34;
   uint16_t dp = 1;
   int16_t dpPower = -1, dpCurrent = -1, dpVoltage = -1, dpEnergy = -1;  // -1 = standard number, 0 = none
-  bool ignore = false;  // not polled by the monitor and skipped by scenario steps (manual actions still work)
+  bool ignore = false;  // not polled by the monitor (and no kept connection); scenario steps and buttons still switch it
   bool keepConnected = false;  // one connection kept open for every operation (see Tuya::Target::keep)
   // UPDATEDPS before the poll while a power rule watches it. false: plain status queries only (a socket that keeps its
   // readings fresh by itself, or that misbehaves on UPDATEDPS: the boiler switched itself off during one).
@@ -63,8 +63,8 @@ struct Device {
     t.ip = ip;
     t.key = key;
     t.version = version;
-    t.keep = keepConnected || push;
-    t.push = push;
+    t.keep = (keepConnected || push) && !ignore;  // the monitor closes the kept connections of ignored devices anyway
+    t.push = push && !ignore;
     return t;
   }
 };

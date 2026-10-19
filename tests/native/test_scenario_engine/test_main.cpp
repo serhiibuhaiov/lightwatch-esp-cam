@@ -1,6 +1,6 @@
 // Host tests of the scenario engine (lib/scenario_engine): pio test -e native
 //
-// FakeEnv plays the board: a clock moved by the test, Wi-Fi, sockets (working, dead, ignored, "the command has no
+// FakeEnv plays the board: a clock moved by the test, Wi-Fi, sockets (working, dead, "the command has no
 // effect") and the Tuya command lane, which runs one job at a time (a command 700 ms, a query 300 ms, a dead socket
 // 1.5 s) from a list of limited size, and the HTTP lane (one request at a time, 800 ms, answers set per URL). Hours of
 // pauses pass in milliseconds.
@@ -18,7 +18,7 @@ using namespace ScenarioEngine;
 namespace {
 
 struct FakeDevice {
-  bool exists = true, ignored = false, offline = false;
+  bool exists = true, offline = false;
   bool dead = false;       // does not answer: every job fails with "connect" after 1.5 s
   bool noEffect = false;   // takes the command, but the relay does not move
   bool relay = false;      // the real relay
@@ -83,7 +83,6 @@ class FakeEnv : public Env {
     auto it = devices.find(name);
     if (it == devices.end() || !it->second.exists) return d;
     d.exists = true;
-    d.ignored = it->second.ignored;
     d.offline = it->second.offline;
     d.switchState = it->second.cached;
     return d;
@@ -326,18 +325,16 @@ void test_steps_switch_and_verify_with_a_pause_after_a_switched_step() {
   TEST_ASSERT_FALSE(R("s").alive);
 }
 
-void test_missing_ignored_and_disabled_steps_cost_no_time_and_no_pause() {
-  env->devices["ign"].ignored = true;
+void test_missing_and_disabled_steps_cost_no_time_and_no_pause() {
   env->devices["a"] = FakeDevice();
-  setDefs({def("s", {step("ghost"), step("ign"), step("a", true, -1, false), step("a")}, 600)});
+  setDefs({def("s", {step("ghost"), step("a", true, -1, false), step("a")}, 600)});
   eng->start("s", "manual", env->now);
   runFor(3000);
   assertState(RunState::Done, "s");
   assertStep(StepState::Failed, "s", 0);
   TEST_ASSERT_EQUAL_STRING("no such device in /devices.json", stepDetail(R("s"), 0).c_str());
-  assertStep(StepState::Skipped, "s", 1);
-  assertStep(StepState::Disabled, "s", 2);
-  assertStep(StepState::Ok, "s", 3);
+  assertStep(StepState::Disabled, "s", 1);
+  assertStep(StepState::Ok, "s", 2);
 }
 
 void test_a_command_without_effect_fails_after_three_attempts_two_seconds_apart() {
@@ -908,8 +905,7 @@ void test_a_quiet_run_logs_quietly_is_not_kept_for_a_restart_and_marks_nothing_d
 
 void test_a_wait_step_waits_after_the_pause_before_it_and_always_also_after_a_failure() {
   env->devices["a"] = FakeDevice();
-  env->devices["ign"].ignored = true;
-  setDefs({def("s", {step("a", true, 20), wait(30), step("ign"), wait(10), step("a", false)})});
+  setDefs({def("s", {step("a", true, 20), wait(30), step("ghost"), wait(10), step("a", false)})});
   eng->start("s", "manual", env->now);
   runFor(2000);
   assertStep(StepState::Ok, "s", 0);
@@ -922,7 +918,7 @@ void test_a_wait_step_waits_after_the_pause_before_it_and_always_also_after_a_fa
   runFor(2500);
   assertStep(StepState::Ok, "s", 1);
   TEST_ASSERT_EQUAL_STRING("waited 30 s", stepDetail(R("s"), 1).c_str());
-  assertStep(StepState::Skipped, "s", 2);  // ignored: no pause, but the wait after it still waits
+  assertStep(StepState::Failed, "s", 2);  // no such device: no pause, but the wait after it still waits
   assertStep(StepState::Running, "s", 3);
   TEST_ASSERT_TRUE(env->devices["a"].relay);
   runFor(6000);
@@ -985,7 +981,7 @@ void test_a_wait_has_a_label_and_its_seconds_are_in_the_hash() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
-  RUN_TEST(test_missing_ignored_and_disabled_steps_cost_no_time_and_no_pause);
+  RUN_TEST(test_missing_and_disabled_steps_cost_no_time_and_no_pause);
   RUN_TEST(test_a_command_without_effect_fails_after_three_attempts_two_seconds_apart);
   RUN_TEST(test_a_dead_socket_fails_with_the_cause);
   RUN_TEST(test_stop_while_waiting_for_the_start);

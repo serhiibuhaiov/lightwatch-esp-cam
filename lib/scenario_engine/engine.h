@@ -113,7 +113,6 @@ std::string hostOf(const Text& url);
 
 struct DeviceInfo {
   bool exists = false;
-  bool ignored = false;
   bool offline = false;  // the monitor counts it offline right now (used for the measurement only)
   int switchState = -1;  // the cached switch state: 1 on, 0 off, -1 unknown
 };

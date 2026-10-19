@@ -536,7 +536,6 @@ class BoardEnv : public ScenarioEngine::Env {
     Devices::Device d;
     if (!Devices::find(String(name.c_str()), d)) return info;
     info.exists = true;
-    info.ignored = d.ignore;
     Devices::State st;
     if (Devices::state(d.name, st)) info.offline = st.known && !st.online;
     info.switchState = Devices::switchState(d.name);

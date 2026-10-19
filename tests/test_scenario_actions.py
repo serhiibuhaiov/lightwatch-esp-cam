@@ -1,4 +1,4 @@
-"""Scenario steps against a fake Tuya device on this computer: switching on and off, skipping an ignored device,
+"""Scenario steps against a fake Tuya device on this computer: switching on and off, a step for an ignored device,
 the pause rule, failures, stop. Nothing here touches a real socket (see fake_tuya.py).
 """
 import time
@@ -128,19 +128,18 @@ def test_a_device_that_is_gone_fails_after_three_attempts_and_the_scenario_goes_
 
 # ---- the ignore flag -------------------------------------------------------------------------------------------
 
-def test_a_step_for_an_ignored_device_is_skipped_without_a_pause(dev, guard, fake):
+def test_a_step_for_an_ignored_device_switches_it(dev, guard, fake):
+    # ignore only keeps the monitor away from the device: scenario steps (and buttons) still switch it
     try:
         set_ignore(dev, True)
-        doc = scenario(TEST + "ign", [{"device": FAKE_NAME, "action": "off"}, {"device": GHOST}], default_pause_s=30)
+        doc = scenario(TEST + "ign", [{"device": FAKE_NAME, "action": "off"}, {"device": GHOST}])
         assert put(dev, guard + [doc]).status_code == 200
-        t = run(dev, TEST + "ign")
-        sc = wait_state(dev, TEST + "ign", ("done",))
-        assert time.time() - t < 5  # a skipped step is not a step that switched something: no 30 s pause
+        run(dev, TEST + "ign")
+        wait_state(dev, TEST + "ign", ("done",))
         steps = steps_of(dev, TEST + "ign")
-        assert steps[0]["state"] == "skipped" and steps[0]["attempts"] == 0 and "ignored" in steps[0]["detail"]
+        assert steps[0]["state"] == "ok", steps[0]
         assert steps[1]["state"] == "failed"
-        assert sc["progress_done"] == 2 and sc["progress_total"] == 2
-        assert fake.commands == [] and fake.get(1) is True  # the device was not touched
+        assert fake.get(1) is False and any(c == {"1": False} for _, c in fake.commands)
     finally:
         set_ignore(dev, False)
 

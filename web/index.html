@@ -344,7 +344,7 @@ const RUN_RESULT = { done: ["ok", "виконано"], stopped: ["warn", "зуп
 const TRIGGER_RUN = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу", interval: "за інтервалом" };
 const fmtEpoch = e => e ? new Date(e * 1000).toLocaleString() : "час невідомий";
 const STEP_STATE = { pending: ["n", "очікує"], disabled: ["n", "крок вимкнено"], running: ["warn", "виконується"], ok: ["ok", "виконано"],
-  skipped: ["n", "пропущено (ігнорується)"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
+  skipped: ["n", "пропущено (пристрій ігнорувався)"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
 
 // One line about a scenario's state, shared by the status card and the scenarios page.
 function scenarioStateText(s) {
@@ -875,7 +875,7 @@ function viewDevices() {
           : d.keep_connected ? " · з'єднання тримається" : "") + (st.connections != null ? " · підключень від старту: " + st.connections : "")))];
 
     if (d.ignore) {
-      parts.push(note("warn", "Пристрій ігнорується: монітор його не опитує, а кроки сценаріїв для нього пропускаються. Вручну ним можна керувати. Вимкнути ігнорування можна в «Налаштувати пристрої»."));
+      parts.push(note("warn", "Пристрій ігнорується: монітор його не опитує. Кроки сценаріїв і кнопки ним керують як звичайно. Вимкнути ігнорування можна в «Налаштувати пристрої»."));
     }
     if (st.known && !st.online) {
       parts.push(note("err", "Пристрій не відповідає (" + st.error + "): " + (ERR_HELP[st.error] || st.detail || "") +
@@ -1113,7 +1113,7 @@ function viewDevConfig() {
         E("div", { class: "f" }, E("label", {}, "Ключ (local key)"), keyIn, keyHint),
         field("Версія протоколу", verIn, "3.4 або 3.5"),
         field("DP вмикання", dpIn, "зазвичай 1"),
-        E("div", { class: "f" }, E("label", {}, "Ігнорувати"), E("label", { style: "font-weight:400" }, ign, " не опитувати, пропускати в сценаріях"),
+        E("div", { class: "f" }, E("label", {}, "Ігнорувати"), E("label", { style: "font-weight:400" }, ign, " не опитувати (сценарії й кнопки ним керують)"),
           E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати.")),
         E("div", { class: "f" }, E("label", {}, "Тримати з'єднання"), E("label", { style: "font-weight:400" }, keep, " одне з'єднання на всі запити"),
           E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Займає одне з їхніх місць для підключень. У режимі push увімкнено завжди.")),

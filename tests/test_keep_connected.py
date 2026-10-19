@@ -138,6 +138,12 @@ def test_an_ignored_kept_device_has_its_connection_closed(dev, fake):
     c0 = fake.connections
     time.sleep(interval(dev) * 1.5)
     assert fake.connections == c0 and fake.open_connections == 0  # not polled, nothing kept
+    # a command still switches it, over a connection of its own that is not kept
+    for action in ("off", "on"):
+        r = dev.request("POST", f"/api/devices/{action}", params={"name": FAKE_NAME}, timeout=30)
+        assert r.status_code == 200 and r.json()["ok"], r.text
+    assert fake.connections == c0 + 2 and fake.get(1) is True
+    wait_for(lambda: fake.open_connections == 0, 5, "a command left a kept connection to an ignored device")
 
 
 def test_a_connection_that_does_not_answer_the_heartbeat_is_closed_and_the_next_poll_connects(dev, fake):

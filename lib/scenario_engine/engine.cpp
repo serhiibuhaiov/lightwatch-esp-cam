@@ -201,7 +201,7 @@ std::string stepDetail(const Run& r, size_t i) {
       return out;
     }
     case StepState::Failed: return str(r.whys.get(i));
-    case StepState::Skipped: return "the device is ignored (see the device settings)";
+    case StepState::Skipped: return "the device was ignored";  // runs from firmware before ignore stopped skipping steps
     case StepState::Stopped: return "stopped";
     case StepState::Running: return s.attempts > 1 ? "previous attempt: " + str(r.whys.get(i)) : std::string();
     default: return std::string();
@@ -560,15 +560,6 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
     stepEnded(r, now);
     logf(true, "[%s] step %u: no device '%s' in /devices.json", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str());
     ++r.failed;
-    ++r.step;
-    return;
-  }
-  if (d.ignored) {
-    sr.state = StepState::Skipped;
-    sr.attempts = 0;
-    stepEnded(r, now);
-    logf(false, "[%s] step %u: %s is ignored, skipped", name.c_str(), static_cast<unsigned>(r.step + 1), device.c_str());
-    ++r.skipped;
     ++r.step;
     return;
   }
