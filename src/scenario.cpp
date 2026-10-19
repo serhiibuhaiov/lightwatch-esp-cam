@@ -52,6 +52,7 @@ const char* kTriggerManual = "manual";
 const char* kTriggerPowerBelow = "power_below";
 const char* kTriggerPowerAbove = "power_above";
 const char* kTriggerInterval = "interval";
+const char* kTriggerRelay = "relay";
 // The history of an interval scenario: a file of its own, a short line per run (see intervalFinished()).
 const char* kIntervalDir = "/runs/interval";
 constexpr size_t kIntervalPendingMax = 65536;  // lines waiting for the card (it is away): later ones are dropped
@@ -79,8 +80,9 @@ struct Def {
   ScenarioEngine::List<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
   ScenarioEngine::List<ScenarioEngine::HttpReq> requests;  // the requests of the HTTP steps (URL up to 2 KB, body up to 16 KB)
   ScenarioEngine::List<Step> steps;
-  // power_below / power_above only:
+  // power_below / power_above / relay:
   String whenDevice;
+  String whenTo;  // relay only: "on" | "off" | "any"
   uint32_t watts = 0;
   uint32_t forS = 0;
   uint32_t warmupS = kDefaultWarmupS;
@@ -89,6 +91,7 @@ struct Def {
 
   bool isPower() const { return trigger == kTriggerPowerBelow || trigger == kTriggerPowerAbove; }
   bool isInterval() const { return trigger == kTriggerInterval; }
+  bool isRelay() const { return trigger == kTriggerRelay; }
   const String& device(const Step& s) const { return devices[s.dev]; }
 };
 using Defs = ScenarioEngine::List<Def>;
@@ -129,7 +132,8 @@ bool validName(const String& s) {
 }
 
 bool validTrigger(const String& t) {
-  return t == kTriggerPowerOn || t == kTriggerManual || t == kTriggerPowerBelow || t == kTriggerPowerAbove || t == kTriggerInterval;
+  return t == kTriggerPowerOn || t == kTriggerManual || t == kTriggerPowerBelow || t == kTriggerPowerAbove || t == kTriggerInterval ||
+         t == kTriggerRelay;
 }
 
 // ---- the file ----------------------------------------------------------------------------
@@ -192,7 +196,7 @@ bool parse(const String& raw, Defs& out, String& err) {
     }
     if (!readBool(item["enabled"], where + ".enabled", d.enabled, err)) return false;
     if (!item["trigger"].is<const char*>() || !validTrigger(item["trigger"].as<const char*>())) {
-      err = where + ".trigger must be \"power_on\", \"manual\", \"power_below\", \"power_above\" or \"interval\"";
+      err = where + ".trigger must be \"power_on\", \"manual\", \"power_below\", \"power_above\", \"interval\" or \"relay\"";
       return false;
     }
     d.trigger = item["trigger"].as<const char*>();
@@ -233,6 +237,24 @@ bool parse(const String& raw, Defs& out, String& err) {
         return false;
       }
       d.everyS = static_cast<uint32_t>(e.as<int>());
+    }
+    if (d.isRelay()) {
+      JsonVariantConst w = item["when"];
+      if (!w.is<JsonObjectConst>()) {
+        err = where + ".when must be an object {device, to} for the trigger relay";
+        return false;
+      }
+      if (!w["device"].is<const char*>() || !validName(w["device"].as<const char*>())) {
+        err = where + ".when.device must be a device name (1..32 chars of a-z 0-9 _ -)";
+        return false;
+      }
+      d.whenDevice = w["device"].as<const char*>();
+      const String to = w["to"].is<const char*>() ? w["to"].as<const char*>() : "";
+      if (to != "on" && to != "off" && to != "any") {
+        err = where + ".when.to must be \"on\", \"off\" or \"any\"";
+        return false;
+      }
+      d.whenTo = to;
     }
 
     if (!item["default_pause_s"].isNull()) {
@@ -408,6 +430,11 @@ String fileText(const Defs& list, bool pretty) {
       w["warmup_s"] = d.warmupS;
     }
     if (d.isInterval()) o["when"].to<JsonObject>()["every_s"] = d.everyS;
+    if (d.isRelay()) {
+      JsonObject w = o["when"].to<JsonObject>();
+      w["device"] = d.whenDevice;
+      w["to"] = d.whenTo;
+    }
     o["default_pause_s"] = d.defaultPauseS;
     writeOnInterrupt(o["on_interrupt"].to<JsonObject>(), d.onInterrupt);
     JsonArray steps = o["steps"].to<JsonArray>();
@@ -655,6 +682,19 @@ struct Watch {
   int32_t power = INT32_MIN;  // raw, 0.1 W
 };
 std::map<String, Watch> gWatch;  // by scenario name
+
+// The state of a relay trigger: it starts its scenario once for every change of its device's switch (to `to`) seen after
+// it began to watch (Devices::relaySeq numbers; see Devices::State::onSeq for what counts as a change). Several changes
+// between two looks start one run. Nothing of it is kept over a restart: a change while the board was away is not seen.
+struct RelayWatch {
+  String device, to;            // what it watched when it began: an edit of `when` begins again from now
+  uint32_t seen = 0;            // the changes up to this number are done with
+  bool pending = false;         // changed while its scenario was running: starts when that run ends
+  String pendingTrigger;        // relay-on | relay-off
+  int relay = -1;               // the cached switch at the last look: 1 on, 0 off, -1 unknown
+  String reason = "watching";   // watching | ignored | no-device
+};
+std::map<String, RelayWatch> gRelay;  // by scenario name
 
 // ---- the state of the interval scenarios -------------------------------------------------------------------------------
 
@@ -1043,6 +1083,7 @@ void wake() {
 }
 
 void watchTick();  // the power rules, below
+void relayTick();  // the relay triggers, below
 bool intervalTick();  // the interval scenarios, below
 
 // One task drives every run (the engine) and looks at the power rules every kWatchTickMs.
@@ -1091,6 +1132,7 @@ void engineTask(void*) {
     if (toWatch <= 0) {
       nextWatch = millis() + kWatchTickMs;
       watchTick();  // takes the lock itself; reads the history without it
+      relayTick();
       continue;
     }
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::min<uint32_t>(sleepMs, static_cast<uint32_t>(toWatch))));
@@ -1177,6 +1219,88 @@ void watchTick() {
     } else if (nowPending) {
       LOGI(TAG, "[%s] %s: %s held for %u s (>= %u s) while the scenario is running: starts again when the run ends, if it still holds",
            d.name.c_str(), d.whenDevice.c_str(), what, static_cast<unsigned>(pc.runS), static_cast<unsigned>(d.forS));
+    }
+  }
+}
+
+// ---- relay triggers ---------------------------------------------------------------------------------------------------
+
+void relayTick() {
+  struct Rule {
+    String name, device, to;
+  };
+  std::vector<Rule> rules;
+  {
+    Lock lock;
+    for (const Def& d : gDefs) {
+      if (d.enabled && d.isRelay()) rules.push_back(Rule{d.name, d.whenDevice, d.whenTo});
+    }
+    for (auto it = gRelay.begin(); it != gRelay.end();) {  // forget the triggers that are gone or switched off
+      bool present = false;
+      for (const Rule& d : rules) present = present || d.name == it->first;
+      it = present ? std::next(it) : gRelay.erase(it);
+    }
+  }
+  for (const Rule& d : rules) {
+    const uint32_t now = Devices::relaySeq();  // taken before the state: a change in between is seen at the next look
+    Devices::Device dev;
+    Devices::State st;
+    const bool found = Devices::find(d.device, dev) && Devices::state(d.device, st);
+    uint32_t seq = 0;  // the newest change this trigger waits for
+    bool on = false;
+    if (found && !dev.ignore) {
+      if (d.to != "off" && st.onSeq > seq) {
+        seq = st.onSeq;
+        on = true;
+      }
+      if (d.to != "on" && st.offSeq > seq) {
+        seq = st.offSeq;
+        on = false;
+      }
+    }
+    String trigger;  // the run to start now ("" = none)
+    bool changed = false;
+    {
+      Lock lock;
+      RelayWatch& w = gRelay[d.name];
+      if (w.device != d.device || w.to != d.to) {  // new, enabled again or edited: the changes from now on
+        w = RelayWatch();
+        w.device = d.device;
+        w.to = d.to;
+        w.seen = now;
+      }
+      w.relay = found ? Devices::switchState(d.device) : -1;
+      w.reason = !found ? "no-device" : dev.ignore ? "ignored" : "watching";
+      if (!found || dev.ignore) {
+        w.seen = now;
+        w.pending = false;
+      } else if (seq > w.seen) {
+        w.seen = seq;
+        trigger = on ? "relay-on" : "relay-off";
+        changed = true;
+      } else if (w.pending) {
+        trigger = w.pendingTrigger;
+      }
+    }
+    if (trigger.isEmpty()) continue;
+    const RunResult started = runWith(d.name, trigger.c_str());
+    {
+      Lock lock;
+      RelayWatch& w = gRelay[d.name];
+      if (started == RunResult::Started) {
+        w.pending = false;
+      } else if (started == RunResult::AlreadyRunning) {
+        w.pending = true;
+        w.pendingTrigger = trigger;
+      }
+    }
+    const char* to = trigger == "relay-on" ? "ON" : "OFF";
+    if (started == RunResult::Started) {
+      LOGI(TAG, "[%s] %s: the switch went %s%s: started", d.name.c_str(), d.device.c_str(), to,
+           changed ? "" : " during the run before");
+    } else if (started == RunResult::AlreadyRunning && changed) {
+      LOGI(TAG, "[%s] %s: the switch went %s while the scenario is running: starts again when the run ends", d.name.c_str(),
+           d.device.c_str(), to);
     }
   }
 }
@@ -1318,6 +1442,22 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
       } else {
         ws["power_w"] = it->second.power / 10.0;
       }
+    }
+  }
+  if (d.isRelay()) {
+    JsonObject w = o["when"].to<JsonObject>();
+    w["device"] = d.whenDevice;
+    w["to"] = d.whenTo;
+    auto it = gRelay.find(d.name);
+    if (it != gRelay.end()) {
+      JsonObject ws = o["watch"].to<JsonObject>();
+      ws["reason"] = it->second.reason;
+      if (it->second.relay < 0) {
+        ws["relay"] = nullptr;
+      } else {
+        ws["relay"] = it->second.relay == 1;
+      }
+      ws["pending"] = it->second.pending;  // changed during a run of this scenario: starts when that run ends
     }
   }
   if (d.isInterval()) {
@@ -1500,7 +1640,7 @@ std::vector<String> missingDevices(const std::vector<String>& deviceNames) {
   };
   Lock lock;
   for (const Def& d : gDefs) {
-    if (d.isPower() && !known(d.whenDevice)) {
+    if ((d.isPower() || d.isRelay()) && !known(d.whenDevice)) {
       out.push_back(String("scenario '") + d.name + "', trigger: device '" + d.whenDevice + "' is not in the list");
     }
     for (size_t i = 0; i < d.steps.size(); ++i) {
@@ -1706,6 +1846,7 @@ String configJson(bool stateOnly) {
   triggers.add(kTriggerPowerBelow);
   triggers.add(kTriggerPowerAbove);
   triggers.add(kTriggerInterval);
+  triggers.add(kTriggerRelay);
   {
     Lock lock;
     doc["sd"] = gInfo.sd;

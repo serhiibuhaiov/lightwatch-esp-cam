@@ -126,6 +126,7 @@ AI-Thinker ESP32-CAM; без PSRAM до 16), по 24 кроки, вони вик
 | `manual` | лише вручну |
 | `power_below`, `power_above` | потужність розетки довго по один бік порогу: `when: { device, watts, for_s, warmup_s }` |
 | `interval` | кожні `when.every_s` секунд (10..86400), наприклад пінг healthcheck; запуски «тихі» (у лозі лише початок і кінець серії невдач), історія окрема |
+| `relay` | реле розетки перемкнулось (кнопкою на розетці, застосунком, кроком сценарію чи кнопкою плати): `when: { device, to: on \| off \| any }`; перша відповідь після старту чи офлайну зміною не вважається |
 
 ```json
 { "name": "heater-idle-off", "enabled": true, "trigger": "power_below",

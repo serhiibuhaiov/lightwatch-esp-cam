@@ -30,6 +30,7 @@ SemaphoreHandle_t gMux = nullptr;
 std::vector<Device> gList;
 LoadInfo gInfo;
 std::map<String, State> gStates;  // by device name
+uint32_t gRelaySeq = 0;  // see relaySeq()
 
 // One finished status query (see power_rule.h): values INT32_MIN = none, flags ok / relay known / relay on.
 using Sample = PowerRule::Sample;
@@ -481,6 +482,14 @@ int switchValue(const String& dpsJson, uint16_t dp) {
   return v.is<bool>() ? (v.as<bool>() ? 1 : 0) : -1;
 }
 
+// The switch of a device went from `was` to `now` (1 on, 0 off, -1 unknown): a change for the trigger "relay" when both
+// are known and differ and the device was online before (see State::onSeq). The caller holds the lock.
+void noteSwitch(State& st, bool wasOnline, int was, int now) {
+  if (!wasOnline || was < 0 || now < 0 || was == now) return;
+  if (++gRelaySeq == 0) ++gRelaySeq;  // 0 means "none"
+  (now ? st.onSeq : st.offSeq) = gRelaySeq;
+}
+
 // The number in a {"dps":{...}} JSON at data point `dp`, INT32_MIN if absent or not a number.
 int32_t numberAt(JsonVariantConst dps, int dp) {
   if (dp <= 0) return INT32_MIN;
@@ -532,6 +541,7 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
   }
 
   State before, after;
+  int was = -1, now = -1;  // the switch before and after
   {
     Lock lock;
     const Device* dev = nullptr;
@@ -553,6 +563,9 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
       st.error = "";
       st.detail = "";
       if (!dps.isEmpty()) st.dpsJson = dps;
+      was = switchValue(before.dpsJson, dp);
+      now = switchValue(st.dpsJson, dp);
+      noteSwitch(st, before.known && before.online, was, now);
     } else {
       ++st.fails;
       // A device that was online needs kOfflineAfterFails failures in a row; any other keeps being offline.
@@ -573,10 +586,9 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
          static_cast<unsigned>(kOfflineAfterFails), r.error.c_str());
   }
   if (r.ok) {
-    const int was = switchValue(before.dpsJson, dp), now = switchValue(after.dpsJson, dp);
     if (now >= 0 && was != now) {
       LOGI(TAG, "[%s] switch (dp %u) is now %s%s", name.c_str(), static_cast<unsigned>(dp), now ? "ON" : "OFF",
-           was < 0 ? " (first reading)" : "");
+           was < 0 ? " (first reading)" : !before.online ? " (first answer after being offline)" : "");
     }
   }
   return after.online ? 1 : 0;
@@ -815,6 +827,11 @@ void monitorTask(void* arg) {
 
 }  // namespace
 
+uint32_t relaySeq() {
+  Lock lock;
+  return gRelaySeq;
+}
+
 int switchState(const String& name) {
   Device d;
   State st;
@@ -960,6 +977,7 @@ void onPush(const String& name, const Tuya::Target& target, const String& json) 
     if (merged[key].is<bool>()) was = merged[key].as<bool>() ? 1 : 0;
     for (JsonPairConst kv : pushed.as<JsonObjectConst>()) merged[kv.key()] = kv.value();
     if (merged[key].is<bool>()) now = merged[key].as<bool>() ? 1 : 0;
+    noteSwitch(st, st.known && st.online, was, now);
     st.dpsJson = "";
     serializeJson(merged, st.dpsJson);
     st.lastPushMs = millis() ? millis() : 1;

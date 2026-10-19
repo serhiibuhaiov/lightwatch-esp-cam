@@ -72,7 +72,7 @@ def test_status(dev):
     assert "scenario" not in st and isinstance(st["scenarios"], list)
     for sc in st["scenarios"]:
         assert {"name", "enabled", "trigger", "state"} <= set(sc)
-        assert sc["trigger"] in ("power_on", "manual", "power_below", "power_above", "interval")
+        assert sc["trigger"] in ("power_on", "manual", "power_below", "power_above", "interval", "relay")
         assert sc["state"] in ("idle", "skipped", "waiting", "running", "done", "stopped")
         if sc["state"] == "waiting":
             assert isinstance(sc["starts_in_s"], int)

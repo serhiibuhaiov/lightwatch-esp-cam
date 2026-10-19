@@ -29,6 +29,12 @@
 //             anyway), their lines at DEBUG, one line in the usual log when it starts failing and when it works again;
 //             their history is a file of its own (/runs/interval/<name>.jsonl, a short line per run, successes
 //             written every kIntervalFlushS, a failure at once), apart from the history of the other scenarios.
+//   relay     starts when the switch of one socket changes, with `when`: { "device", "to": "on" | "off" | "any" }: by
+//             hand, by the socket itself, by a scenario step or a button of this board alike. Seen in the answers of the
+//             status queries and in the status pushes (at once with a kept connection, else only at the next poll);
+//             looked at every 3 s, several changes in between start one run. Not a change: the first reading after a
+//             boot or an edit of the device, the first answer after the device was offline. A change while its run is
+//             going starts it again once that run ends. Nothing is kept over a restart.
 // Any scenario, enabled or not, can be started by hand (runNow) and stopped (stop).
 //
 // A step always sends its action (3 s timeout; the cached state is not trusted: it can be old or empty after a

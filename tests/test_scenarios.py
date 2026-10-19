@@ -76,7 +76,7 @@ def test_scenario_endpoints_need_auth_and_method(dev):
 
 def test_listing_shape(dev):
     body = listing(dev)
-    assert body["triggers"] == ["power_on", "manual", "power_below", "power_above", "interval"]
+    assert body["triggers"] == ["power_on", "manual", "power_below", "power_above", "interval", "relay"]
     assert body["max"] >= 1 and body["max_steps"] >= 1 and body["max_pause_s"] >= 60
     assert isinstance(body["sd"], bool) and isinstance(body["scenarios"], list)
     for sc in body["scenarios"]:

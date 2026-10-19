@@ -101,6 +101,10 @@ struct State {
   String dpsJson;           // the "dps" object of the last success, as JSON text ("" = none yet), with the pushes since merged in
   uint32_t lastPushMs = 0;  // millis() of the last status push applied (0 = none)
   uint32_t pushes = 0;      // status pushes applied
+  // The switch changed to on / to off: the relaySeq() number of the last such change, 0 = none seen (the trigger "relay").
+  // A change counts only when the device was online before it: not the first reading after a boot or an edit of the
+  // device, nor the first answer after it was offline (the switch may have changed at any time while it was away).
+  uint32_t onSeq = 0, offSeq = 0;
 };
 
 // Reads /devices.json. A valid file replaces the list; an invalid one is reported in
@@ -132,6 +136,9 @@ bool state(const String& name, State& out);   // false: no such device
 // The cached on/off state of the device's switch data point: 1 on, 0 off, -1 unknown (never queried, offline,
 // no such device, or the data point is not a boolean). Reads the cache; never touches the device.
 int switchState(const String& name);
+// The number of the last change of a switch on any device (0 = none since boot): every change takes the next number, so a
+// change after a look at this number has a greater one (State::onSeq / offSeq), even on a device whose state was reset.
+uint32_t relaySeq();
 
 // The data points that carry the readings of `d` (its meters, standard numbers where unset, 0 = none skipped),
 // as "18,19,20,17" for UPDATEDPS. "" if the device has no meters.
