@@ -41,11 +41,11 @@ Result evaluate(const std::vector<Sample>& samples, size_t capacity, uint32_t no
 // only a slow monitor (or polls skipped while a command had the device) makes the gaps longer.
 uint32_t pollStep(const std::vector<Sample>& samples, uint32_t intervalS);
 
-// A rule that had fired before a restart is restored "fired" (not armed). The board cannot know whether its condition
-// went away meanwhile, so it is armed again only by a look that shows the condition false for sure: the power on the
-// other side of the threshold ("not-met") or the relay off ("relay-off"). Right after a boot the history is empty: "no-data",
-// then "warmup"/"waiting" while it fills say nothing about the condition, and arming on them would fire the rule a second
-// time for the same condition. Once the condition is seen holding again, the usual rule applies (any "not met" arms it).
-bool rearmsAfterRestart(const char* reason);
+// A rule that has fired is armed again only by a look that shows its condition false for sure: the power on the other side
+// of the threshold ("not-met") or the relay off ("relay-off"). Everything else says nothing about the condition: an
+// unanswered query or a lost connection ("unanswered", "stale"), the history filling up after a boot or a gap ("no-data",
+// "warmup", "waiting"). Arming on those fired the rule a second time for the same condition (a boiler that stayed idle got
+// a second "ready" message after a short loss of its socket). The same holds for a rule restored "fired" after a restart.
+bool rearms(const char* reason);
 
 }  // namespace PowerRule

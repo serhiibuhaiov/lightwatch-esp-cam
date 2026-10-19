@@ -199,22 +199,40 @@ void test_the_poll_step_is_never_below_the_interval_and_ignores_one_late_poll() 
   TEST_ASSERT_EQUAL_UINT32(kInterval, PowerRule::pollStep(s, kInterval));
 }
 
-void test_after_a_restart_only_a_false_condition_arms_a_fired_rule() {
-  TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart("not-met"));
-  TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart("relay-off"));
-  for (const char* r : {"no-data", "warmup", "waiting", "stale", "unanswered", "relay-unknown", "no-power-dp", "met"}) {
-    TEST_ASSERT_FALSE_MESSAGE(PowerRule::rearmsAfterRestart(r), r);
+// The boiler case (2026-10-19): "ready" (below 20 W) fired while it was idle; a query it did not answer, and the answers
+// after it, must not arm the rule again while it stays idle (that fired a second "ready" for the same idle spell). Only
+// heating (the power above the threshold) or the relay off does.
+void test_a_lost_answer_does_not_arm_a_fired_rule_again() {
+  std::vector<Sample> s;
+  addOn(s, 0, 70, 0);
+  TEST_ASSERT_TRUE(below(s, 200, 60, 60).met);
+  s.push_back(failed(70 * kInterval));
+  TEST_ASSERT_FALSE(PowerRule::rearms(below(s, 200, 60, 60).reason));  // unanswered
+  for (uint32_t i = 71; i < 76; ++i) {
+    s.push_back(on(i * kInterval, 0));
+    const PowerRule::Result r = below(s, 200, 60, 60);
+    if (!r.met) TEST_ASSERT_FALSE_MESSAGE(PowerRule::rearms(r.reason), r.reason);  // waiting / warmup: still idle
   }
-  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(nullptr));
+  s.push_back(on(76 * kInterval, 11268));
+  TEST_ASSERT_TRUE(PowerRule::rearms(below(s, 200, 60, 60).reason));  // not-met: it heats again
+}
+
+void test_only_a_false_condition_arms_a_fired_rule() {
+  TEST_ASSERT_TRUE(PowerRule::rearms("not-met"));
+  TEST_ASSERT_TRUE(PowerRule::rearms("relay-off"));
+  for (const char* r : {"no-data", "warmup", "waiting", "stale", "unanswered", "relay-unknown", "no-power-dp", "met"}) {
+    TEST_ASSERT_FALSE_MESSAGE(PowerRule::rearms(r), r);
+  }
+  TEST_ASSERT_FALSE(PowerRule::rearms(nullptr));
   // The reasons the history gives right after a boot, while the socket keeps consuming below the threshold, never arm it.
   std::vector<Sample> s;
-  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));  // no-data
+  TEST_ASSERT_FALSE(PowerRule::rearms(below(s, 100, 30, 15).reason));  // no-data
   s.push_back(on(10, 300));
-  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));  // warmup
+  TEST_ASSERT_FALSE(PowerRule::rearms(below(s, 100, 30, 15).reason));  // warmup
   addOn(s, 25, 2, 300);
-  TEST_ASSERT_FALSE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));  // waiting
+  TEST_ASSERT_FALSE(PowerRule::rearms(below(s, 100, 30, 15).reason));  // waiting
   s.push_back(on(55, 2000));
-  TEST_ASSERT_TRUE(PowerRule::rearmsAfterRestart(below(s, 100, 30, 15).reason));   // not-met: it went away
+  TEST_ASSERT_TRUE(PowerRule::rearms(below(s, 100, 30, 15).reason));   // not-met: it went away
 }
 
 int main(int, char**) {
@@ -231,6 +249,7 @@ int main(int, char**) {
   RUN_TEST(test_a_gap_longer_than_two_and_a_half_intervals_breaks_the_run);
   RUN_TEST(test_a_slow_monitor_widens_the_tolerance_to_its_real_step);
   RUN_TEST(test_the_poll_step_is_never_below_the_interval_and_ignores_one_late_poll);
-  RUN_TEST(test_after_a_restart_only_a_false_condition_arms_a_fired_rule);
+  RUN_TEST(test_a_lost_answer_does_not_arm_a_fired_rule_again);
+  RUN_TEST(test_only_a_false_condition_arms_a_fired_rule);
   return UNITY_END();
 }

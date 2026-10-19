@@ -71,7 +71,7 @@ Result evaluate(const std::vector<Sample>& s, size_t capacity, uint32_t now, uin
   return pc;
 }
 
-bool rearmsAfterRestart(const char* reason) {
+bool rearms(const char* reason) {
   return reason && (std::strcmp(reason, "not-met") == 0 || std::strcmp(reason, "relay-off") == 0);
 }
 

@@ -643,7 +643,9 @@ class BoardEnv : public ScenarioEngine::Env {
 
 // The state of a power rule, for the page and for "fire once": it fires when the condition becomes true and is armed
 // again only after the condition has been false at a look. Whether it has fired is kept in /runs.json ("disarmed"), so a
-// restart does not fire it a second time for the same condition (see PowerRule::rearmsAfterRestart).
+// restart does not fire it a second time for the same condition. "False" means not-met or relay-off (PowerRule::rearms):
+// an unanswered query, a gap or a history that is filling up do not arm it, unless its last run had a step that failed
+// (the device was offline): then any "not met" arms it, and the run is tried again once the device is back.
 struct Watch {
   bool armed = true;
   bool restored = false;  // restored "fired" after a restart: armed again only by a sure "condition false"
@@ -1116,6 +1118,12 @@ void refreshWatched() {
   Devices::setWatched(names);
 }
 
+// The last run of `name` ended with a step that failed (not stopped by hand). The caller holds gMux.
+bool lastRunFailed(const String& name) {
+  const ScenarioEngine::Run* r = gEngine ? gEngine->run(name.c_str()) : nullptr;
+  return r && r->state == ScenarioEngine::RunState::Done && r->failed > 0;
+}
+
 void watchTick() {
   struct Rule {  // what a look needs of an enabled power rule (not its steps: an HTTP step may carry 16 KB of body)
     String name, trigger, whenDevice;
@@ -1154,7 +1162,7 @@ void watchTick() {
         fire = true;
       } else if (pc.met) {
         w.restored = false;  // fired, and the condition still holds: the usual "wait for it to go"
-      } else if (!w.restored || PowerRule::rearmsAfterRestart(w.reason.c_str())) {
+      } else if (PowerRule::rearms(w.reason.c_str()) || (!w.restored && lastRunFailed(d.name))) {
         if (!w.armed) gRunsDirty = true;  // /runs.json keeps the rules that fired
         w.armed = true;
         w.restored = false;

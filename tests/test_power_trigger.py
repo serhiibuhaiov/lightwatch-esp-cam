@@ -249,6 +249,38 @@ def test_it_fires_once_and_is_armed_again_only_after_the_condition_was_false(dev
     assert len(fake.commands) in (6, 7, 8, 9)
 
 
+def test_an_unanswered_query_does_not_arm_a_fired_rule_again(dev, guard, fake):
+    """A rule whose run went through stays fired through a short loss of its device: the condition never went away
+    (2026-10-19: the boiler socket did not answer twice while the boiler was idle, and "ready" was sent two more times)."""
+    with Sampler(dev):
+        # The step succeeds and leaves the condition as it is (the device stays on, the power low).
+        assert put(dev, guard + [rule(TEST + "lost", steps=[{"device": FAKE_NAME, "action": "on"}])]).status_code == 200
+        # The run is over (its step verified): only then the device goes away, or the step itself would try again.
+        assert wait_until(lambda: scn(dev, TEST + "lost")["state"] == "done", 60)
+        n0 = len(fake.commands)
+        fake.stop()  # the device does not answer for a while ...
+        assert wait_until(lambda: reason(dev, TEST + "lost") == "unanswered", 15)
+        fake.start()  # ... and is back, still below the threshold
+        time.sleep(25)  # more than for_s (10 s) after it came back
+        w = scn(dev, TEST + "lost")["watch"]
+        assert w["armed"] is False and w["met"] is True, w
+    assert len(fake.commands) == n0, fake.commands  # no second run for the same condition
+
+
+def test_a_run_whose_step_failed_is_tried_again_after_the_device_was_lost(dev, guard, fake):
+    """The other side: the run could not do its step (here the device takes the command but does not switch), so a loss
+    of the device arms the rule again and the run is tried once more when it is back."""
+    fake.ignore_control = True
+    with Sampler(dev):
+        assert put(dev, guard + [rule(TEST + "retry")]).status_code == 200
+        assert wait_until(lambda: scn(dev, TEST + "retry")["state"] == "done", 60)  # three attempts, the step failed
+        assert len(fake.commands) == 3
+        fake.stop()
+        assert wait_until(lambda: reason(dev, TEST + "retry") == "unanswered", 15)
+        fake.start()
+        assert wait_until(lambda: len(fake.commands) >= 6, 60), fake.commands  # tried again
+
+
 def test_met_while_its_scenario_runs_it_waits_for_the_run_and_starts_once_more(dev, guard, fake):
     """The condition comes true during a manual run: the rule stays armed and `pending`, and when that run ends (the
     condition still holding) the scenario runs once more, by the rule."""
