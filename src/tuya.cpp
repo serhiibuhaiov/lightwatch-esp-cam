@@ -123,7 +123,7 @@ constexpr uint32_t kCmdStatus = 0x08;  // a status push the device sends on its 
 // a kept one stays open between operations: run() then skips the connect and the handshake.
 class Session {
  public:
-  Session(const Target& target, const char* label) : target_(target), label_(label ? label : ""), push_(target.push) {
+  Session(const Target& target, const char* label) : target_(target), label_(label ? label : "") {
     // In PSRAM when there is some: 3 KB of 8-bit DRAM per session (a kept connection holds them all the time). Only the
     // CPU touches them (AES/GCM, and WiFiClient copies into and out of the lwIP buffers).
     tx_ = static_cast<uint8_t*>(psramMalloc(kMaxFrame));
@@ -140,8 +140,6 @@ class Session {
 
   const Target& target() const { return target_; }
   void setLabel(const char* label) { label_ = label ? label : ""; }
-  void setPush(bool push) { push_ = push; }
-  bool push() const { return push_; }
   bool isOpen() const { return open_; }
   uint32_t idleMs() const { return millis() - lastUseMs_; }
 
@@ -225,7 +223,7 @@ class Session {
     return true;
   }
 
-  // A kept connection of a Target::push device (see the heartbeat task): reads what the device has sent since the last
+  // A kept connection (see the heartbeat task): reads what the device has sent since the last
   // look, if anything. False: the connection is gone (closed here, logged once).
   bool readPushes() {
     if (!open_) return false;
@@ -341,9 +339,9 @@ class Session {
             text);
   }
 
-  // Hands a status push of a Target::push device to the push observer.
+  // Hands a status push to the push observer.
   void pushed(const Frame& f) {
-    if (push_ && gPushObserver && f.cmd == kCmdStatus) gPushObserver(label_, target_, payloadText(f));
+    if (gPushObserver && f.cmd == kCmdStatus) gPushObserver(label_, target_, payloadText(f));
   }
 
   bool execute(Op op, uint16_t dp, uint32_t unixTime, const RefreshOpts* refresh, Result& r) {
@@ -647,7 +645,6 @@ class Session {
   Logger::Level detail_ = Logger::Level::Info;  // INFO for user actions, DEBUG for the periodic poll
   WiFiClient client_;
   bool open_ = false;           // connected and the session key negotiated
-  bool push_ = false;           // hand the device's status pushes to the push observer
   uint16_t switchDp_ = 0;       // the device's switch data point, 0 = unknown
   uint32_t lastUseMs_ = 0;
   uint8_t* tx_ = nullptr;
@@ -763,7 +760,6 @@ Result runKept(const Job& job, const char* label) {
   }
   if (!s) s = new Session(job.target, label);
   s->setLabel(label);
-  s->setPush(job.target.push);
   Result r;
   if (job.op == Op::Query) {
     r = s->run(Op::Query, job.dp, 0, job.timeoutMs, job.background);
@@ -777,7 +773,7 @@ Result runKept(const Job& job, const char* label) {
   return r;
 }
 
-// The heartbeat task: reads the status pushes of every Target::push connection and sends a heartbeat on every kept
+// The heartbeat task: reads the status pushes of every kept connection and sends a heartbeat on every kept
 // connection idle for kHeartbeatIdleMs. A device whose lock is taken is skipped (its connection is in use right now); a
 // connection that does not answer (or that the device closed) is dropped, and the next poll or command connects again.
 // It never opens a connection itself.
@@ -785,14 +781,14 @@ void heartbeats() {
   std::vector<String> due;
   xSemaphoreTake(gListMux, portMAX_DELAY);
   for (const auto& k : gKept) {
-    if (k.second->push() || k.second->idleMs() >= kHeartbeatIdleMs) due.push_back(k.first);
+    due.push_back(k.first);  // readPushes() is cheap when nothing came
   }
   xSemaphoreGive(gListMux);
   for (const String& ip : due) {
     SemaphoreHandle_t lock = deviceLock(ip);
     if (xSemaphoreTake(lock, 0) != pdTRUE) continue;
     if (Session* s = takeKept(ip)) {
-      bool alive = !s->push() || s->readPushes();
+      bool alive = s->readPushes();
       if (alive && s->idleMs() >= kHeartbeatIdleMs) alive = s->heartbeat();
       if (alive) {
         putKept(ip, s);

@@ -18,17 +18,18 @@
 //
 // name: 1..32 chars of a-z 0-9 _ - (used in URLs), unique. key: exactly 16 characters.
 // version: "3.4" or "3.5". dp: the on/off data point, default 1.
-// monitor (optional): "poll" (the default) or "push". A push device keeps its connection open (as keep_connected) and is
-// not polled while it is: the data points it sends on its own go into the cached state at once (see onPush), the
-// history gets that state every monitor.interval_s, and a status query is made only every kPushControlS, when nothing
-// came from it for kPushQuietS, or when the connection is lost (that query opens it again). Only for sockets that push
-// their readings by themselves (the boiler does: power every few seconds while it heats, the others about once a minute).
+// poll_s (optional, 1..3600): the monitor queries the device once every poll_s seconds instead of every cycle
+// (monitor.interval_s; absent, or not more than the interval: every cycle), whether it sends status pushes or not. Between
+// two queries a device with a live kept connection gets a history sample of its cached state every cycle (the data points
+// it sends on its own go into that state at once, see onPush); without a live kept connection it gets a sample only from a
+// real query (the power rules take their gap from the real step). A kept connection that was lost is opened again by a
+// query in the next cycle, poll_s or not. The old field "monitor" ("poll"/"push") is no longer read.
 // meters (optional): which data point carries the power / current / voltage / energy reading, 0..255;
 // 0 = the socket has none, absent = the usual Tuya socket numbers (19, 18, 20, 17). They label the readings
 // on the page, fill the history, feed the power rules and say which data points UPDATEDPS re-reads;
 // different socket models number them differently.
 //
-// State and monitor: a background task polls every device each monitor.interval_s (up to
+// State and monitor: a background task polls every device each monitor.interval_s (or its poll_s; up to
 // monitor.retries attempts of monitor.timeout_ms) and keeps the last answer here, so the web
 // page and API read the state without touching the devices. Any status query a user starts
 // updates it too. "online" means the last status query succeeded.
@@ -57,15 +58,14 @@ struct Device {
   // earlier), whether a power rule waits for it or not. false: plain status queries only (a socket that keeps its
   // readings fresh by itself, or that misbehaves on UPDATEDPS: the boiler switched itself off during one).
   bool updatedps = true;
-  bool push = false;  // monitor:"push" (see above); implies a kept connection
+  uint16_t pollS = 0;  // poll_s (see above); 0 = every monitor cycle
 
   Tuya::Target target() const {
     Tuya::Target t;
     t.ip = ip;
     t.key = key;
     t.version = version;
-    t.keep = (keepConnected || push) && !ignore;  // the monitor closes the kept connections of ignored devices anyway
-    t.push = push && !ignore;
+    t.keep = keepConnected && !ignore;  // the monitor closes the kept connections of ignored devices anyway
     return t;
   }
 };
@@ -96,12 +96,6 @@ struct State {
   uint32_t lastPushMs = 0;  // millis() of the last status push applied (0 = none)
   uint32_t pushes = 0;      // status pushes applied
 };
-
-// Push devices (monitor:"push"): a status query every kPushControlS while the connection lives, and one as soon as
-// nothing (no push, no answer) came from the device for kPushQuietS: a connection that answers heartbeats does not
-// prove that the data still flows. The boiler sends something about once a minute even when it does not heat.
-constexpr uint32_t kPushControlS = 300;
-constexpr uint32_t kPushQuietS = 120;
 
 // Reads /devices.json. A valid file replaces the list; an invalid one is reported in
 // info().error and the previous list stays. Call from setup() after Storage::begin(),
@@ -164,9 +158,8 @@ PowerCheck checkPower(const String& name, bool below, uint32_t watts, uint32_t f
 // Registered as the Tuya observer: records the result of a user-started status query.
 void onJobDone(const Tuya::Job& job);
 
-// Registered as the Tuya push observer: merges the data points a push device sent on its own into its cached state
-// (a push carries only those that changed) and logs a change of the switch. Dropped for a device that is not (or no
-// longer) in push mode, is ignored, or was edited.
+// Registered as the Tuya push observer: merges the data points a device sent on its own into its cached state (a push
+// carries only those that changed) and logs a change of the switch. Dropped for a device that is ignored or was edited.
 void onPush(const String& device, const Tuya::Target& target, const String& json);
 
 // Starts the poller. attempts = tries per device and cycle (>= 1). Call once, after Tuya::begin().
@@ -179,9 +172,10 @@ uint16_t pollIntervalSec();
 void monitorCycle(uint32_t& lastMs, uint32_t& maxMs);
 
 constexpr size_t kMaxDevices = 16;
+constexpr uint16_t kMaxPollS = 3600;  // the largest poll_s
 
 // The limits of the device list and the history, for the API and the page: max, max_file_bytes, history_capacity,
-// history_span_s (capacity x the current polling interval), poll_interval_s, push_control_s, push_quiet_s.
+// history_span_s (capacity x the current polling interval), poll_interval_s, poll_s_max.
 void limits(JsonObject out);
 
 }  // namespace Devices

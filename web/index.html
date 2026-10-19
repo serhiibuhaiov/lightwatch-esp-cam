@@ -871,8 +871,8 @@ function viewDevices() {
     const sw = !st.known || !st.dps ? badge("n", "невідомо") : on === undefined ? badge("n", "немає даних") : on ? badge("ok", "ввімкнено") : badge("n", "вимкнено");
     const parts = [E("div", { class: "dh" }, E("h3", {}, d.name), online, sw,
       E("span", { class: "mut" }, d.ip + " · протокол " + d.version + " · DP " + d.dp +
-        (d.monitor === "push" ? " · push" + (st.push_age_s != null ? ", востаннє " + fmtAge(st.push_age_s) + " (" + st.pushes + " від старту)" : ", ще нічого не надсилала")
-          : d.keep_connected ? " · з'єднання тримається" : "") + (st.connections != null ? " · підключень від старту: " + st.connections : "")))];
+        (d.poll_s ? " · опитування раз на " + fmtDur(d.poll_s) : "") +
+        (d.keep_connected ? " · з'єднання тримається" + (st.push_age_s != null ? ", push востаннє " + fmtAge(st.push_age_s) + " (" + st.pushes + " від старту)" : "") : "") + (st.connections != null ? " · підключень від старту: " + st.connections : "")))];
 
     if (d.ignore) {
       parts.push(note("warn", "Пристрій ігнорується: монітор його не опитує. Кроки сценаріїв і кнопки ним керують як звичайно. Вимкнути ігнорування можна в «Налаштувати пристрої»."));
@@ -998,14 +998,14 @@ function viewDevConfig() {
 
   const NAME_RE = /^[a-z0-9_-]{1,32}$/;
   const IP_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
-  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, keep_connected: false, updatedps: true, monitor: "poll", meters: { power: "", current: "", voltage: "", energy: "" } });
+  const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, keep_connected: false, updatedps: true, poll_s: "", meters: { power: "", current: "", voltage: "", energy: "" } });
   const mstr = v => (v == null ? "" : String(v));
 
   async function load() {
     try {
       const { j } = await getJson("/api/devices/config");
       max = j.max || 16;
-      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false, monitor: d.monitor === "push" ? "push" : "poll",
+      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false, poll_s: d.poll_s != null ? String(d.poll_s) : "",
         meters: { power: mstr(d.meters && d.meters.power), current: mstr(d.meters && d.meters.current), voltage: mstr(d.meters && d.meters.voltage), energy: mstr(d.meters && d.meters.energy) } }));
       render();
     } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати список: " + e.message)); }
@@ -1041,7 +1041,7 @@ function viewDevConfig() {
       const body = { devices: rows.map(r => {
         const meters = {};
         for (const [k, v] of Object.entries(r.meters)) if (v !== "") meters[k] = Number(v);  // empty = standard number, left out
-        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, updatedps: !!r.updatedps, monitor: r.monitor, meters };
+        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, updatedps: !!r.updatedps, poll_s: r.poll_s === "" ? null : Number(r.poll_s), meters };
       }) };
       const r = await api("/api/devices/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -1072,14 +1072,10 @@ function viewDevConfig() {
     const dpIn = E("input", { type: "number", value: r.dp, min: 1, max: 255 });
     const ign = E("input", { type: "checkbox", checked: r.ignore });
     ign.addEventListener("change", () => { r.ignore = ign.checked; });
-    const keep = E("input", { type: "checkbox", checked: r.keep_connected || r.monitor === "push", disabled: r.monitor === "push" });
+    const keep = E("input", { type: "checkbox", checked: r.keep_connected });
     keep.addEventListener("change", () => { r.keep_connected = keep.checked; });
-    const monIn = E("select", {}, [["poll", "опитування"], ["push", "push (розетка шле сама)"]].map(([v, t]) => E("option", { value: v, selected: v === r.monitor }, t)));
-    monIn.addEventListener("change", () => {
-      r.monitor = monIn.value;
-      keep.disabled = r.monitor === "push";
-      keep.checked = r.keep_connected || r.monitor === "push";
-    });
+    const pollIn = E("input", { type: "number", value: r.poll_s, min: 1, max: 3600, placeholder: "кожен цикл" });
+    pollIn.addEventListener("input", () => { r.poll_s = pollIn.value.trim(); });
     const upd = E("input", { type: "checkbox", checked: r.updatedps });
     upd.addEventListener("change", () => { r.updatedps = upd.checked; });
     const mIn = {};
@@ -1116,8 +1112,8 @@ function viewDevConfig() {
         E("div", { class: "f" }, E("label", {}, "Ігнорувати"), E("label", { style: "font-weight:400" }, ign, " не опитувати (сценарії й кнопки ним керують)"),
           E("small", {}, "Для розеток, яких зараз немає в мережі. Вручну ними можна керувати.")),
         E("div", { class: "f" }, E("label", {}, "Тримати з'єднання"), E("label", { style: "font-weight:400" }, keep, " одне з'єднання на всі запити"),
-          E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Займає одне з їхніх місць для підключень. У режимі push увімкнено завжди.")),
-        field("Моніторинг", monIn, "push: розетка сама шле зміни (стан за ≤1 с), опитування лише раз на 5 хв або коли 2 хв нічого не надходило. Лише для розеток, що шлють показники самі."),
+          E("small", {}, "Замість нового підключення на кожне опитування: для розеток, що збоять від частих підключень. Те, що розетка шле сама (push), одразу потрапляє в стан. Займає одне з їхніх місць для підключень.")),
+        field("Опитувати раз на, с", pollIn, "порожнє: кожен цикл монітора. Між опитуваннями з живим з'єднанням в історію йде стан із кешу (з push), без з'єднання — нічого. Розетці з тригером споживання, що сама не шле показники, лишіть порожнім і з UPDATEDPS."),
         E("div", { class: "f" }, E("label", {}, "UPDATEDPS"), E("label", { style: "font-weight:400" }, upd, " просити переміряти показники"),
           E("small", {}, "Монітор опитує розетку з UPDATEDPS (свіжий замір замість кешу розетки), незалежно від тригерів. «Оновити зараз» шле UPDATEDPS завжди. Вимкніть, якщо розетка й так дає свіжі показники або збоїть від цього."))),
       E("details", { open: Object.values(r.meters).some(v => v !== "") },
@@ -1432,7 +1428,7 @@ function viewLogs() {
 // Requests that change something ask for confirmation first; the PUTs (full replacement) start from the current content.
 const PREFILL = {
   "/api/config": j => j,
-  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false, monitor: d.monitor || "poll",
+  "/api/devices/config": j => ({ devices: j.devices.map(d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false, poll_s: d.poll_s == null ? null : d.poll_s,
     meters: Object.fromEntries(Object.entries(d.meters || {}).filter(([, v]) => v != null)) })) }),
   "/api/scenarios": j => ({ scenarios: j.scenarios.map(sc => {
     const o = { name: sc.name, enabled: sc.enabled, trigger: sc.trigger, default_pause_s: sc.default_pause_s };

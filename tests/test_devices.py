@@ -37,7 +37,7 @@ def test_devices_list_shape_and_keys_hidden(dev):
     assert isinstance(body["devices"], list)
     assert body["count"] == len(body["devices"])
     for d in body["devices"]:
-        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "updatedps", "monitor", "meters", "state"}
+        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "updatedps", "poll_s", "meters", "state"}
         assert set(d["meters"]) == {"power", "current", "voltage", "energy"}
         assert {"known", "online", "fails"} <= set(d["state"])
         assert d["version"] in ("3.4", "3.5")
@@ -106,9 +106,9 @@ def put_config(dev, devices, **kw):
 def existing(dev):
     """The current devices as a PUT payload: no key, so the stored keys are kept."""
     # meters are kept as they are: a PUT without them would reset them to the standard numbers
-    # (and ignore, updatedps, monitor: a PUT without them would reset the flags)
+    # (and ignore, updatedps, poll_s: a PUT without them would reset the flags)
     return [{"name": d["name"], "ip": d["ip"], "version": d["version"], "dp": d["dp"], "ignore": d.get("ignore", False),
-             "keep_connected": d.get("keep_connected", False), "updatedps": d.get("updatedps", True), "monitor": d.get("monitor", "poll"),
+             "keep_connected": d.get("keep_connected", False), "updatedps": d.get("updatedps", True), "poll_s": d.get("poll_s"),
              "meters": {k: v for k, v in d["meters"].items() if v is not None}} for d in get_config(dev)["devices"]]
 
 
@@ -139,7 +139,7 @@ def test_editor_list_has_no_keys(dev):
     body = r.json()
     assert body["max"] == 16
     for d in body["devices"]:
-        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "updatedps", "monitor", "meters"} and d["key_set"] is True
+        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "updatedps", "poll_s", "meters"} and d["key_set"] is True
         assert set(d["meters"]) == {"power", "current", "voltage", "energy"}
     assert '"key"' not in r.text
 
@@ -206,7 +206,7 @@ def test_editor_add_change_rename_remove(dev, guard):
     assert r.status_code == 200 and r.json() == {"ok": True, "count": len(base) + 1, "warnings": []}  # no scenario names a missing device
     added = {d["name"]: d for d in get_config(dev)["devices"]}["zz-test"]
     assert added == {"name": "zz-test", "ip": "192.168.8.251", "version": "3.5", "dp": 2, "key_set": True, "ignore": False,
-                     "keep_connected": False, "updatedps": True, "monitor": "poll", "meters": {"power": None, "current": None, "voltage": None, "energy": None}}
+                     "keep_connected": False, "updatedps": True, "poll_s": None, "meters": {"power": None, "current": None, "voltage": None, "energy": None}}
     api = {d["name"]: d for d in dev.get("/api/devices").json()["devices"]}
     assert "zz-test" in api and "key" not in api["zz-test"]
 
@@ -297,25 +297,32 @@ def test_editor_updatedps_flag_round_trip_and_reload(dev, guard):
     assert {d["name"]: d["updatedps"] for d in get_config(dev)["devices"]}["zz-test"] is False
 
 
-@pytest.mark.parametrize("bad", ["Push", "", "poll ", True, 1, []])
-def test_editor_rejects_an_unknown_monitor_mode(dev, guard, bad):
+@pytest.mark.parametrize("bad", ["15", 0, 3601, -1, 1.5, True, []])
+def test_editor_rejects_a_bad_poll_s(dev, guard, bad):
     before = get_config(dev)
-    r = put_config(dev, guard + [fake("zz-test", monitor=bad)])
-    assert r.status_code == 400 and "monitor" in r.json()["error"]
+    r = put_config(dev, guard + [fake("zz-test", poll_s=bad)])
+    assert r.status_code == 400 and "poll_s" in r.json()["error"]
     assert get_config(dev) == before
 
 
-def test_editor_monitor_mode_round_trip_and_reload(dev, guard):
-    r = put_config(dev, guard + [fake("zz-test", monitor="push"), fake("zz-test2", ip="192.168.8.252")])
+def test_editor_poll_s_round_trip_and_reload(dev, guard):
+    r = put_config(dev, guard + [fake("zz-test", poll_s=300), fake("zz-test2", ip="192.168.8.252", poll_s=None)])
     assert r.status_code == 200, r.text
     cfg = {d["name"]: d for d in get_config(dev)["devices"]}
-    assert cfg["zz-test"]["monitor"] == "push" and cfg["zz-test2"]["monitor"] == "poll"  # the default
-    assert cfg["zz-test"]["keep_connected"] is False  # push keeps the connection by itself, the flag stays as given
-    for g in guard:  # the other devices keep their mode
-        assert cfg[g["name"]]["monitor"] == g["monitor"]
-    assert {d["name"]: d for d in dev.get("/api/devices").json()["devices"]}["zz-test"]["monitor"] == "push"
+    assert cfg["zz-test"]["poll_s"] == 300 and cfg["zz-test2"]["poll_s"] is None  # null: every monitor cycle
+    for g in guard:  # the other devices keep theirs
+        assert cfg[g["name"]]["poll_s"] == g["poll_s"]
+    assert {d["name"]: d for d in dev.get("/api/devices").json()["devices"]}["zz-test"]["poll_s"] == 300
     assert dev.request("POST", "/api/devices/reload").status_code == 200  # it is in the file
-    assert {d["name"]: d["monitor"] for d in get_config(dev)["devices"]}["zz-test"] == "push"
+    assert {d["name"]: d["poll_s"] for d in get_config(dev)["devices"]}["zz-test"] == 300
+
+
+def test_editor_ignores_the_old_monitor_field(dev, guard):
+    # "monitor" ("poll"/"push") of older firmware is not read any more: no error, nothing kept
+    r = put_config(dev, guard + [fake("zz-test", monitor="push")])
+    assert r.status_code == 200, r.text
+    got = {d["name"]: d for d in get_config(dev)["devices"]}["zz-test"]
+    assert "monitor" not in got and got["poll_s"] is None and got["keep_connected"] is False
 
 
 def test_editor_meters_mapping_round_trip(dev, guard):

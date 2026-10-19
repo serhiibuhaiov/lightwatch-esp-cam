@@ -515,7 +515,11 @@ JsonDocument devicesSummary() {
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
     o["updatedps"] = d.updatedps;
-    o["monitor"] = d.push ? "push" : "poll";
+    if (d.pollS) {
+      o["poll_s"] = d.pollS;
+    } else {
+      o["poll_s"] = nullptr;  // every monitor cycle
+    }
     JsonObject meters = o["meters"].to<JsonObject>();  // data points of the readings, null = standard number
     for (const auto& m : {std::make_pair("power", d.dpPower), std::make_pair("current", d.dpCurrent),
                           std::make_pair("voltage", d.dpVoltage), std::make_pair("energy", d.dpEnergy)}) {
@@ -537,7 +541,7 @@ JsonDocument devicesSummary() {
     if (st.lastTryMs) s["last_try_age_s"] = (now - st.lastTryMs) / 1000;
     if (st.latencyMs) s["latency_ms"] = st.latencyMs;
     s["connections"] = Tuya::connections(d.ip);  // TCP connections opened to it since boot
-    s["pushes"] = st.pushes;                      // status pushes applied (push devices)
+    s["pushes"] = st.pushes;                      // status pushes applied (sent by the device on its own)
     if (st.lastPushMs) s["push_age_s"] = (now - st.lastPushMs) / 1000;
     if (!st.error.isEmpty()) {
       s["error"] = st.error;

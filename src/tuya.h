@@ -12,8 +12,8 @@
 // was idle for kHeartbeatIdleMs and waits kHeartbeatTimeoutMs for the answer (none: the connection is closed; only polls
 // and commands connect). Some sockets misbehave under a new connection and handshake every few seconds (the boiler socket
 // switched itself off while it was polled that way, and never while it was not polled).
-// A kept device with Target::push also has what it sends on its own (status pushes: the data points that changed) read
-// by that task as soon as it arrives (within kHeartbeatWakeMs) and handed to the push observer (setPushObserver).
+// What a kept device sends on its own (status pushes: the data points that changed) is read by that task as soon as it
+// arrives (within kHeartbeatWakeMs) and handed to the push observer (setPushObserver).
 //
 // Blocking: an operation takes up to `timeoutMs` plus the connect time (at most kConnectMaxMs). Never call
 // query()/setSwitch() from the async web task or from loop(): use submit(), which runs them in
@@ -39,7 +39,6 @@ struct Target {
   String key;                     // the 16-character local key
   Version version = Version::V34;
   bool keep = false;              // keep one connection open between operations (see above)
-  bool push = false;              // with keep: read the device's own status pushes at once, for the push observer
 };
 
 struct Result {
@@ -138,7 +137,7 @@ void keepOnly(const std::vector<String>& ips);
 // kept connection is tried once more on a new one, so a connection that died between two heartbeats costs one timeout.
 constexpr uint32_t kHeartbeatIdleMs = 10000;
 constexpr uint32_t kHeartbeatTimeoutMs = 2000;
-// The heartbeat task wakes this often; it also reads the status pushes of Target::push devices then.
+// The heartbeat task wakes this often; it also reads the status pushes of the kept connections then.
 constexpr uint32_t kHeartbeatWakeMs = 500;
 
 // True while the device at `ip` has a kept connection that is open (it was not lost or closed since its last operation).
@@ -154,7 +153,8 @@ void begin();
 // "cancelled" never touched the device.
 void setObserver(void (*observer)(const Job&));
 
-// Called for every status push (STATUS 0x08) a Target::push device sends on its own: `device` is the name its last
+// Called for every status push (STATUS 0x08) a device sends on its own (mostly over a kept connection, but also one that
+// comes before the answer of an operation): `device` is the name its last
 // operation was submitted with, `json` the decrypted payload ({"protocol":4,"t":..,"data":{"dps":{..}}} or {"dps":{..}}).
 // Runs in the task that holds the device's lock (the heartbeat task, or a worker that found it before an answer). Keep it short.
 void setPushObserver(void (*observer)(const String& device, const Target& target, const String& json));

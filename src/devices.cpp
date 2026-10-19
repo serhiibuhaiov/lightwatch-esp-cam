@@ -184,13 +184,13 @@ bool parse(const String& raw, std::vector<Device>& out, String& err, const std::
       }
       d.updatedps = item["updatedps"].as<bool>();
     }
-    if (!item["monitor"].isNull()) {
-      const String mode = item["monitor"].is<const char*>() ? String(item["monitor"].as<const char*>()) : String("");
-      if (mode != "poll" && mode != "push") {
-        err = where + ".monitor must be \"poll\" or \"push\"";
+    // "monitor" ("poll"/"push") of older firmware is not read any more: poll_s says how often the device is queried.
+    if (!item["poll_s"].isNull()) {
+      if (!item["poll_s"].is<long>() || item["poll_s"].as<long>() < 1 || item["poll_s"].as<long>() > kMaxPollS) {
+        err = where + ".poll_s must be a number of seconds, 1.." + String(static_cast<unsigned>(kMaxPollS)) + " (or null: every cycle)";
         return false;
       }
-      d.push = mode == "push";
+      d.pollS = static_cast<uint16_t>(item["poll_s"].as<long>());
     }
     if (!item["meters"].isNull()) {
       if (!item["meters"].is<JsonObjectConst>()) {
@@ -243,7 +243,7 @@ String fileText(const std::vector<Device>& list) {
     if (d.ignore) o["ignore"] = true;
     if (d.keepConnected) o["keep_connected"] = true;
     if (!d.updatedps) o["updatedps"] = false;
-    if (d.push) o["monitor"] = "push";
+    if (d.pollS) o["poll_s"] = d.pollS;
     if (d.dpPower >= 0 || d.dpCurrent >= 0 || d.dpVoltage >= 0 || d.dpEnergy >= 0) {
       JsonObject m = o["meters"].to<JsonObject>();
       if (d.dpPower >= 0) m["power"] = d.dpPower;
@@ -355,7 +355,11 @@ String configJson() {
     o["ignore"] = d.ignore;
     o["keep_connected"] = d.keepConnected;
     o["updatedps"] = d.updatedps;
-    o["monitor"] = d.push ? "push" : "poll";
+    if (d.pollS) {
+      o["poll_s"] = d.pollS;
+    } else {
+      o["poll_s"] = nullptr;  // every monitor cycle
+    }
     writeMeters(o["meters"].to<JsonObject>(), d);
   }
   String out;
@@ -457,8 +461,7 @@ void limits(JsonObject out) {
   out["history_capacity"] = kHistoryCapacity;
   out["history_span_s"] = static_cast<uint32_t>(kHistoryCapacity) * interval;  // at the current polling interval
   out["poll_interval_s"] = interval;
-  out["push_control_s"] = kPushControlS;
-  out["push_quiet_s"] = kPushQuietS;
+  out["poll_s_max"] = kMaxPollS;
 }
 
 namespace {
@@ -573,8 +576,8 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
   return after.online ? 1 : 0;
 }
 
-// A push device with a live connection: its cached state (the last query with the pushes since merged in) becomes a
-// sample of the history, as a poll's answer would. Nothing for a device that was removed or edited meanwhile.
+// A device with a live kept connection that is not queried this cycle (poll_s): its cached state (the last query with
+// the pushes since merged in) becomes a sample of the history, as a poll's answer would. Nothing for a device that was removed or edited meanwhile.
 void recordCached(const String& name, const Tuya::Target& target, uint16_t dp) {
   Lock lock;
   const Device* dev = nullptr;
@@ -634,8 +637,9 @@ void monitorTask(void* arg) {
   // so the log would say "OFFLINE" and nothing until the device is back).
   constexpr uint32_t kDiagEveryMs = 60000;
   std::map<String, uint32_t> diagAt;
-  // Push devices: millis() of the last successful status query (see kPushControlS).
-  std::map<String, uint32_t> pushQueryAt;
+  // millis() of the last query of each device that got an answer or a failure (see poll_s).
+  std::map<String, uint32_t> queriedAt;
+  const uint32_t period = static_cast<uint32_t>(p.intervalSec) * 1000UL;
   bool slow = false;  // the last cycle took longer than the interval
 
   vTaskDelay(pdMS_TO_TICKS(5000));  // let Wi-Fi come up
@@ -663,10 +667,10 @@ void monitorTask(void* arg) {
         for (const Device& d : devices) present = present || d.name == it->first;
         it = present ? std::next(it) : diagAt.erase(it);
       }
-      for (auto it = pushQueryAt.begin(); it != pushQueryAt.end();) {
+      for (auto it = queriedAt.begin(); it != queriedAt.end();) {
         bool present = false;
-        for (const Device& d : devices) present = present || (d.name == it->first && d.push);
-        it = present ? std::next(it) : pushQueryAt.erase(it);
+        for (const Device& d : devices) present = present || d.name == it->first;
+        it = present ? std::next(it) : queriedAt.erase(it);
       }
       for (const Device& listed : devices) {
         // The list may have changed since this cycle began (a device removed, edited, ignored): work with the current one.
@@ -688,23 +692,18 @@ void monitorTask(void* arg) {
         // would only collide with it. Leave the device alone this cycle.
         if (Tuya::commandPending(d.ip)) continue;
 
-        // A push device with its connection open reports its changes itself: no query, the history gets the cached
-        // state. A status query only every kPushControlS, or when nothing came from it for kPushQuietS.
-        if (d.push && Tuya::kept(d.ip)) {
-          State st;
-          state(d.name, st);
-          const uint32_t nowMs = millis();
-          auto q = pushQueryAt.find(d.name);
-          const uint32_t sinceQuery = q == pushQueryAt.end() ? UINT32_MAX : nowMs - q->second;
-          const uint32_t sinceHeard = std::min(sinceQuery, st.lastPushMs ? nowMs - st.lastPushMs : UINT32_MAX);
-          const bool controlDue = sinceQuery >= kPushControlS * 1000UL;
-          if (!controlDue && sinceHeard < kPushQuietS * 1000UL) {
+        // poll_s: a query only once every poll_s, whether the device pushes or not (half a cycle of slack, so that 60 s
+        // at a 15 s interval is every 4th cycle and not, after a little delay, the 5th). Between two queries a device with
+        // a live kept connection gets its cached state as a history sample (what it pushes goes into that state); one
+        // without gets nothing: there is no new information. A lost kept connection is opened again by a query now.
+        auto q = queriedAt.find(d.name);
+        const bool due = d.pollS <= p.intervalSec || q == queriedAt.end() || millis() - q->second + period / 2 >= d.pollS * 1000UL;
+        if (!due) {
+          if (Tuya::kept(d.ip)) {
             recordCached(d.name, d.target(), d.dp);
             continue;
           }
-          if (!controlDue) {
-            LOGD(TAG, "[%s] nothing pushed for %lu s: status query", d.name.c_str(), static_cast<unsigned long>(sinceHeard / 1000));
-          }
+          if (!d.target().keep) continue;
         }
 
         // updatedps (the device's own setting, not whether a power rule waits for it): UPDATEDPS + status (fresh
@@ -773,7 +772,7 @@ void monitorTask(void* arg) {
         // single poll is polled in full again next cycle, to confirm quickly.
         const int online = applyQuery(d.name, d.target(), d.dp, last);
         if (online < 0) continue;  // the device was removed or edited while the poll ran: the answer was dropped
-        if (d.push && last.ok) pushQueryAt[d.name] = millis();
+        queriedAt[d.name] = millis();
         cyclesToSkip[d.name] = online == 1 ? 0 : kOfflineEvery - 1;
         if (online == 1) {
           diagAt.erase(d.name);
@@ -792,7 +791,6 @@ void monitorTask(void* arg) {
       }
     }
     const uint32_t spent = millis() - cycleStart;
-    const uint32_t period = static_cast<uint32_t>(p.intervalSec) * 1000UL;
     gLastCycleMs = spent;
     if (spent > gMaxCycleMs) gMaxCycleMs = spent;
     if (spent > period && !slow) {  // one line per slow streak, not one per cycle
@@ -944,7 +942,7 @@ void onPush(const String& name, const Tuya::Target& target, const String& json) 
     for (const Device& x : gList) {
       if (x.name == name) dev = &x;
     }
-    if (!dev || !dev->push || dev->ignore || dev->ip != target.ip || dev->key != target.key || dev->version != target.version) return;
+    if (!dev || dev->ignore || dev->ip != target.ip || dev->key != target.key || dev->version != target.version) return;
     dp = dev->dp;
     State& st = gStates[name];
     JsonDocument merged;
