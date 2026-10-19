@@ -5,6 +5,10 @@
 #include <SD_MMC.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <esp_heap_caps.h>
+
+#include <errno.h>
+#include <string.h>
 
 #include "logger.h"
 
@@ -45,6 +49,21 @@ bool readFrom(fs::FS& fs, const char* path, String& out, size_t maxBytes) {
   }
   f.close();
   return true;
+}
+
+// One error line per failed step of an SD write, so a random failure says where and why. `err` is errno saved
+// right after the failing call; `got`/`want` < 0 means no such size. An SD driver that found no DMA buffer shows
+// up as EIO, not ENOMEM, hence the largest free 8-bit DRAM block.
+void logSdFailure(const char* target, const char* step, const char* path, int err, long got, long want) {
+  char sizes[40] = "";
+  if (got >= 0 && want >= 0) {
+    snprintf(sizes, sizeof(sizes), ", %ld of %ld B", got, want);
+  } else if (want >= 0) {
+    snprintf(sizes, sizeof(sizes), ", %ld B", want);
+  }
+  const unsigned largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  LOGE(TAG, "write %s: %s %s failed%s, errno %d (%s), dram largest %u B", target, step, path, sizes, err,
+       strerror(err), largest);
 }
 
 }  // namespace
@@ -189,18 +208,33 @@ bool sdAppend(const char* path, const uint8_t* data, size_t len) {
 // `replace` = false: only creates `path`; an existing file (even one that a card error hid from an earlier look) is
 // never removed, and the FAT rename refuses to overwrite it.
 static bool writeAtomicLocked(const char* path, const char* tmpPath, const String& data, bool replace = true) {
+  const long want = static_cast<long>(data.length());
   if (SD_MMC.exists(tmpPath)) SD_MMC.remove(tmpPath);
+  errno = 0;
   File f = SD_MMC.open(tmpPath, FILE_WRITE);
-  if (!f) return false;
+  if (!f) {
+    logSdFailure(path, "open", tmpPath, errno, -1, want);  // the VFS stat()s after a failed fopen: errno is a hint
+    return false;
+  }
+  errno = 0;
   size_t written = f.write(reinterpret_cast<const uint8_t*>(data.c_str()), data.length());
   f.close();
-  if (written != data.length()) return false;
+  const int writeErr = errno;  // fwrite buffers: a card error may only come from the flush in close
+  if (written != data.length()) {
+    logSdFailure(path, "write", tmpPath, writeErr, static_cast<long>(written), want);
+    return false;
+  }
 
   // Verify what actually landed on the card before touching the live file.
+  errno = 0;
   File check = SD_MMC.open(tmpPath, FILE_READ);
-  bool sizeOk = check && check.size() == data.length();
+  const long got = check ? static_cast<long>(check.size()) : -1;
+  const int checkErr = writeErr ? writeErr : errno;
   if (check) check.close();
-  if (!sizeOk) return false;
+  if (got != want) {
+    logSdFailure(path, "check", tmpPath, checkErr, got, want);
+    return false;
+  }
 
   // Once the old file is removed below, a power cut leaves a complete, valid
   // tmp file that Config::load() (and Devices/Scenario load()) promotes at the next boot. A cut before that
@@ -210,9 +244,18 @@ static bool writeAtomicLocked(const char* path, const char* tmpPath, const Strin
       SD_MMC.remove(tmpPath);
       return false;
     }
-    if (!SD_MMC.remove(path)) return false;
+    errno = 0;
+    if (!SD_MMC.remove(path)) {
+      logSdFailure(path, "remove", path, errno, -1, want);
+      return false;
+    }
   }
-  return SD_MMC.rename(tmpPath, path);
+  errno = 0;
+  if (!SD_MMC.rename(tmpPath, path)) {
+    logSdFailure(path, "rename", tmpPath, errno, -1, want);  // EEXIST: `path` was there but exists() missed it
+    return false;
+  }
+  return true;
 }
 
 bool sdWriteAtomic(const char* path, const char* tmpPath, const String& data) {
@@ -232,8 +275,17 @@ bool sdCreate(const char* path, const char* tmpPath, const String& data) {
 bool sdReplace(const char* tmpPath, const char* path) {
   Guard g;
   if (!gSdMounted) return false;
-  if (SD_MMC.exists(path) && !SD_MMC.remove(path)) return false;
-  return SD_MMC.rename(tmpPath, path);
+  errno = 0;
+  if (SD_MMC.exists(path) && !SD_MMC.remove(path)) {
+    logSdFailure(path, "remove", path, errno, -1, -1);
+    return false;
+  }
+  errno = 0;
+  if (!SD_MMC.rename(tmpPath, path)) {
+    logSdFailure(path, "rename", tmpPath, errno, -1, -1);
+    return false;
+  }
+  return true;
 }
 
 bool sdRemove(const char* path) {
