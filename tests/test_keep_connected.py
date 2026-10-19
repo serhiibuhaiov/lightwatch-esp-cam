@@ -107,6 +107,22 @@ def test_a_command_over_a_dead_connection_is_sent_again_on_a_new_one(dev, fake):
     assert r.json()["ok"] and fake.connections == c0 + 1  # the new connection is kept and used
 
 
+def test_a_poll_over_a_dead_connection_is_not_tried_a_third_time(dev, fake):
+    # The session already tries once more on a new connection; another attempt of the monitor would hold the single monitor
+    # for a third connect + timeout while the other devices wait. Muted right after a heartbeat, so that the poll (5 s later:
+    # polls every 15 s, heartbeats after 10 s idle) and not the next heartbeat is what finds the connection dead.
+    h0 = fake.heartbeats
+    wait_for(lambda: fake.heartbeats > h0, interval(dev) + 12, "no heartbeat on the kept connection")
+    fake.silent = True             # new connections are accepted and never answered
+    fake.mute_open_connections()   # the kept one takes what is sent and never answers
+    try:
+        c0 = fake.connections
+        wait_for(lambda: state(dev)["state"]["fails"] >= 1, interval(dev) + 20, "the poll over the dead connection did not fail")
+        assert fake.connections == c0 + 1, f"{fake.connections - c0} new connections for one failed poll"
+    finally:
+        fake.silent = False
+
+
 def test_without_keep_connected_the_kept_connection_is_closed_and_each_poll_connects(dev, fake):
     edit(dev, keep_connected=False)
     wait_for(lambda: fake.open_connections == 0, interval(dev) + 10, "the kept connection was not closed")

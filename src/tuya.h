@@ -55,6 +55,7 @@ struct Result {
   uint32_t commandMs = 0;         // command sent until its answer arrived (for a refresh: the final status query)
   uint32_t queuedMs = 0;          // queued jobs: submit() until the worker started it (0 for a direct call)
   bool reused = false;            // went over a kept connection that was open before (no connect, no handshake)
+  bool retried = false;           // that kept connection did not answer and the operation was tried once more on a new one
   uint32_t updateMs = 0;          // refresh only: UPDATEDPS sent until the settle wait ended
   String before;                  // refresh with compare: the status answer BEFORE UPDATEDPS ("" otherwise)
   String frames;                  // refresh: every other frame the device sent (cmd, retcode, payload), one per line

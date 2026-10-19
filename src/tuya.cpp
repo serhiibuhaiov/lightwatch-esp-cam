@@ -176,6 +176,7 @@ class Session {
       errCode_ = nullptr;
       errDetail_ = "";
       ok = execute(op, dp, unixTime, refresh, r);
+      r.retried = true;
     }
     if (!ok || !target_.keep) close();
     lastUseMs_ = millis();

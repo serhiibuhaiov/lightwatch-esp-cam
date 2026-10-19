@@ -756,6 +756,9 @@ void monitorTask(void* arg) {
             continue;
           }
           if (last.ok || last.error == "busy") break;  // "busy": a command had the device; try next cycle
+          // A kept connection that did not answer was already tried once more on a new one: another attempt would only
+          // hold the single monitor (connect + timeout again) while the other devices wait.
+          if (last.retried) break;
           if (attempt + 1 < attempts) vTaskDelay(pdMS_TO_TICKS(300));
         }
         if (refreshRejected && last.ok) {
