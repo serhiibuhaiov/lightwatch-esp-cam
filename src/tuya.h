@@ -15,7 +15,7 @@
 // A kept device with Target::push also has what it sends on its own (status pushes: the data points that changed) read
 // by that task as soon as it arrives (within kHeartbeatWakeMs) and handed to the push observer (setPushObserver).
 //
-// Blocking: an operation takes up to `timeoutMs` plus the connect time. Never call
+// Blocking: an operation takes up to `timeoutMs` plus the connect time (at most kConnectMaxMs). Never call
 // query()/setSwitch() from the async web task or from loop(): use submit(), which runs them in
 // two worker tasks: "tuya_cmd" (commands: buttons, API, scenarios) and "tuya_mon" (the monitor's polls).
 // The lanes work side by side, but never on the same device (IP) at once: see submit().
@@ -103,6 +103,10 @@ struct Job {
   std::atomic<bool> done{false};      // set last, after `result` is complete
   Result result;
 };
+
+// The longest TCP connect an operation waits for: to a device whose last connect got through (1.5 s to any other). lwIP
+// resends a lost SYN after 3 s, so this rides out one lost packet on a weak Wi-Fi.
+constexpr uint32_t kConnectMaxMs = 3500;
 
 // Places in the two lanes' lists (see submit()).
 constexpr size_t kCommandQueueSize = 16, kMonitorQueueSize = 4;

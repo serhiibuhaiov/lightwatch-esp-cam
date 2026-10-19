@@ -736,8 +736,9 @@ void monitorTask(void* arg) {
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
           }
-          // Over a kept connection a timed-out operation is tried once more on a new one (connect <= 1.5 s, timeout again).
-          const uint32_t waitUntil = millis() + (d.target().keep ? 2 * timeoutMs + 1500 : timeoutMs) + 5000;
+          // An operation is its connect (<= kConnectMaxMs) plus the timeout; over a kept connection a timed-out one is tried
+          // once more on a new one (connect, timeout again).
+          const uint32_t waitUntil = millis() + (d.target().keep ? 2 * timeoutMs : timeoutMs) + Tuya::kConnectMaxMs + 5000;
           while (!job->done.load(std::memory_order_acquire) && static_cast<int32_t>(waitUntil - millis()) > 0) {
             vTaskDelay(pdMS_TO_TICKS(50));
           }

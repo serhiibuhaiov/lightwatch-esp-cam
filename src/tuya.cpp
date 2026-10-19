@@ -23,8 +23,11 @@ namespace {
 const char* TAG = "tuya";
 
 constexpr uint16_t kPort = 6668;
-// A live device on the LAN accepts a connection in well under 0.3 s; waiting the whole operation timeout for a dead
-// one only keeps the single worker busy. The rest of the operation (handshake, answer) still gets `timeoutMs`.
+// A live device on the LAN accepts a connection in well under 0.3 s; waiting long for a dead one only keeps the single
+// worker busy. But lwIP resends a lost SYN only after 3 s (CONFIG_LWIP_TCP_RTO_TIME), so on a weak Wi-Fi one lost packet
+// failed the connect of a device that was there (a TCP probe right after it was accepted in 43 ms). A device whose last
+// connect got through gets kConnectMaxMs, one that did not (or was never tried) kConnectTimeoutMs. The rest of the
+// operation (handshake, answer) gets `timeoutMs` from the moment the connection is up.
 constexpr uint32_t kConnectTimeoutMs = 1500;
 constexpr size_t kMaxFrame = 1536;            // larger frames from the device are rejected
 constexpr uint32_t kPrefix55AA = 0x000055AA;  // 3.4
@@ -110,6 +113,9 @@ struct Frame {
 };
 
 void noteConnection(const String& ip);  // counts a TCP connection for connections()
+// Whether the last TCP connect to `ip` got through (false for one never tried), and recording it.
+bool lastConnectOk(const String& ip);
+void noteConnect(const String& ip, bool ok);
 void (*gPushObserver)(const String&, const Target&, const String&) = nullptr;
 constexpr uint32_t kCmdStatus = 0x08;  // a status push the device sends on its own
 
@@ -277,11 +283,14 @@ class Session {
     if (WiFi.status() != WL_CONNECTED) return fail("connect", "Wi-Fi is not connected");
 
     uint32_t t0 = millis();
-    const bool connected = client_.connect(ip, kPort, static_cast<int32_t>(std::min(timeoutMs_, kConnectTimeoutMs)));
+    const uint32_t limitMs = lastConnectOk(target_.ip) ? kConnectMaxMs : kConnectTimeoutMs;
+    const bool connected = client_.connect(ip, kPort, static_cast<int32_t>(limitMs));
     connectMs_ = millis() - t0;
+    noteConnect(target_.ip, connected);
     if (!connected) {
       return fail("connect", "cannot connect to " + target_.ip + ":6668 (device off, wrong IP, or another client holds the connection)");
     }
+    deadline_ = millis() + timeoutMs_;  // the handshake and the answer get the whole timeout, the connect is extra
     noteConnection(target_.ip);
     client_.setNoDelay(true);
     logf(detail_, "connected in %lu ms", static_cast<unsigned long>(connectMs_));
@@ -674,6 +683,7 @@ SemaphoreHandle_t gListMux = nullptr;              // guards the lists, the stat
 std::map<String, SemaphoreHandle_t> gDeviceLocks;  // by IP, created on first use, never removed
 std::map<String, uint16_t> gCommandsPending;       // by IP: command jobs queued or running
 std::map<String, uint32_t> gConnections;           // by IP: TCP connections opened since boot
+std::map<String, bool> gConnectOk;                 // by IP: whether the last TCP connect got through (see kConnectMaxMs)
 // Kept connections by IP. The map is guarded by gListMux; a Session in it is used only by whoever holds its IP's lock.
 std::map<String, Session*> gKept;
 // By IP: whether the kept connection was open when it was last put back (guarded by gListMux). kept() reads this, not
@@ -695,6 +705,22 @@ void noteConnection(const String& ip) {
   if (!gListMux) return;  // a direct call before begin()
   xSemaphoreTake(gListMux, portMAX_DELAY);
   ++gConnections[ip];
+  xSemaphoreGive(gListMux);
+}
+
+bool lastConnectOk(const String& ip) {
+  if (!gListMux) return false;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  auto it = gConnectOk.find(ip);
+  const bool ok = it != gConnectOk.end() && it->second;
+  xSemaphoreGive(gListMux);
+  return ok;
+}
+
+void noteConnect(const String& ip, bool ok) {
+  if (!gListMux) return;
+  xSemaphoreTake(gListMux, portMAX_DELAY);
+  gConnectOk[ip] = ok;
   xSemaphoreGive(gListMux);
 }
 
