@@ -12,6 +12,7 @@ namespace {
 
 Device dev(bool everOnline, bool online, uint32_t sinceMs) {
   Device d;
+  d.known = true;
   d.everOnline = everOnline;
   d.online = online;
   d.sinceMs = sinceMs;
@@ -23,17 +24,48 @@ Device dev(bool everOnline, bool online, uint32_t sinceMs) {
 void setUp() {}
 void tearDown() {}
 
-void test_nothing_counts_before_the_first_online() {
+void test_nothing_counts_before_the_first_query() {
   Watch w;
-  // after boot: the socket is still coming up (offline from its first failure), then answers
-  Look l = OnlineRule::look(w, dev(false, false, 1000), 60000, 0, To::Any);
+  Look l = OnlineRule::look(w, Device(), 3000, 0, To::Any);  // just booted: no query has finished yet
   TEST_ASSERT_EQUAL(-1, l.fire);
   TEST_ASSERT_EQUAL_STRING("not-seen-online", l.reason);
-  l = OnlineRule::look(w, dev(true, true, 70000), 70000, 0, To::Any);
-  TEST_ASSERT_EQUAL(-1, l.fire);  // the first online is the base, no event
+}
+
+void test_a_socket_that_answers_the_first_query_is_the_base() {
+  Watch w;  // the board was only restarted (OTA): the socket answers its first query
+  OnlineRule::look(w, Device(), 3000, 0, To::Any);
+  Look l = OnlineRule::look(w, dev(true, true, 6000), 6000, 0, To::Any);
+  TEST_ASSERT_EQUAL(-1, l.fire);
   TEST_ASSERT_EQUAL_STRING("watching", l.reason);
-  l = OnlineRule::look(w, dev(true, false, 90000), 90000, 0, To::Any);
-  TEST_ASSERT_EQUAL(0, l.fire);  // and now a real change
+  TEST_ASSERT_EQUAL(0, OnlineRule::look(w, dev(true, false, 90000), 90000, 0, To::Any).fire);  // and then a real change
+}
+
+void test_a_socket_offline_at_its_first_query_comes_online_as_an_event() {
+  Watch w;  // plugged in later, or up later than the board after a blackout
+  OnlineRule::look(w, Device(), 3000, 30, To::Online);
+  Look l = OnlineRule::look(w, dev(false, false, 6000), 60000, 30, To::Online);
+  TEST_ASSERT_EQUAL(-1, l.fire);
+  TEST_ASSERT_EQUAL_STRING("not-seen-online", l.reason);
+  l = OnlineRule::look(w, dev(true, true, 70000), 80000, 30, To::Online);
+  TEST_ASSERT_EQUAL(-1, l.fire);  // not for for_s yet
+  TEST_ASSERT_EQUAL_STRING("holding", l.reason);
+  TEST_ASSERT_EQUAL(1, OnlineRule::look(w, dev(true, true, 70000), 100000, 30, To::Online).fire);
+  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(true, true, 70000), 103000, 30, To::Online).fire);  // once
+}
+
+void test_a_socket_that_never_comes_up_gives_no_offline() {
+  Watch w;
+  OnlineRule::look(w, Device(), 3000, 0, To::Offline);
+  for (uint32_t t = 6000; t < 3600000; t += 60000) {
+    TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(false, false, 6000), t, 0, To::Offline).fire);
+  }
+}
+
+void test_a_first_online_that_does_not_hold_is_no_event() {
+  Watch w;
+  OnlineRule::look(w, dev(false, false, 6000), 60000, 60, To::Any);
+  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(true, true, 70000), 100000, 60, To::Any).fire);  // online 30 s
+  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(true, false, 110000), 200000, 60, To::Any).fire);  // gone again: still the base
 }
 
 void test_a_new_trigger_takes_the_current_state_as_its_base() {
@@ -88,8 +120,13 @@ void test_a_short_loss_gives_no_event_and_no_way_back() {
 void test_an_edited_device_starts_again() {
   Watch w;
   OnlineRule::look(w, dev(true, true, 0), 1000, 0, To::Any);
-  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(false, false, 5000), 6000, 0, To::Any).fire);  // state reset, first failure
-  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(true, true, 9000), 9000, 0, To::Any).fire);    // the base again
+  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, Device(), 4000, 0, To::Any).fire);  // the state was reset: no query yet
+  TEST_ASSERT_EQUAL(-1, OnlineRule::look(w, dev(true, true, 6000), 6000, 0, To::Any).fire);  // answered: the base again
+  Watch v;
+  OnlineRule::look(v, dev(true, true, 0), 1000, 0, To::Any);
+  OnlineRule::look(v, Device(), 4000, 0, To::Any);
+  TEST_ASSERT_EQUAL(-1, OnlineRule::look(v, dev(false, false, 5000), 6000, 0, To::Any).fire);  // its first query failed
+  TEST_ASSERT_EQUAL(1, OnlineRule::look(v, dev(true, true, 9000), 9000, 0, To::Any).fire);    // so its first online counts
 }
 
 void test_millis_wrapping() {
@@ -101,7 +138,11 @@ void test_millis_wrapping() {
 
 int main() {
   UNITY_BEGIN();
-  RUN_TEST(test_nothing_counts_before_the_first_online);
+  RUN_TEST(test_nothing_counts_before_the_first_query);
+  RUN_TEST(test_a_socket_that_answers_the_first_query_is_the_base);
+  RUN_TEST(test_a_socket_offline_at_its_first_query_comes_online_as_an_event);
+  RUN_TEST(test_a_socket_that_never_comes_up_gives_no_offline);
+  RUN_TEST(test_a_first_online_that_does_not_hold_is_no_event);
   RUN_TEST(test_a_new_trigger_takes_the_current_state_as_its_base);
   RUN_TEST(test_each_change_fires_once);
   RUN_TEST(test_to_picks_the_direction_but_the_base_follows_every_change);

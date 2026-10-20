@@ -1399,6 +1399,7 @@ void onlineTick() {
     Devices::State st;
     const bool found = Devices::find(d.device, dev) && Devices::state(d.device, st);
     OnlineRule::Device od;
+    od.known = found && st.known;
     od.everOnline = st.everOnline;
     od.online = st.online;
     od.sinceMs = st.changedMs;

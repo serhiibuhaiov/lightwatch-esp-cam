@@ -37,9 +37,10 @@
 //             going starts it again once that run ends. Nothing is kept over a restart.
 //   online    starts when a socket went offline or came online (the monitor's state, with its hysteresis), with `when`:
 //             { "device", "to": "offline" | "online" | "any", "for_s": 0..3600 (default 0) }: the new state must hold
-//             for_s; a loss shorter than that is no event, nor is the way back. Nothing counts before the socket has been
-//             seen online since boot (or since the device was edited). A query that failed while the board had no Wi-Fi
-//             changes nothing (Devices). See lib/online_rule. Overlapping runs and restarts as for relay.
+//             for_s; a loss shorter than that is no event, nor is the way back. After boot (or an edit of the device) a
+//             socket that answers its first query is the base; one that does not, comes online as an event; one that never
+//             comes up gives no "offline". A query that failed while the board had no Wi-Fi changes nothing (Devices). See
+//             lib/online_rule. Overlapping runs and restarts as for relay.
 // Any scenario, enabled or not, can be started by hand (runNow) and stopped (stop).
 //
 // A step always sends its action (3 s timeout; the cached state is not trusted: it can be old or empty after a

@@ -4,13 +4,18 @@ namespace OnlineRule {
 
 Look look(Watch& w, const Device& d, uint32_t nowMs, uint32_t forS, To to) {
   Look l;
-  if (!d.everOnline) {
+  if (!d.known) {  // no query yet (after boot, or the device was edited): the first one decides
     w.confirmed = -1;
     l.reason = "not-seen-online";
     return l;
   }
   const uint32_t heldMs = nowMs - d.sinceMs;
   l.heldS = heldMs / 1000;
+  if (!d.everOnline) {  // offline from its first query on: its first online will be a change
+    w.confirmed = 0;
+    l.reason = "not-seen-online";
+    return l;
+  }
   const int8_t now = d.online ? 1 : 0;
   if (w.confirmed < 0 || w.confirmed == now) {  // the base (first look since online), or nothing changed
     w.confirmed = now;

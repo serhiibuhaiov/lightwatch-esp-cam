@@ -1,7 +1,8 @@
 """The trigger "online" (`"trigger": "online"`, `when: {device, to, for_s}`) against the fake Tuya device on this computer: a
 socket that went offline (after the monitor's hysteresis: two failed queries) or came back starts the scenario once; a
 loss shorter than for_s is no event, nor is the way back; a trigger saved while the socket is offline takes that as its
-base; a device edited (state reset) is not counted until it has been seen online again; an ignored device starts nothing.
+base; after a boot or an edit of the device a socket that answers the first query is the base, one that does not comes
+online as an event; an ignored device starts nothing.
 No real socket is touched: the steps here only wait. The decision itself is host-tested (tests/native/test_online_rule).
 """
 import time
@@ -198,7 +199,8 @@ def test_saved_while_offline_takes_that_as_its_base(dev, guard, fake):
     assert runs(dev, TEST + "base", old)[0]["trigger"] == "device-online"
 
 
-def test_an_edited_device_counts_only_after_it_was_seen_online_again(dev, guard, fake):
+def test_an_edited_device_offline_at_its_first_query_comes_online_as_an_event(dev, guard, fake):
+    old = last_id(dev, TEST + "edit")
     assert put(dev, guard + [online(TEST + "edit")]).status_code == 200
     watching(dev, TEST + "edit")
     fake.stop()
@@ -208,9 +210,9 @@ def test_an_edited_device_counts_only_after_it_was_seen_online_again(dev, guard,
     query(dev)
     assert state(dev)["online"] is False
     assert wait_until(lambda: scn(dev, TEST + "edit")["watch"]["reason"] == "not-seen-online", 10), scn(dev, TEST + "edit")
-    come_back(dev, fake)  # the first online: the base
-    time.sleep(6)
-    assert scn(dev, TEST + "edit")["state"] == "idle"
+    come_back(dev, fake)  # its first query failed: its first online is an event
+    assert wait_until(lambda: len(runs(dev, TEST + "edit", old)) == 1, 20), scn(dev, TEST + "edit")
+    assert runs(dev, TEST + "edit", old)[0]["trigger"] == "device-online"
 
 
 def test_an_event_during_its_run_starts_it_once_more(dev, guard, fake):
@@ -228,14 +230,25 @@ def test_an_event_during_its_run_starts_it_once_more(dev, guard, fake):
 # ---- restart (opt-in: -m restart) --------------------------------------------------------------------------------------
 
 @pytest.mark.restart
-def test_after_a_restart_a_socket_that_does_not_answer_is_no_event(dev, guard, fake):
-    assert put(dev, guard + [online(TEST + "boot")]).status_code == 200
-    fake.stop()  # dead when the board comes up
-    reboot(dev)
-    assert wait_until(lambda: scn(dev, TEST + "boot").get("watch", {}).get("reason") == "not-seen-online", 60), scn(dev, TEST + "boot")
-    fake.start()
-    assert wait_until(lambda: scn(dev, TEST + "boot").get("watch", {}).get("online") is True, 60), scn(dev, TEST + "boot")
+def test_after_a_restart_a_socket_that_answers_the_first_query_is_no_event(dev, guard, fake):
+    assert put(dev, guard + [online(TEST + "ota")]).status_code == 200
+    reboot(dev)  # like an OTA: the socket stays where it was
+    assert wait_until(lambda: scn(dev, TEST + "ota").get("watch", {}).get("online") is True, 60), scn(dev, TEST + "ota")
     time.sleep(6)
-    assert scn(dev, TEST + "boot")["state"] == "idle"  # its first online is the base
+    assert scn(dev, TEST + "ota")["state"] == "idle"  # its first online is the base
     go_offline(dev, fake)
-    assert wait_until(lambda: scn(dev, TEST + "boot").get("run_trigger") == "device-offline", 10)
+    assert wait_until(lambda: scn(dev, TEST + "ota").get("run_trigger") == "device-offline", 10)
+
+
+@pytest.mark.restart
+def test_after_a_restart_a_socket_that_comes_up_later_is_an_event(dev, guard, fake):
+    old = last_id(dev, TEST + "boot")
+    assert put(dev, guard + [online(TEST + "boot")]).status_code == 200
+    fake.stop()  # dead when the board comes up (up later than the board after a blackout)
+    reboot(dev)
+    assert wait_until(lambda: scn(dev, TEST + "boot").get("watch", {}).get("online") is False, 60), scn(dev, TEST + "boot")
+    time.sleep(6)
+    assert scn(dev, TEST + "boot")["state"] == "idle"  # never up: no "offline"
+    fake.start()
+    assert wait_until(lambda: len(runs(dev, TEST + "boot", old)) == 1, 60), scn(dev, TEST + "boot")
+    assert runs(dev, TEST + "boot", old)[0]["trigger"] == "device-online"
