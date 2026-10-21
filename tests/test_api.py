@@ -121,8 +121,8 @@ def test_status_limits_match_what_the_other_routes_say(dev):
     assert lim["tuya_queues"] == {"commands": 16, "monitor": 4}
     psram = dev.get("/api/status").json()["memory"]["psram_total"] > 0
     assert sc["basis"] == ("psram" if psram else "internal")
-    assert (sc["max"], sc["max_file_bytes"], sc["max_body_bytes"]) == ((24, 393216, 262144) if psram else (16, 49152, 49152))
-    assert (sc["max_with_psram"], sc["max_without_psram"]) == (24, 16)
+    assert (sc["max"], sc["max_file_bytes"], sc["max_body_bytes"]) == ((48, 393216, 262144) if psram else (16, 49152, 49152))
+    assert (sc["max_with_psram"], sc["max_without_psram"]) == (48, 16)
     assert lim["put_body_bytes"] == {"config": 8192, "devices": 8192, "scenarios": sc["max_body_bytes"], "http_test": 49152}
     assert lim["http"] == {"max_url_bytes": 2048, "max_body_bytes": 16384, "max_content_type_bytes": 100, "queue": 4,
                            "timeout_ms": 10000, "min_timeout_ms": 1000, "max_timeout_ms": 30000, "response_bytes": 256}

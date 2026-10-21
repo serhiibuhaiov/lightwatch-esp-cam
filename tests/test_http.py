@@ -399,7 +399,7 @@ def test_a_document_near_the_put_limit_saves_reads_back_and_leaves_the_internal_
 
 # ---- HTTP steps over a restart (-m restart) -------------------------------------------------------------------------------
 # /runs.json keeps an HTTP step as its method and host only; a continued run takes the request from the definitions. The API
-# cannot read /runs.json, so the second test shows it by size: the paths of the URLs would not fit into its 128 KB.
+# cannot read /runs.json, so the third test shows it by its size (/api/status -> scenario_engine.runs_file_bytes).
 
 @pytest.mark.restart
 def test_an_http_step_of_a_continued_run_is_sent_as_the_definition_has_it(dev, guard, fake):
@@ -450,8 +450,8 @@ def test_an_edit_of_an_http_request_during_the_run_starts_it_again_with_the_new_
 
 @pytest.mark.restart
 def test_runs_json_does_not_keep_the_paths_of_the_urls(dev, guard, fake):
-    """Three runs of 24 HTTP steps with 2 KB URLs, paused after step 1: their URLs alone are ~147 KB, more than /runs.json may
-    hold (128 KB: a bigger one is not saved, and nothing would be continued). All three are continued: the paths were not there."""
+    """Three runs of 24 HTTP steps with 2 KB URLs, paused after step 1: their URLs alone are ~147 KB, /runs.json as saved is a
+    small part of that, and all three are continued after a restart: the paths were not there."""
     names = [TEST + f"hpath{i}" for i in range(3)]
     marker = "/p/"
     def long_url(i, k):
@@ -467,6 +467,8 @@ def test_runs_json_does_not_keep_the_paths_of_the_urls(dev, guard, fake):
     for n in names:
         in_pause(dev, n)
     time.sleep(5)
+    saved = dev.get("/api/status").json()["scenario_engine"]["runs_file_bytes"]
+    assert 0 < saved < 30000, saved
     try:
         before = len(fake.requests)
         reboot(dev)

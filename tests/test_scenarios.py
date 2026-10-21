@@ -156,7 +156,7 @@ def bad_docs():
     yield "cron-4-fields", {"scenarios": [ok(trigger="cron", when={"cron": "0 21 * *"})]}
     yield "cron-bad-hour", {"scenarios": [ok(trigger="cron", when={"cron": "0 24 * * *"})]}
     yield "cron-too-long", {"scenarios": [ok(trigger="cron", when={"cron": "0 " * 51})]}
-    yield "too-many-scenarios", {"scenarios": [scenario(f"zz-{i}") for i in range(25)]}  # over both limits (24 with PSRAM, 16 without)
+    yield "too-many-scenarios", {"scenarios": [scenario(f"zz-{i}") for i in range(49)]}  # over both limits (48 with PSRAM, 16 without)
 
 
 @pytest.mark.parametrize("label,doc", list(bad_docs()), ids=[l for l, _ in bad_docs()])
@@ -201,7 +201,7 @@ def test_round_trip_order_and_fields(dev, guard):
 
 
 def test_the_documented_maximum_fits_and_is_saved(dev, guard):
-    """The maximum (24 scenarios x 24 steps with PSRAM, 16 x 24 without) with long names and every field set (up to ~58 KB of
+    """The maximum (48 scenarios x 24 steps with PSRAM, 16 x 24 without) with long names and every field set (up to ~115 KB of
     JSON): more than the 8 KB that the other PUTs accept. Saved, read back and the board keeps its memory."""
     limit = listing(dev)["max"]
     step = {"device": "zz-test-socket-with-a-long-name", "action": "off", "enabled": True, "pause_after_s": 300}
@@ -211,7 +211,7 @@ def test_the_documented_maximum_fits_and_is_saved(dev, guard):
     assert r.status_code == 200, r.text
     got = listing(dev)["scenarios"]
     psram = dev.get("/api/status").json()["memory"]["psram_total"] > 0
-    assert len(got) == limit == (24 if psram else 16) and all(len(s["steps"]) == 24 for s in got if s["name"].startswith(TEST + "max"))
+    assert len(got) == limit == (48 if psram else 16) and all(len(s["steps"]) == 24 for s in got if s["name"].startswith(TEST + "max"))
     assert dev.get("/api/status").json()["heap_free"] > heap - 20000
     assert put(dev, guard).status_code == 200
 

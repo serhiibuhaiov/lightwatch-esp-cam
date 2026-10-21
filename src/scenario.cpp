@@ -8,6 +8,7 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -40,7 +41,9 @@ const char* kBakTmp = "/scenarios.bak.tmp";
 // kRunsSaveGapMs) and every kRunsCheckpointMs while a run waits or pauses, so a pause loses at most that much.
 const char* kRunsPath = "/runs.json";
 const char* kRunsTmp = "/runs.tmp";
-constexpr size_t kRunsMaxBytes = 131072;
+// ~1.3 KB a run of 24 steps, up to ~5 KB when every step failed with a long reason: 48 such runs need ~240 KB.
+constexpr size_t kRunsMaxBytesPsram = 393216, kRunsMaxBytesNoPsram = 131072;
+size_t runsMaxBytes() { return psramAvailable() ? kRunsMaxBytesPsram : kRunsMaxBytesNoPsram; }
 constexpr uint32_t kRunsSaveGapMs = 3000;
 constexpr uint32_t kRunsCheckpointMs = 300000;
 constexpr size_t kWhyMaxChars = 160;  // a failure reason as /runs.json and the history keep it
@@ -85,7 +88,7 @@ struct Def {
   bool enabled = true;
   String trigger = kTriggerPowerOn;
   uint16_t defaultPauseS = 30;
-  // In PSRAM when the board has it (ScenarioEngine::setAllocator in begin()), like the runs: 24 scenarios x 24 steps
+  // In PSRAM when the board has it (ScenarioEngine::setAllocator in begin()), like the runs: 48 scenarios x 24 steps
   // would otherwise take ~16 KB of internal RAM.
   ScenarioEngine::List<String> devices;  // the distinct device names of the steps (a step holds an index: one copy per name)
   ScenarioEngine::List<ScenarioEngine::HttpReq> requests;  // the requests of the HTTP steps (URL up to 2 KB, body up to 16 KB)
@@ -1007,7 +1010,7 @@ void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine
   if (!Storage::sdMounted()) return;
   String raw;
   // A save removes the old file before renaming the new one: a power cut in between leaves only the temporary file.
-  if (!Storage::sdReadAll(kRunsPath, raw, kRunsMaxBytes) && !Storage::sdReadAll(kRunsTmp, raw, kRunsMaxBytes)) return;
+  if (!Storage::sdReadAll(kRunsPath, raw, runsMaxBytes()) && !Storage::sdReadAll(kRunsTmp, raw, runsMaxBytes())) return;
   JsonDocument doc(PsramAllocator::instance());
   if (deserializeJson(doc, raw)) {
     LOGW(TAG, "%s is not valid JSON: the interrupted runs are not continued", kRunsPath);
@@ -1074,6 +1077,7 @@ void readRuns(const std::function<void(uint32_t savedEpoch, const ScenarioEngine
 }
 
 uint32_t gLastRunsSaveMs = 0;
+std::atomic<uint32_t> gRunsFileBytes{0};  // /runs.json as last saved (0: none): written by the engine task, read by the API
 bool gRunsDirty = false;
 bool gRunsFileThere = false;  // so that an empty list removes the file once, not on every change
 
@@ -1084,13 +1088,15 @@ void saveRuns(const String& text, size_t count) {
   if (!count) {
     if (gRunsFileThere) Storage::sdRemove(kRunsPath);
     gRunsFileThere = false;
+    gRunsFileBytes = 0;
     return;
   }
-  if (text.length() > kRunsMaxBytes || !Storage::sdWriteAtomic(kRunsPath, kRunsTmp, text)) {
+  if (text.length() > runsMaxBytes() || !Storage::sdWriteAtomic(kRunsPath, kRunsTmp, text)) {
     LOGW(TAG, "could not save the alive runs to %s (%u bytes)", kRunsPath, static_cast<unsigned>(text.length()));
     return;
   }
   gRunsFileThere = true;
+  gRunsFileBytes = static_cast<uint32_t>(text.length());
 }
 
 // ---- the history of the runs --------------------------------------------------------------------------------------------
@@ -1099,7 +1105,9 @@ uint32_t gHistoryNextId = 1;
 // Lines made under gMux, written to the card by the engine task. One buffer, not a String per line: 24 runs ending at once
 // would otherwise hold ~60 KB of small strings in internal RAM; a buffer over 4 KB goes to PSRAM by itself.
 String gHistoryPending;
-constexpr size_t kHistoryPendingMax = 65536;  // the card is away for long: later lines are dropped
+// The card is away for long: later lines are dropped. A line of a run with 24 steps is 2-3 KB: 48 runs ending at once fit
+// with PSRAM (the buffer is over 4 KB, so it lives there).
+size_t historyPendingMax() { return psramAvailable() ? 196608 : 65536; }
 
 void intervalFinished(const String& name, const ScenarioEngine::Run& r);  // below
 
@@ -1157,7 +1165,7 @@ void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
     const std::string detail = clip(ScenarioEngine::stepDetail(r, i));
     if (!detail.empty()) o["detail"] = detail;
   }
-  if (gHistoryPending.length() >= kHistoryPendingMax) return;
+  if (gHistoryPending.length() >= historyPendingMax()) return;
   String line;  // serializeJson() replaces the content of a String: one line at a time, then appended
   serializeJson(doc, line);
   if (gHistoryPending.isEmpty()) gHistoryPending.reserve(4096);  // > 4 KB: PSRAM when the board has it
@@ -2161,6 +2169,8 @@ void engineStats(JsonObject out) {
   out["offline_attempts"] = s.offlineAttempts;
   out["offline_attempts_ok"] = s.offlineAttemptsOk;
   out["offline_attempt_ms"] = s.offlineAttemptMs;
+  out["runs_file_bytes"] = gRunsFileBytes.load();  // /runs.json (the alive runs) as last saved; 0: none
+  out["runs_file_max_bytes"] = runsMaxBytes();     // a bigger one is not saved (WARN in the log)
 }
 
 bool history(const String& name, size_t limit, uint32_t before, bool failedOnly, String& out) {
