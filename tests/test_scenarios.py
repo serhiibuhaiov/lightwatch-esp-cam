@@ -28,6 +28,8 @@ def editable(sc):
            "steps": [{k: v for k, v in st.items() if not (k == "pause_after_s" and v is None)} for st in sc["steps"]]}
     if "when" in sc:
         out["when"] = sc["when"]
+    if "hours" in sc:
+        out["hours"] = sc["hours"]
     if "on_interrupt" in sc:
         out["on_interrupt"] = sc["on_interrupt"]
     return out
@@ -76,7 +78,7 @@ def test_scenario_endpoints_need_auth_and_method(dev):
 
 def test_listing_shape(dev):
     body = listing(dev)
-    assert body["triggers"] == ["power_on", "manual", "power_below", "power_above", "interval", "relay", "online"]
+    assert body["triggers"] == ["power_on", "manual", "power_below", "power_above", "interval", "relay", "online", "cron"]
     assert body["max"] >= 1 and body["max_steps"] >= 1 and body["max_pause_s"] >= 60
     assert isinstance(body["sd"], bool) and isinstance(body["scenarios"], list)
     for sc in body["scenarios"]:
@@ -138,6 +140,22 @@ def bad_docs():
     yield "step-pause-too-big", {"scenarios": [ok(steps=[{"device": "a", "pause_after_s": 99999}])]}
     yield "step-pause-text", {"scenarios": [ok(steps=[{"device": "a", "pause_after_s": "5"}])]}
     yield "too-many-steps", {"scenarios": [ok(steps=[{"device": "a"}] * 25)]}
+    h = {"from": "05:00", "to": "21:00"}
+    yield "hours-not-object", {"scenarios": [ok(trigger="power_on", hours="05:00-21:00")]}
+    yield "hours-no-to", {"scenarios": [ok(trigger="power_on", hours={"from": "05:00"})]}
+    yield "hours-bad-clock", {"scenarios": [ok(trigger="power_on", hours={"from": "5:00", "to": "21:00"})]}
+    yield "hours-24", {"scenarios": [ok(trigger="power_on", hours={"from": "05:00", "to": "24:00"})]}
+    yield "hours-same", {"scenarios": [ok(trigger="power_on", hours={"from": "05:00", "to": "05:00"})]}
+    yield "hours-clock-wait", {"scenarios": [ok(trigger="power_on", hours=dict(h, clock_wait_min=1441))]}
+    yield "hours-manual", {"scenarios": [ok(hours=h)]}
+    yield "step-hours-bad", {"scenarios": [ok(steps=[{"device": "a", "hours": {"from": "05:00", "to": "25:00"}}])]}
+    yield "wait-step-hours", {"scenarios": [ok(steps=[{"action": "wait", "seconds": 5, "hours": h}])]}
+    yield "device-step-attempts", {"scenarios": [ok(steps=[{"device": "a", "attempts": 2}])]}
+    yield "cron-no-when", {"scenarios": [ok(trigger="cron")]}
+    yield "cron-not-text", {"scenarios": [ok(trigger="cron", when={"cron": 5})]}
+    yield "cron-4-fields", {"scenarios": [ok(trigger="cron", when={"cron": "0 21 * *"})]}
+    yield "cron-bad-hour", {"scenarios": [ok(trigger="cron", when={"cron": "0 24 * * *"})]}
+    yield "cron-too-long", {"scenarios": [ok(trigger="cron", when={"cron": "0 " * 51})]}
     yield "too-many-scenarios", {"scenarios": [scenario(f"zz-{i}") for i in range(25)]}  # over both limits (24 with PSRAM, 16 without)
 
 

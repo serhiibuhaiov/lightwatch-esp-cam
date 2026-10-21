@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "cron.h"
 #include "devices.h"
 #include "engine.h"
 #include "http_out.h"
@@ -24,6 +25,7 @@
 #include "power_rule.h"
 #include "psram_alloc.h"
 #include "storage.h"
+#include "time_window.h"
 #include "tuya.h"
 
 namespace Scenario {
@@ -57,6 +59,7 @@ const char* kTriggerPowerAbove = "power_above";
 const char* kTriggerInterval = "interval";
 const char* kTriggerRelay = "relay";
 const char* kTriggerOnline = "online";
+const char* kTriggerCron = "cron";
 // The history of an interval scenario: a file of its own, a short line per run (see intervalFinished()).
 const char* kIntervalDir = "/runs/interval";
 constexpr size_t kIntervalPendingMax = 65536;  // lines waiting for the card (it is away): later ones are dropped
@@ -72,6 +75,9 @@ struct Step {
   bool on = true;            // the action: switch the device on (default) or off
   bool enabled = true;
   int32_t pauseAfterS = -1;  // -1: the scenario's default
+  TimeWindow::Window hours;  // a device or HTTP step: only inside these hours
+  uint8_t attempts = 0;      // an HTTP step: its own attempts (0: the usual)
+  uint16_t retryGapS = 0;    // ... and seconds between them (0: the usual)
 };
 
 struct Def {
@@ -91,12 +97,16 @@ struct Def {
   uint32_t forS = 0;  // power_below / power_above, online
   uint32_t warmupS = kDefaultWarmupS;
   uint32_t everyS = 0;  // interval only
+  String cron;          // cron only: the expression as written
+  Cron::Expr cronExpr;
+  TimeWindow::Window hours;  // a trigger starts it only inside these hours (not by hand)
   ScenarioEngine::OnInterrupt onInterrupt;  // what a restart does to a run of this scenario
 
   bool isPower() const { return trigger == kTriggerPowerBelow || trigger == kTriggerPowerAbove; }
   bool isInterval() const { return trigger == kTriggerInterval; }
   bool isRelay() const { return trigger == kTriggerRelay; }
   bool isOnline() const { return trigger == kTriggerOnline; }
+  bool isCron() const { return trigger == kTriggerCron; }
   bool hasWhenDevice() const { return isPower() || isRelay() || isOnline(); }
   const String& device(const Step& s) const { return devices[s.dev]; }
 };
@@ -139,7 +149,23 @@ bool validName(const String& s) {
 
 bool validTrigger(const String& t) {
   return t == kTriggerPowerOn || t == kTriggerManual || t == kTriggerPowerBelow || t == kTriggerPowerAbove || t == kTriggerInterval ||
-         t == kTriggerRelay || t == kTriggerOnline;
+         t == kTriggerRelay || t == kTriggerOnline || t == kTriggerCron;
+}
+
+// The local time of day in minutes (config time.tz), -1 while the clock is not set.
+int localMinuteNow() {
+  const time_t now = time(nullptr);
+  if (now <= 1700000000) return -1;
+  struct tm lt;
+  localtime_r(&now, &lt);
+  return lt.tm_hour * 60 + lt.tm_min;
+}
+
+// The hours of a scenario for a trigger that is about to start it: "" (no hours, or inside them), "outside" or "no-clock".
+const char* hoursNow(const TimeWindow::Window& w) {
+  if (!w.set()) return "";
+  const int m = localMinuteNow();
+  return m < 0 ? "no-clock" : w.contains(m) ? "" : "outside";
 }
 
 // ---- the file ----------------------------------------------------------------------------
@@ -152,6 +178,41 @@ bool readBool(JsonVariantConst v, const String& where, bool& out, String& err) {
   }
   out = v.as<bool>();
   return true;
+}
+
+// "hours": {"from": "HH:MM", "to": "HH:MM", "clock_wait_min": 0..1440}; absent: none.
+bool readHours(JsonVariantConst v, const String& where, TimeWindow::Window& out, String& err) {
+  out = TimeWindow::Window();
+  if (v.isNull()) return true;
+  int16_t from = -1, to = -1;
+  if (!v.is<JsonObjectConst>() || !v["from"].is<const char*>() || !v["to"].is<const char*>() ||
+      !TimeWindow::parseClock(v["from"].as<const char*>(), from) || !TimeWindow::parseClock(v["to"].as<const char*>(), to)) {
+    err = where + " must be {\"from\": \"HH:MM\", \"to\": \"HH:MM\"} (local time, 00:00..23:59; from > to goes over midnight)";
+    return false;
+  }
+  if (from == to) {
+    err = where + ".from and .to must differ";
+    return false;
+  }
+  out.from = from;
+  out.to = to;
+  JsonVariantConst w = v["clock_wait_min"];
+  if (!w.isNull()) {
+    if (!w.is<int>() || w.as<int>() < 0 || w.as<int>() > static_cast<int>(TimeWindow::kMaxClockWaitMin)) {
+      err = where + ".clock_wait_min must be an integer 0.." + String(TimeWindow::kMaxClockWaitMin) + " (minutes)";
+      return false;
+    }
+    out.clockWaitMin = static_cast<uint16_t>(w.as<int>());
+  }
+  return true;
+}
+
+void writeHours(JsonObject o, const TimeWindow::Window& w) {
+  if (!w.set()) return;
+  JsonObject h = o["hours"].to<JsonObject>();
+  h["from"] = TimeWindow::clockText(w.from);
+  h["to"] = TimeWindow::clockText(w.to);
+  h["clock_wait_min"] = w.clockWaitMin;
 }
 
 // Parses the whole document; on success `out` holds the list, on failure `err` says why.
@@ -202,7 +263,7 @@ bool parse(const String& raw, Defs& out, String& err) {
     }
     if (!readBool(item["enabled"], where + ".enabled", d.enabled, err)) return false;
     if (!item["trigger"].is<const char*>() || !validTrigger(item["trigger"].as<const char*>())) {
-      err = where + ".trigger must be \"power_on\", \"manual\", \"power_below\", \"power_above\", \"interval\", \"relay\" or \"online\"";
+      err = where + ".trigger must be \"power_on\", \"manual\", \"power_below\", \"power_above\", \"interval\", \"relay\", \"online\" or \"cron\"";
       return false;
     }
     d.trigger = item["trigger"].as<const char*>();
@@ -288,6 +349,24 @@ bool parse(const String& raw, Defs& out, String& err) {
         d.forS = w["for_s"].as<int>();
       }
     }
+    if (d.isCron()) {
+      JsonVariantConst w = item["when"];
+      if (!w.is<JsonObjectConst>() || !w["cron"].is<const char*>()) {
+        err = where + ".when must be {\"cron\": \"minute hour day-of-month month day-of-week\"} for the trigger cron, e.g. \"0 21 * * *\"";
+        return false;
+      }
+      std::string why;
+      if (!Cron::parse(w["cron"].as<const char*>(), d.cronExpr, why)) {
+        err = where + ".when.cron " + why.c_str();
+        return false;
+      }
+      d.cron = w["cron"].as<const char*>();
+    }
+    if (!readHours(item["hours"], where + ".hours", d.hours, err)) return false;
+    if (d.hours.set() && d.trigger == kTriggerManual) {
+      err = where + ".hours are for a trigger; a manual scenario has none (a start by hand ignores them)";
+      return false;
+    }
 
     if (!item["default_pause_s"].isNull()) {
       if (!item["default_pause_s"].is<int>() || item["default_pause_s"].as<int>() < 0 || item["default_pause_s"].as<int>() > kMaxPauseS) {
@@ -315,8 +394,8 @@ bool parse(const String& raw, Defs& out, String& err) {
       }
       Step st;
       if (sv["action"] == "wait") {  // {action: "wait", seconds, enabled}: waits, always; no device, no pause after it
-        if (!sv["device"].isNull() || !sv["url"].isNull() || !sv["pause_after_s"].isNull()) {
-          err = at + ": a wait step has only seconds (and enabled): no device, url or pause_after_s";
+        if (!sv["device"].isNull() || !sv["url"].isNull() || !sv["pause_after_s"].isNull() || !sv["hours"].isNull()) {
+          err = at + ": a wait step has only seconds (and enabled): no device, url, pause_after_s or hours";
           return false;
         }
         JsonVariantConst s = sv["seconds"];
@@ -356,12 +435,27 @@ bool parse(const String& raw, Defs& out, String& err) {
         req.contentType.assign(q.contentType.c_str(), q.contentType.size());
         req.body.assign(q.body.c_str(), q.body.size());
         req.timeoutMs = q.timeoutMs;
+        JsonVariantConst na = sv["attempts"], gap = sv["retry_gap_s"];
+        if (!na.isNull()) {
+          if (!na.is<int>() || na.as<int>() < 1 || na.as<int>() > ScenarioEngine::kMaxHttpAttempts) {
+            err = at + ".attempts must be an integer 1.." + String(ScenarioEngine::kMaxHttpAttempts);
+            return false;
+          }
+          st.attempts = static_cast<uint8_t>(na.as<int>());
+        }
+        if (!gap.isNull()) {
+          if (!gap.is<int>() || gap.as<int>() < 1 || gap.as<int>() > ScenarioEngine::kMaxRetryGapS) {
+            err = at + ".retry_gap_s must be an integer 1.." + String(ScenarioEngine::kMaxRetryGapS) + " (seconds)";
+            return false;
+          }
+          st.retryGapS = static_cast<uint16_t>(gap.as<int>());
+        }
         st.http = true;
         st.dev = static_cast<uint16_t>(d.requests.size());
         d.requests.push_back(std::move(req));
       } else if (!sv["method"].isNull() || !sv["url"].isNull() || !sv["body"].isNull() || !sv["content_type"].isNull() ||
-                 !sv["timeout_ms"].isNull()) {
-        err = at + ": method, url, content_type, body and timeout_ms are for an http step (action \"http\")";
+                 !sv["timeout_ms"].isNull() || !sv["attempts"].isNull() || !sv["retry_gap_s"].isNull()) {
+        err = at + ": method, url, content_type, body, timeout_ms, attempts and retry_gap_s are for an http step (action \"http\")";
         return false;
       }
       if (!st.http && (!sv["device"].is<const char*>() || !validName(sv["device"].as<const char*>()))) {
@@ -384,6 +478,7 @@ bool parse(const String& raw, Defs& out, String& err) {
         st.on = a == "on";
       }
       if (!readBool(sv["enabled"], at + ".enabled", st.enabled, err)) return false;
+      if (!readHours(sv["hours"], at + ".hours", st.hours, err)) return false;
       if (!sv["pause_after_s"].isNull()) {
         if (!sv["pause_after_s"].is<int>() || sv["pause_after_s"].as<int>() < 0 || sv["pause_after_s"].as<int>() > kMaxPauseS) {
           err = at + ".pause_after_s must be an integer 0.." + String(static_cast<unsigned>(kMaxPauseS)) + " or absent (the default)";
@@ -448,11 +543,14 @@ void writeStep(JsonObject so, const Def& d, const Step& s) {
       so["body"] = q.body.c_str();
     }
     so["timeout_ms"] = q.timeoutMs;
+    if (s.attempts) so["attempts"] = s.attempts;
+    if (s.retryGapS) so["retry_gap_s"] = s.retryGapS;
   } else {
     so["device"] = d.device(s);
     so["action"] = s.on ? "on" : "off";
   }
   so["enabled"] = s.enabled;
+  writeHours(so, s.hours);
 }
 
 String fileText(const Defs& list, bool pretty) {
@@ -478,6 +576,8 @@ String fileText(const Defs& list, bool pretty) {
       w["to"] = d.whenTo;
       if (d.isOnline()) w["for_s"] = d.forS;
     }
+    if (d.isCron()) o["when"].to<JsonObject>()["cron"] = d.cron;
+    writeHours(o, d.hours);
     o["default_pause_s"] = d.defaultPauseS;
     writeOnInterrupt(o["on_interrupt"].to<JsonObject>(), d.onInterrupt);
     JsonArray steps = o["steps"].to<JsonArray>();
@@ -574,6 +674,7 @@ class BoardEnv : public ScenarioEngine::Env {
       out = ScenarioEngine::Def();
       out.name = name;
       out.defaultPauseS = d.defaultPauseS;
+      out.hours = d.hours;
       out.devices.reserve(d.devices.size());
       for (const String& n : d.devices) out.devices.push_back(n.c_str());
       out.requests = d.requests;
@@ -586,6 +687,9 @@ class BoardEnv : public ScenarioEngine::Env {
         st.on = s.on;
         st.enabled = s.enabled;
         st.pauseAfterS = s.pauseAfterS;
+        st.hours = s.hours;
+        st.attempts = s.attempts;
+        st.retryGapS = s.retryGapS;
         out.steps.push_back(st);
       }
       return true;
@@ -598,6 +702,7 @@ class BoardEnv : public ScenarioEngine::Env {
     const time_t now = time(nullptr);
     return now > 1700000000 ? static_cast<uint32_t>(now) : 0;
   }
+  int localMinute() override { return localMinuteNow(); }
   void finished(const std::string& name, const ScenarioEngine::Run& r) override;  // below: the history line
   bool wifiUp() override { return WiFi.status() == WL_CONNECTED; }
 
@@ -730,6 +835,7 @@ struct Watch {
   String reason = "no-data";
   uint32_t runS = 0;
   int32_t power = INT32_MIN;  // raw, 0.1 W
+  bool held = false;          // met and armed, but held back by the scenario's hours (logged once)
 };
 std::map<String, Watch> gWatch;  // by scenario name
 
@@ -759,6 +865,31 @@ struct OnlineWatch {
 };
 std::map<String, OnlineWatch> gOnline;  // by scenario name
 
+// The state of a cron trigger. It looks at every minute from the one after it began (an edit, enabling, the clock coming
+// after boot) up to now, a few minutes back at most (a longer jump of the clock begins again from now). A minute is a
+// local date and time: the hour the clocks go back is fired once, the hour they skip is not there. Nothing is kept over
+// a restart: a minute while the board was away is not caught up.
+struct CronWatch {
+  String expr;                // what it was made for: an edit begins again from now
+  int64_t lastMinute = -1;    // the last minute looked at (Unix minutes)
+  int64_t lastFired = -1;     // the local minute it last fired (yyyymmddhhmm)
+  bool pending = false;       // came while its scenario was running: starts when that run ends
+  String reason = "no-clock"; // watching | no-clock
+  String next;                // the next local minute it fires ("2026-10-21T21:00"; "" unknown or none within a year)
+  int64_t nextKey = -1;
+};
+std::map<String, CronWatch> gCron;  // by scenario name
+constexpr int64_t kCronCatchUpMin = 5;
+
+Cron::Civil civilAt(time_t t) {
+  struct tm lt;
+  localtime_r(&t, &lt);
+  return Cron::Civil{lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min};
+}
+int64_t civilKey(const Cron::Civil& c) {
+  return ((((static_cast<int64_t>(c.year) * 100 + c.month) * 100 + c.day) * 100 + c.hour) * 100) + c.minute;
+}
+
 // ---- the state of the interval scenarios -------------------------------------------------------------------------------
 
 // The schedule and the counters since boot (in RAM: an interval scenario carries nothing over a restart).
@@ -769,6 +900,7 @@ struct Interval {
   uint32_t nextMs = 0;     // the next tick
   uint32_t ok = 0, failed = 0;                    // ended runs
   uint32_t skippedBusy = 0, skippedNoWifi = 0;    // ticks that started nothing
+  uint32_t skippedHours = 0;                      // ... outside the scenario's hours (or with no clock for them)
   uint32_t failsInRow = 0;
   bool ended = false;      // a run has ended since boot
   uint32_t lastOk = 0, lastFailed = 0;            // Unix time (0: none, or no clock)
@@ -1038,6 +1170,10 @@ void BoardEnv::finished(const std::string& name, const ScenarioEngine::Run& r) {
 // "trigger" when not "interval" and "result" when not "done". ~70 bytes for a healthcheck: 128 KB hold ~1800 runs.
 void intervalFinished(const String& name, const ScenarioEngine::Run& r) {
   using ScenarioEngine::StepState;
+  if (r.state == ScenarioEngine::RunState::Skipped) {  // its start was outside the hours (the look before it was inside)
+    ++gInterval[name].skippedHours;
+    return;
+  }
   const bool ok = r.state == ScenarioEngine::RunState::Done && r.failed == 0;
   std::string why;
   for (size_t i = 0; i < r.steps.size() && i < r.def.steps.size(); ++i) {
@@ -1154,6 +1290,7 @@ void wake() {
 void watchTick();  // the power rules, below
 void relayTick();  // the relay triggers, below
 void onlineTick();  // the online triggers, below
+void cronTick();  // the cron triggers, below
 bool intervalTick();  // the interval scenarios, below
 
 // One task drives every run (the engine) and looks at the power rules every kWatchTickMs.
@@ -1204,6 +1341,7 @@ void engineTask(void*) {
       watchTick();  // takes the lock itself; reads the history without it
       relayTick();
       onlineTick();
+      cronTick();
       continue;
     }
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::min<uint32_t>(sleepMs, static_cast<uint32_t>(toWatch))));
@@ -1225,12 +1363,13 @@ void watchTick() {
   struct Rule {  // what a look needs of an enabled power rule (not its steps: an HTTP step may carry 16 KB of body)
     String name, trigger, whenDevice;
     uint32_t watts, forS, warmupS;
+    TimeWindow::Window hours;
   };
   std::vector<Rule> rules;
   {
     Lock lock;
     for (const Def& d : gDefs) {
-      if (d.enabled && d.isPower()) rules.push_back(Rule{d.name, d.trigger, d.whenDevice, d.watts, d.forS, d.warmupS});
+      if (d.enabled && d.isPower()) rules.push_back(Rule{d.name, d.trigger, d.whenDevice, d.watts, d.forS, d.warmupS, d.hours});
     }
     for (auto it = gWatch.begin(); it != gWatch.end();) {  // forget the rules that are gone or switched off
       bool present = false;
@@ -1247,6 +1386,8 @@ void watchTick() {
       pc.reason = "too-long";
     }
     bool fire = false;
+    const char* gate = hoursNow(d.hours);
+    bool held = false;
     {
       Lock lock;
       Watch& w = gWatch[d.name];
@@ -1255,7 +1396,11 @@ void watchTick() {
       w.runS = pc.runS;
       w.power = pc.lastPower;
       if (!pc.met) w.pending = false;  // gone before the run ended: no repeat
-      if (pc.met && w.armed) {
+      if (!(pc.met && w.armed && *gate)) w.held = false;
+      if (pc.met && w.armed && *gate) {  // outside the hours (or no clock for them): stays armed, fires once they begin
+        held = !w.held;
+        w.held = true;
+      } else if (pc.met && w.armed) {
         fire = true;
       } else if (pc.met) {
         w.restored = false;  // fired, and the condition still holds: the usual "wait for it to go"
@@ -1264,6 +1409,10 @@ void watchTick() {
         w.armed = true;
         w.restored = false;
       }
+    }
+    if (held) {
+      LOGI(TAG, "[%s] %s: the condition holds, but %s the hours %s: it fires when they begin, if it still holds", d.name.c_str(),
+           d.whenDevice.c_str(), strcmp(gate, "outside") == 0 ? "outside" : "no clock for", TimeWindow::text(d.hours).c_str());
     }
     if (!fire) continue;
     // Still running (an earlier run is not over): not started, the rule stays armed and is looked at again next time.
@@ -1299,12 +1448,13 @@ void watchTick() {
 void relayTick() {
   struct Rule {
     String name, device, to;
+    TimeWindow::Window hours;
   };
   std::vector<Rule> rules;
   {
     Lock lock;
     for (const Def& d : gDefs) {
-      if (d.enabled && d.isRelay()) rules.push_back(Rule{d.name, d.whenDevice, d.whenTo});
+      if (d.enabled && d.isRelay()) rules.push_back(Rule{d.name, d.whenDevice, d.whenTo, d.hours});
     }
     for (auto it = gRelay.begin(); it != gRelay.end();) {  // forget the triggers that are gone or switched off
       bool present = false;
@@ -1354,6 +1504,15 @@ void relayTick() {
       }
     }
     if (trigger.isEmpty()) continue;
+    if (strcmp(hoursNow(d.hours), "outside") == 0) {  // no clock: the run waits for it (the engine)
+      {
+        Lock lock;
+        gRelay[d.name].pending = false;
+      }
+      LOGI(TAG, "[%s] %s: the switch went %s outside the hours %s: not started", d.name.c_str(), d.device.c_str(),
+           trigger == "relay-on" ? "ON" : "OFF", TimeWindow::text(d.hours).c_str());
+      continue;
+    }
     const RunResult started = runWith(d.name, trigger.c_str());
     {
       Lock lock;
@@ -1382,12 +1541,13 @@ void onlineTick() {
   struct Rule {
     String name, device, to;
     uint32_t forS;
+    TimeWindow::Window hours;
   };
   std::vector<Rule> rules;
   {
     Lock lock;
     for (const Def& d : gDefs) {
-      if (d.enabled && d.isOnline()) rules.push_back(Rule{d.name, d.whenDevice, d.whenTo, d.forS});
+      if (d.enabled && d.isOnline()) rules.push_back(Rule{d.name, d.whenDevice, d.whenTo, d.forS, d.hours});
     }
     for (auto it = gOnline.begin(); it != gOnline.end();) {  // forget the triggers that are gone or switched off
       bool present = false;
@@ -1435,6 +1595,15 @@ void onlineTick() {
       }
     }
     if (trigger.isEmpty()) continue;
+    if (strcmp(hoursNow(d.hours), "outside") == 0) {  // no clock: the run waits for it (the engine)
+      {
+        Lock lock;
+        gOnline[d.name].pending = false;
+      }
+      LOGI(TAG, "[%s] %s %s outside the hours %s: not started", d.name.c_str(), d.device.c_str(),
+           trigger == "device-online" ? "came online" : "went offline", TimeWindow::text(d.hours).c_str());
+      continue;
+    }
     const RunResult started = runWith(d.name, trigger.c_str());
     {
       Lock lock;
@@ -1451,6 +1620,101 @@ void onlineTick() {
       LOGI(TAG, "[%s] %s %s%s: started", d.name.c_str(), d.device.c_str(), what, happened ? "" : " during the run before");
     } else if (started == RunResult::AlreadyRunning && happened) {
       LOGI(TAG, "[%s] %s %s while the scenario is running: starts again when the run ends", d.name.c_str(), d.device.c_str(), what);
+    }
+  }
+}
+
+// ---- cron triggers ------------------------------------------------------------------------------------------------------
+
+void cronTick() {
+  struct Rule {
+    String name, expr;
+    Cron::Expr e;
+    TimeWindow::Window hours;
+  };
+  std::vector<Rule> rules;
+  {
+    Lock lock;
+    for (const Def& d : gDefs) {
+      if (d.enabled && d.isCron()) rules.push_back(Rule{d.name, d.cron, d.cronExpr, d.hours});
+    }
+    for (auto it = gCron.begin(); it != gCron.end();) {  // forget the triggers that are gone or switched off
+      bool present = false;
+      for (const Rule& d : rules) present = present || d.name == it->first;
+      it = present ? std::next(it) : gCron.erase(it);
+    }
+  }
+  const time_t now = time(nullptr);
+  const bool clock = now > 1700000000;
+  const int64_t minute = clock ? static_cast<int64_t>(now) / 60 : -1;
+  for (const Rule& d : rules) {
+    bool due = false, run = false;
+    Cron::Civil at;
+    {
+      Lock lock;
+      CronWatch& w = gCron[d.name];
+      if (w.expr != d.expr) {  // new, enabled again or edited: from the next minute on
+        w = CronWatch();
+        w.expr = d.expr;
+      }
+      if (!clock) {
+        w.reason = "no-clock";
+        w.lastMinute = -1;
+        w.next = "";
+        w.nextKey = -1;
+        continue;
+      }
+      w.reason = "watching";
+      if (w.lastMinute < 0 || minute < w.lastMinute || minute - w.lastMinute > kCronCatchUpMin) w.lastMinute = minute;
+      for (int64_t m = w.lastMinute + 1; m <= minute; ++m) {
+        const Cron::Civil c = civilAt(static_cast<time_t>(m * 60));
+        const int64_t key = civilKey(c);
+        if (key != w.lastFired && Cron::matches(d.e, c)) {
+          due = true;
+          w.lastFired = key;
+          at = c;
+        }
+      }
+      w.lastMinute = minute;
+      const Cron::Civil from = civilAt(static_cast<time_t>((minute + 1) * 60));
+      if (w.nextKey < 0 || civilKey(from) > w.nextKey) {
+        Cron::Civil n;
+        if (Cron::next(d.e, from, n)) {
+          w.next = Cron::text(n).c_str();
+          w.nextKey = civilKey(n);
+        } else {
+          w.next = "";
+          w.nextKey = INT64_MAX;  // none within a year: looked for again only after an edit
+        }
+      }
+      run = due || w.pending;
+    }
+    if (!run) continue;
+    if (*hoursNow(d.hours)) {
+      {
+        Lock lock;
+        gCron[d.name].pending = false;
+      }
+      LOGI(TAG, "[%s] cron '%s'%s outside the hours %s: not started", d.name.c_str(), d.expr.c_str(),
+           due ? (" at " + Cron::text(at)).c_str() : "", TimeWindow::text(d.hours).c_str());
+      continue;
+    }
+    const RunResult started = runWith(d.name, "cron");
+    {
+      Lock lock;
+      CronWatch& w = gCron[d.name];
+      if (started == RunResult::Started) {
+        w.pending = false;
+      } else if (started == RunResult::AlreadyRunning) {
+        w.pending = true;
+      }
+    }
+    if (started == RunResult::Started) {
+      LOGI(TAG, "[%s] cron '%s'%s: started%s", d.name.c_str(), d.expr.c_str(), due ? (" at " + Cron::text(at)).c_str() : "",
+           due ? "" : " after the run that was going");
+    } else if (started == RunResult::AlreadyRunning && due) {
+      LOGI(TAG, "[%s] cron '%s' at %s while the scenario is running: starts again when the run ends", d.name.c_str(),
+           d.expr.c_str(), Cron::text(at).c_str());
     }
   }
 }
@@ -1506,6 +1770,10 @@ bool intervalTick() {
     iv.first = false;
     iv.nextMs += periodMs;
     if (static_cast<int32_t>(now - iv.nextMs) >= 0) iv.nextMs = now + periodMs;  // fell behind (a long run, no Wi-Fi)
+    if (*hoursNow(d.hours)) {  // outside the hours, or no clock for them: the next tick comes anyway
+      ++iv.skippedHours;
+      continue;
+    }
     const ScenarioEngine::Run* r = gEngine->run(d.name.c_str());
     if (r && r->alive) {
       ++iv.skippedBusy;
@@ -1572,6 +1840,25 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
   if (!full) return;
   o["default_pause_s"] = d.defaultPauseS;
   writeOnInterrupt(o["on_interrupt"].to<JsonObject>(), d.onInterrupt);
+  if (d.hours.set()) {
+    writeHours(o, d.hours);
+    const char* gate = hoursNow(d.hours);
+    o["hours_now"] = *gate ? gate : "inside";  // inside | outside | no-clock
+  }
+  if (d.isCron()) {
+    o["when"].to<JsonObject>()["cron"] = d.cron;
+    auto it = gCron.find(d.name);
+    if (it != gCron.end()) {
+      JsonObject ws = o["watch"].to<JsonObject>();
+      ws["reason"] = it->second.reason;
+      if (it->second.next.isEmpty()) {
+        ws["next"] = nullptr;
+      } else {
+        ws["next"] = it->second.next;  // local time
+      }
+      ws["pending"] = it->second.pending;  // came during a run of this scenario: starts when that run ends
+    }
+  }
   if (d.isPower()) {
     JsonObject w = o["when"].to<JsonObject>();
     w["device"] = d.whenDevice;
@@ -1644,6 +1931,7 @@ void describe(JsonObject o, const Def& d, const ScenarioEngine::Run* r, bool ful
       io["fails_in_row"] = iv.failsInRow;
       io["skipped_busy"] = iv.skippedBusy;
       io["skipped_no_wifi"] = iv.skippedNoWifi;
+      io["skipped_hours"] = iv.skippedHours;
       auto epochOrNull = [&](const char* key, uint32_t v) {
         if (v) {
           io[key] = v;
@@ -2054,6 +2342,10 @@ void limits(JsonObject out) {
   iv["history_flush_s"] = kIntervalFlushS;  // successes reach the card this often, a failure at once
   iv["history_file_bytes"] = kHistoryFileBytes;  // per scenario, two files
   out["online"].to<JsonObject>()["max_for_s"] = kMaxOnlineForS;  // trigger "online": when.for_s 0..max_for_s
+  out["cron"].to<JsonObject>()["max_bytes"] = Cron::kMaxTextBytes;  // trigger "cron": when.cron
+  JsonObject hr = out["hours"].to<JsonObject>();  // "hours" of a step or of a scenario's trigger
+  hr["clock_wait_min"] = TimeWindow::kDefaultClockWaitMin;
+  hr["max_clock_wait_min"] = TimeWindow::kMaxClockWaitMin;
   JsonObject h = out["http_step"].to<JsonObject>();  // an HTTP step's request (the same limits as POST /api/http/test)
   h["max_url_bytes"] = HttpOut::kMaxUrlBytes;
   h["max_body_bytes"] = HttpOut::kMaxBodyBytes;
@@ -2062,6 +2354,10 @@ void limits(JsonObject out) {
   h["min_timeout_ms"] = HttpOut::kMinTimeoutMs;
   h["max_timeout_ms"] = HttpOut::kMaxTimeoutMs;
   h["max_in_flight"] = ScenarioEngine::kMaxHttpInFlight;  // requests of all scenarios in the HTTP lane at once
+  h["attempts"] = ScenarioEngine::kAttempts;              // the usual attempts and gap (a power-up run: kPatientWindowMs)
+  h["retry_gap_s"] = ScenarioEngine::kRetryGapMs / 1000;
+  h["max_attempts"] = ScenarioEngine::kMaxHttpAttempts;   // an HTTP step's own: attempts 1..max, retry_gap_s 1..max
+  h["max_retry_gap_s"] = ScenarioEngine::kMaxRetryGapS;
 }
 
 String configJson(bool stateOnly) {
@@ -2078,6 +2374,7 @@ String configJson(bool stateOnly) {
   triggers.add(kTriggerInterval);
   triggers.add(kTriggerRelay);
   triggers.add(kTriggerOnline);
+  triggers.add(kTriggerCron);
   {
     Lock lock;
     doc["sd"] = gInfo.sd;

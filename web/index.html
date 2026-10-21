@@ -329,7 +329,7 @@ function viewStatus() {
 }
 
 // ---------------------------------------------------------------- scenarios
-const TRIGGERS = { power_on: "З'явилося живлення", manual: "Лише вручну", power_below: "Споживання розетки нижче порогу", power_above: "Споживання розетки вище порогу", interval: "Кожні N секунд", relay: "Реле розетки перемкнулось", online: "Розетка офлайн / онлайн" };
+const TRIGGERS = { power_on: "З'явилося живлення", manual: "Лише вручну", power_below: "Споживання розетки нижче порогу", power_above: "Споживання розетки вище порогу", interval: "Кожні N секунд", relay: "Реле розетки перемкнулось", online: "Розетка офлайн / онлайн", cron: "За розкладом (cron)" };
 const WATCH_REASON = { met: "умова виконана", waiting: "умова виконується, лічильник іде", warmup: "розігрів після вмикання", "not-met": "потужність по інший бік порогу",
   "relay-off": "розетка вимкнена", "relay-unknown": "стан реле невідомий", unanswered: "остання спроба опитування невдала", stale: "давно немає відповіді розетки",
   "no-data": "ще немає даних", "no-power-dp": "у розетки не вказано DP потужності або його немає", ignored: "розетка ігнорується", "no-device": "такої розетки немає в списку пристроїв",
@@ -344,24 +344,26 @@ const OI_POLICY = [["resume", "продовжити"], ["restart", "почати
 const OI_DEFAULT = { power: "restart", software: "resume", crash: "resume", brownout: "resume", resume_within_min: 120 };
 const RUN_RESULT = { done: ["ok", "виконано"], stopped: ["warn", "зупинено"], interrupted: ["err", "перервано"], skipped: ["n", "не стартував"] };
 const TRIGGER_RUN = { "power-on": "після вмикання живлення", manual: "вручну", "power-below": "споживання нижче порогу", "power-above": "споживання вище порогу", interval: "за інтервалом", "relay-on": "реле ввімкнулось", "relay-off": "реле вимкнулось",
-  "device-offline": "розетка офлайн", "device-online": "розетка знову онлайн" };
+  "device-offline": "розетка офлайн", "device-online": "розетка знову онлайн", cron: "за розкладом" };
 const RELAY_TO = [["any", "увімкнулось чи вимкнулось"], ["on", "увімкнулось"], ["off", "вимкнулось"]];
 const ONLINE_TO = [["any", "зникла чи з'явилась"], ["offline", "зникла (офлайн)"], ["online", "з'явилась знову (онлайн)"]];
 const ONLINE_REASON = { watching: "чекає на зміну", holding: "стан змінився, чекає, чи протримається", "not-seen-online": "від старту плати розетка ще не відповідала",
   ignored: "розетка ігнорується", "no-device": "такої розетки немає в списку пристроїв" };
 const fmtEpoch = e => e ? new Date(e * 1000).toLocaleString() : "час невідомий";
 const STEP_STATE = { pending: ["n", "очікує"], disabled: ["n", "крок вимкнено"], running: ["warn", "виконується"], ok: ["ok", "виконано"],
-  skipped: ["n", "пропущено (пристрій ігнорувався)"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
+  skipped: ["n", "пропущено"], failed: ["err", "не вдалося"], stopped: ["warn", "зупинено"] };
+const HOURS_NOW = { inside: ["ok", "зараз у межах годин"], outside: ["n", "зараз поза годинами"], "no-clock": ["warn", "годинника ще немає"] };
 
 // One line about a scenario's state, shared by the status card and the scenarios page.
 function scenarioStateText(s) {
   const why = (/reset reason: (\w+)/.exec(s.skip_reason || "") || [])[1];
-  if (s.state === "waiting") return s.wait_reason === "wifi" ? "чекає на Wi-Fi (потім ще 10 с для розеток)" : "стартує через " + s.starts_in_s + " с";
+  if (s.state === "waiting") return s.wait_reason === "wifi" ? "чекає на Wi-Fi (потім ще 10 с для розеток)" : s.wait_reason === "clock" ? "чекає на годинник (для годин сценарію)" : "стартує через " + s.starts_in_s + " с";
+  if (s.state === "skipped" && /^(outside the hours|no clock)/.test(s.skip_reason || "")) return "не запускався: " + s.skip_reason;
   if (s.state === "skipped") return "не запускався: запуск не від вмикання живлення" + (why ? " (" + (REASON[why] || why) + ")" : "");
   const how = TRIGGER_RUN[s.run_trigger];
   const prog = s.progress_total != null ? ", кроків " + s.progress_done + " з " + s.progress_total : "";
   const pause = s.pause_left_s != null ? ", пауза ще " + fmtDur(s.pause_left_s) : "";
-  const wifi = s.state === "running" && s.wait_reason === "wifi" ? ", чекає на Wi-Fi" : "";
+  const wifi = s.state === "running" && s.wait_reason === "wifi" ? ", чекає на Wi-Fi" : s.state === "running" && s.wait_reason === "clock" ? ", крок чекає на годинник" : "";
   const resumed = s.resumed && (s.state === "running" || s.state === "waiting") ? ", продовжено після перезапуску" : "";
   return (SC_STATE[s.state] || ["n", s.state])[1] + (how && s.state !== "idle" ? " (запуск: " + how + ")" : "") + prog + pause + wifi + resumed;
 }
@@ -384,21 +386,26 @@ function viewScenarios() {
     live = {}, info = {}, msg = null, saving = false;
   const runBoxes = new Map();
 
-  const blankHttp = () => ({ method: "GET", url: "", content_type: "application/json", body: "", timeout: "" });
-  const blankStep = () => ({ device: devNames[0] || "", action: devNames.length ? "on" : "http", enabled: true, pause: "", seconds: "60", ...blankHttp() });
-  const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60", every_s: "60", to: "any", hold_s: "0" });
+  const blankHttp = () => ({ method: "GET", url: "", content_type: "application/json", body: "", timeout: "", attempts: "", gap: "" });
+  const blankHours = () => ({ on: false, from: "05:00", to: "21:00", wait: String(limits.clockWait || 10) });
+  const hoursFrom = h => h ? { on: true, from: h.from, to: h.to, wait: String(h.clock_wait_min) } : blankHours();
+  const hoursOut = h => h.on ? { from: h.from, to: h.to, clock_wait_min: Number(h.wait) } : undefined;
+  const blankStep = () => ({ device: devNames[0] || "", action: devNames.length ? "on" : "http", enabled: true, pause: "", seconds: "60", hours: blankHours(), ...blankHttp() });
+  const blankWhen = () => ({ device: devNames[0] || "", watts: "100", for_s: "120", warmup_s: "60", every_s: "60", to: "any", hold_s: "0", cron: "0 21 * * *" });
   const blankOi = () => ({ ...OI_DEFAULT, resume_within_min: String(OI_DEFAULT.resume_within_min) });
-  const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), oi: blankOi(), steps: [] });
-  const fromServer = s => ({ orig: s.name, name: s.name, enabled: s.enabled, trigger: s.trigger, pause: String(s.default_pause_s),
+  const blank = () => ({ orig: null, name: "", enabled: false, trigger: "manual", pause: "30", when: blankWhen(), hours: blankHours(), oi: blankOi(), steps: [] });
+  const fromServer = s => ({ orig: s.name, name: s.name, enabled: s.enabled, trigger: s.trigger, pause: String(s.default_pause_s), hours: hoursFrom(s.hours),
     oi: s.on_interrupt ? { ...s.on_interrupt, resume_within_min: String(s.on_interrupt.resume_within_min) } : blankOi(),
     when: s.when && s.trigger === "interval" ? { ...blankWhen(), every_s: String(s.when.every_s) }
+      : s.when && s.trigger === "cron" ? { ...blankWhen(), cron: s.when.cron }
       : s.when && s.trigger === "relay" ? { ...blankWhen(), device: s.when.device, to: s.when.to }
       : s.when && s.trigger === "online" ? { ...blankWhen(), device: s.when.device, to: s.when.to, hold_s: String(s.when.for_s) }
-      : s.when ? { device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s), every_s: "60" } : blankWhen(),
+      : s.when ? { ...blankWhen(), device: s.when.device, watts: String(s.when.watts), for_s: String(s.when.for_s), warmup_s: String(s.when.warmup_s) } : blankWhen(),
     steps: s.steps.map(x => ({ device: x.device || "", action: x.action || "on", enabled: x.enabled, pause: x.pause_after_s == null ? "" : String(x.pause_after_s),
-      seconds: x.action === "wait" ? String(x.seconds) : "60",
+      seconds: x.action === "wait" ? String(x.seconds) : "60", hours: hoursFrom(x.hours),
       ...(x.action === "http" ? { method: x.method, url: x.url, content_type: x.content_type || "application/json", body: x.body || "",
-        timeout: x.timeout_ms === limits.httpTimeout ? "" : String(x.timeout_ms) } : blankHttp()) })) });
+        timeout: x.timeout_ms === limits.httpTimeout ? "" : String(x.timeout_ms), attempts: x.attempts == null ? "" : String(x.attempts),
+        gap: x.retry_gap_s == null ? "" : String(x.retry_gap_s) } : blankHttp()) })) });
 
   async function load(keepEdits) {
     try {
@@ -415,7 +422,9 @@ function viewScenarios() {
       limits.onlineFor = (l.online || {}).max_for_s || 3600;
       const h = l.http_step || {};
       Object.assign(limits, { httpUrl: h.max_url_bytes || 2048, httpBody: h.max_body_bytes || 16384, httpTimeout: h.timeout_ms || 10000,
-        httpTimeoutMin: h.min_timeout_ms || 1000, httpTimeoutMax: h.max_timeout_ms || 30000, httpInFlight: h.max_in_flight || 2 });
+        httpTimeoutMin: h.min_timeout_ms || 1000, httpTimeoutMax: h.max_timeout_ms || 30000, httpInFlight: h.max_in_flight || 2,
+        httpAttempts: h.attempts || 3, httpGap: h.retry_gap_s || 2, httpAttemptsMax: h.max_attempts || 20, httpGapMax: h.max_retry_gap_s || 600 });
+      Object.assign(limits, { clockWait: (l.hours || {}).clock_wait_min || 10, clockWaitMax: (l.hours || {}).max_clock_wait_min || 1440, cronBytes: (l.cron || {}).max_bytes || 100 });
       info = { sd: j.sd, error: j.error };
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
       if (!keepEdits) rows = j.scenarios.map(fromServer);
@@ -459,11 +468,22 @@ function viewScenarios() {
         w.reason === "waiting" || w.reason === "met" ? " (" + w.run_s + " з " + s.when.for_s + " с)" : "", " · ", w.pending ? "умова виконана під час запуску: сценарій запуститься ще раз, коли запуск закінчиться, якщо умова ще триматиметься"
           : w.armed ? "готовий спрацювати" : "вже спрацював, чекає, поки умова зникне"));
     }
+    if (s.watch && s.trigger === "cron") {
+      const w = s.watch;
+      out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(w.reason === "watching" ? "ok" : "warn", w.reason === "watching" ? "розклад" : "годинника ще немає"), " ",
+        w.next ? "наступний запуск " + w.next.replace("T", " ") + " (місцевий час)" : w.reason === "watching" ? "наступного запуску протягом року немає" : "запусків за розкладом немає, доки немає годинника",
+        w.pending ? " · час настав під час запуску: сценарій запуститься ще раз, коли запуск закінчиться" : ""));
+    }
+    if (s.hours_now) {
+      const h = HOURS_NOW[s.hours_now] || ["n", s.hours_now];
+      out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(h[0], h[1]), " години сценарію " + s.hours.from + "–" + s.hours.to +
+        ": тригер запускає сценарій лише в ці години, вручну — завжди"));
+    }
     if (s.interval) {
       const v = s.interval;
       out.push(E("div", { class: "mut", style: "margin:6px 0" }, badge(v.fails_in_row ? "err" : v.ok ? "ok" : "n", v.fails_in_row ? "не вдається " + v.fails_in_row + " раз(и) поспіль" : v.ok ? "працює" : "ще не запускався"), " ",
         (v.next_in_s != null ? "наступний запуск через " + fmtDur(v.next_in_s) + " · " : "вимкнений · ") + "від старту плати: вдалих " + v.ok + ", невдалих " + v.failed +
-        (v.skipped_busy ? ", пропущено (попередній ще йшов) " + v.skipped_busy : "") + (v.skipped_no_wifi ? ", пропущено (без Wi-Fi) " + v.skipped_no_wifi : "") +
+        (v.skipped_busy ? ", пропущено (попередній ще йшов) " + v.skipped_busy : "") + (v.skipped_no_wifi ? ", пропущено (без Wi-Fi) " + v.skipped_no_wifi : "") + (v.skipped_hours ? ", пропущено (поза годинами чи без годинника) " + v.skipped_hours : "") +
         (v.last_ok ? " · востаннє вдалий " + fmtEpoch(v.last_ok) : "") + (v.last_error ? " · остання помилка: " + v.last_error : "")));
     }
     const steps = s.run_steps || [];
@@ -508,6 +528,9 @@ function viewScenarios() {
         return at + "«протягом» має бути цілим числом секунд 0–" + limits.onlineFor + ".";
       if (r.trigger === "interval" && !(/^\d{1,5}$/.test(r.when.every_s) && Number(r.when.every_s) >= limits.everyMin && Number(r.when.every_s) <= limits.everyMax))
         return at + "інтервал має бути цілим числом секунд " + limits.everyMin + "–" + limits.everyMax + ".";
+      if (r.trigger === "cron" && !(r.when.cron.trim().split(/\s+/).length === 5 && r.when.cron.length <= limits.cronBytes))
+        return at + "розклад cron має 5 полів: хвилина година день місяць день-тижня, наприклад 0 21 * * *.";
+      if (r.trigger !== "manual") { const e = hoursError(r.hours); if (e) return at + e; }
       if (!/^\d{1,4}$/.test(r.oi.resume_within_min) || Number(r.oi.resume_within_min) > limits.resumeMax)
         return at + "«продовжувати, якщо перерва до» має бути цілим числом хвилин 0–" + limits.resumeMax + ".";
       if (r.steps.length > limits.steps) return at + "забагато кроків (максимум " + limits.steps + ").";
@@ -518,6 +541,7 @@ function viewScenarios() {
         } else if (st.action === "wait") {
           if (!/^\d{1,4}$/.test(st.seconds) || Number(st.seconds) < 1 || Number(st.seconds) > limits.wait) return at + "крок " + (k + 1) + ": «почекати» має бути цілим числом секунд 1–" + limits.wait + ".";
         } else if (!NAME_RE.test(st.device)) return at + "крок " + (k + 1) + ": оберіть пристрій.";
+        if (st.action !== "wait") { const e = hoursError(st.hours); if (e) return at + "крок " + (k + 1) + ": " + e; }
         if (st.pause !== "" && !pauseOk(st.pause)) return at + "крок " + (k + 1) + ": пауза має бути числом 0–" + limits.pause + " с або порожньою.";
       }
     }
@@ -534,10 +558,15 @@ function viewScenarios() {
         ...(r.trigger === "interval" ? { when: { every_s: Number(r.when.every_s) } } : {}),
         ...(r.trigger === "relay" ? { when: { device: r.when.device, to: r.when.to } } : {}),
         ...(r.trigger === "online" ? { when: { device: r.when.device, to: r.when.to, for_s: Number(r.when.hold_s) } } : {}),
+        ...(r.trigger === "cron" ? { when: { cron: r.when.cron.trim() } } : {}),
+        ...(r.trigger !== "manual" && r.hours.on ? { hours: hoursOut(r.hours) } : {}),
         on_interrupt: { power: r.oi.power, software: r.oi.software, crash: r.oi.crash, brownout: r.oi.brownout, resume_within_min: Number(r.oi.resume_within_min) },
         steps: r.steps.map(st => {
           if (st.action === "wait") return { action: "wait", seconds: Number(st.seconds), enabled: st.enabled };
           const o = st.action === "http" ? { action: "http", ...httpFields(st), enabled: st.enabled } : { device: st.device, action: st.action, enabled: st.enabled };
+          if (st.action === "http" && st.attempts !== "") o.attempts = Number(st.attempts);
+          if (st.action === "http" && st.gap !== "") o.retry_gap_s = Number(st.gap);
+          if (st.hours.on) o.hours = hoursOut(st.hours);
           if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
       const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -552,6 +581,14 @@ function viewScenarios() {
     }
   }
 
+  function hoursError(h) {
+    if (!h.on) return null;
+    if (!/^\d\d:\d\d$/.test(h.from) || !/^\d\d:\d\d$/.test(h.to)) return "години мають бути у вигляді ГГ:ХХ.";
+    if (h.from === h.to) return "початок і кінець годин мають відрізнятися.";
+    if (!/^\d{1,4}$/.test(h.wait) || Number(h.wait) > limits.clockWaitMax) return "«чекати годинник» має бути цілим числом хвилин 0–" + limits.clockWaitMax + ".";
+    return null;
+  }
+
   // The same checks as the firmware (HttpOut::parse), so the message comes before saving.
   function httpError(st) {
     const bytes = s => new TextEncoder().encode(s).length;
@@ -564,6 +601,10 @@ function viewScenarios() {
     }
     if (st.timeout !== "" && !(/^\d{4,5}$/.test(st.timeout) && Number(st.timeout) >= limits.httpTimeoutMin && Number(st.timeout) <= limits.httpTimeoutMax))
       return "таймаут має бути " + limits.httpTimeoutMin + "–" + limits.httpTimeoutMax + " мс або порожнім.";
+    if (st.attempts !== undefined && st.attempts !== "" && !(/^\d{1,2}$/.test(st.attempts) && Number(st.attempts) >= 1 && Number(st.attempts) <= limits.httpAttemptsMax))
+      return "спроб має бути 1–" + limits.httpAttemptsMax + " або порожньо.";
+    if (st.gap !== undefined && st.gap !== "" && !(/^\d{1,3}$/.test(st.gap) && Number(st.gap) >= 1 && Number(st.gap) <= limits.httpGapMax))
+      return "пауза між спробами має бути 1–" + limits.httpGapMax + " с або порожньою.";
     return null;
   }
   const httpFields = st => {  // a step's request as the firmware takes it (save, and "Перевірити")
@@ -591,12 +632,30 @@ function viewScenarios() {
     const pz = E("input", { type: "number", min: 0, max: limits.pause, value: st.pause, placeholder: "пауза: " + (r.pause || "30") + " с", title: "Пауза після цього кроку, с. Порожньо: за замовчуванням. Пауза лише після кроку, що вдався (перемкнув розетку, сервер відповів 2xx)" });
     pz.addEventListener("input", () => { st.pause = pz.value.trim(); });
     const mv = d => () => { const j = k + d; if (j < 0 || j >= r.steps.length) return; [r.steps[k], r.steps[j]] = [r.steps[j], r.steps[k]]; render(); };
+    if (!st.hours) st.hours = blankHours();
     return E("div", { class: "srow" }, E("span", { class: "n" }, (k + 1) + "."),
       wait ? E("span", { style: "flex:1;min-width:150px" }, "почекати, с:") : http ? E("span", { style: "flex:1;min-width:150px" }, httpSummary(st)) : sel, act, en, wait ? secs : pz,
       E("button", { type: "button", title: "вгору", disabled: saving || k === 0, onclick: mv(-1) }, "↑"),
       E("button", { type: "button", title: "вниз", disabled: saving || k === r.steps.length - 1, onclick: mv(1) }, "↓"),
       E("button", { type: "button", class: "d", title: "видалити крок", disabled: saving, onclick: () => { r.steps.splice(k, 1); render(); } }, "✕"),
-      http ? httpRequestFields(st) : null);
+      http ? httpRequestFields(st) : null,
+      wait ? null : hoursRow(st.hours, "крок лише в години", "Поза годинами крок пропускається (без команди й без паузи після нього), сценарій іде далі. Години дивляться, коли крок починається (після паузи попереднього); " +
+        "почався в межах — його спроби доробляються. Немає годинника (після відключення світла час приходить з NTP, коли є інтернет) — крок чекає на нього до N хв, потім пропускається."));
+  }
+
+  // "Only in these hours" of a step or a scenario: from, to (local time, time.tz), and how long to wait for the clock.
+  function hoursRow(h, label, help) {
+    const on = E("input", { type: "checkbox", checked: h.on });
+    on.addEventListener("change", () => { h.on = on.checked; render(); });
+    const parts = [E("label", { style: "font-weight:400;flex:0 0 auto", title: help }, on, " " + label)];
+    if (h.on) {
+      const t = key => { const i = E("input", { type: "time", value: h[key], style: "width:110px;flex:0 0 auto" }); i.addEventListener("input", () => { h[key] = i.value; }); return i; };
+      const w = E("input", { type: "number", min: 0, max: limits.clockWaitMax || 1440, value: h.wait, style: "width:90px;flex:0 0 auto", title: "скільки чекати на годинник, хв (0–" + (limits.clockWaitMax || 1440) + ")" });
+      w.addEventListener("input", () => { h.wait = w.value.trim(); });
+      parts.push(E("span", { class: "mut" }, "з"), t("from"), E("span", { class: "mut" }, "до"), t("to"),
+        E("span", { class: "mut" }, "(місцевий час; «до» не входить; через північ — напр. 22:00–06:00) · без годинника чекати, хв:"), w);
+    }
+    return E("div", { class: "row", style: "flex:1 1 100%;gap:6px;margin:4px 0 0", title: help }, ...parts);
   }
 
   // "POST api.telegram.org": what the step is called in the run's state and in the history (never the path: a token may be there).
@@ -627,7 +686,13 @@ function viewScenarios() {
       } catch (e) { res.replaceChildren(note("err", "Не вдалося: " + e.message)); }
       test.disabled = false;
     } }, "Перевірити");
-    const parts = [method, url, to, test];
+    const na = E("input", { type: "number", min: 1, max: limits.httpAttemptsMax, value: st.attempts, placeholder: "спроб: " + limits.httpAttempts, style: "width:110px",
+      title: "Скільки разів пробувати (1–" + limits.httpAttemptsMax + "). Порожньо: " + limits.httpAttempts + " спроби, у запуску від появи живлення — 90 с спроб. Задане діє в будь-якому запуску" });
+    na.addEventListener("input", () => { st.attempts = na.value.trim(); });
+    const gap = E("input", { type: "number", min: 1, max: limits.httpGapMax, value: st.gap, placeholder: "між спробами: " + limits.httpGap + " с", style: "width:160px",
+      title: "Пауза між спробами, с (1–" + limits.httpGapMax + "). Порожньо: " + limits.httpGap + " с" });
+    gap.addEventListener("input", () => { st.gap = gap.value.trim(); });
+    const parts = [method, url, to, na, gap, test];
     if (st.method === "POST") {
       const ct = E("input", { type: "text", value: st.content_type, placeholder: "Content-Type", style: "flex:0 1 240px;min-width:160px" });
       ct.addEventListener("input", () => { st.content_type = ct.value.trim(); });
@@ -717,6 +782,19 @@ function viewScenarios() {
         "історія окрема (вибрати сценарій в «Історії запусків»): невдалий запуск записується на картку одразу, вдалі раз на " + fmtDur(limits.flushS) + "."));
   }
 
+  // A cron scenario: the expression, in local time.
+  function cronFields(r) {
+    const i = E("input", { type: "text", value: r.when.cron, maxlength: limits.cronBytes || 100, placeholder: "0 21 * * *", spellcheck: "false", style: "font-family:monospace" });
+    i.addEventListener("input", () => { r.when.cron = i.value; });
+    return E("div", {},
+      E("h2", { style: "margin-top:14px" }, "Розклад"),
+      E("div", { class: "fields" }, field("cron", i, "хвилина година день місяць день-тижня, місцевий час")),
+      E("p", { class: "mut", style: "margin:8px 0 0" }, "Поля: хвилина 0–59, година 0–23, день місяця 1–31, місяць 1–12 або JAN–DEC, день тижня 0–7 або SUN–SAT (0 і 7 — неділя); у кожному * , число, діапазон a-b, крок */s або a-b/s, списки через кому. " +
+        "Приклади: «0 21 * * *» — щодня о 21:00; «*/15 6-22 * * 1-5» — кожні 15 хв з 6 до 22 у будні; «30 5 1,15 * *» — 1-го і 15-го о 05:30. Якщо обмежені і день місяця, і день тижня, підходить будь-який із них. " +
+        "Потрібен годинник (NTP): без нього запусків немає. Хвилина, коли плата не працювала, не надолужується; хвилина старту плати (чи появи годинника, зміни розкладу) теж не запускає. " +
+        "Восени година 03:00–03:59 повторюється — запуск один; навесні її немає — запуску теж. Час настав, поки запуск ще йде, — ще один запуск після нього."));
+  }
+
   // What a restart of the board does to a run of this scenario (on_interrupt).
   function interruptFields(r) {
     const sel = key => {
@@ -765,6 +843,10 @@ function viewScenarios() {
       r.trigger === "interval" ? everyFields(r) : null,
       r.trigger === "relay" ? relayFields(r) : null,
       r.trigger === "online" ? onlineFields(r) : null,
+      r.trigger === "cron" ? cronFields(r) : null,
+      r.trigger === "manual" ? null : E("div", { style: "margin-top:10px" }, hoursRow(r.hours, "запускати за тригером лише в години",
+        "Тригер поза годинами не запускає сценарій: «З'явилося живлення», реле, онлайн, cron — подія пропускається; споживання — правило лишається готовим і спрацює, коли години почнуться, якщо умова ще тримається; " +
+        "інтервал — тік пропускається. Без годинника запуск чекає на нього до N хв (інтервал — пропускає тік). Ручний запуск не обмежений.")),
       r.trigger === "interval" ? null : interruptFields(r),
       E("h2", { style: "margin-top:14px" }, "Кроки по черзі"),
       r.steps.length ? r.steps.map((st, k) => stepRow(r, st, k)) : E("p", { class: "mut", style: "margin:0 0 8px" }, "Кроків ще немає."),
@@ -782,7 +864,8 @@ function viewScenarios() {
       E("span", { class: "mut" }, "Сценарії зберігаються лише на SD-картці (scenarios.json). Кожен сценарій виконується окремо й одночасно з іншими; від усіх разом у черзі до розеток одночасно не більше 4 команд. " +
         "Крок: завжди надсилається команда «ввімкнути» або «вимкнути» (до 3 спроб по 3 с; у запуску від появи живлення сценарій спершу чекає на Wi-Fi, а крок повторюється до 90 с) і перевіряється стан (кешу не довіряємо). Невдалий крок пропускається, пристрої з прапорцем «ігнорувати» теж. " +
         "«Почекати N с» чекає завжди (також після невдалого чи пропущеного кроку), після паузи попереднього кроку; після перезапуску плати з «продовжити» очікування починається заново. " +
-        "HTTP-запит (GET чи POST з тілом, наприклад повідомлення в Telegram) вдається, коли сервер відповів 2xx; спроби ті самі; від усіх сценаріїв разом одночасно не більше " + (limits.httpInFlight || 2) + " запитів. Шлях і тіло запиту в лог і історію не пишуться.")));
+        "HTTP-запит (GET чи POST з тілом, наприклад повідомлення в Telegram) вдається, коли сервер відповів 2xx; спроби ті самі, або свої (кількість і пауза між ними); від усіх сценаріїв разом одночасно не більше " + (limits.httpInFlight || 2) + " запитів. Шлях і тіло запиту в лог і історію не пишуться. " +
+        "Години (крок чи тригер «лише в години») — місцевий час за «Часовим поясом» у налаштуваннях.")));
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
       limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Історія запусків: до 2 × " + fmtKb(limits.historyBytes) + " на SD. " + limits.basis + " Усі ліміти: вкладка «Статус»."));

@@ -294,6 +294,11 @@ def scn(dev, name, **params):
     ({"action": "http", "url": "http://x/", "timeout_ms": 500}, "timeout_ms"),
     ({"device": "towel", "action": "on", "url": "http://x/"}, "for an http step"),
     ({"device": "towel", "action": "get"}, "\"on\", \"off\", \"http\" or \"wait\""),
+    ({"action": "http", "url": "http://x/", "attempts": 0}, "attempts must be an integer 1..20"),
+    ({"action": "http", "url": "http://x/", "attempts": 21}, "attempts must be an integer 1..20"),
+    ({"action": "http", "url": "http://x/", "retry_gap_s": 0}, "retry_gap_s must be an integer 1..600"),
+    ({"action": "http", "url": "http://x/", "retry_gap_s": 601}, "retry_gap_s must be an integer 1..600"),
+    ({"device": "towel", "action": "on", "retry_gap_s": 5}, "for an http step"),
 ])
 def test_invalid_http_steps_are_rejected(dev, guard, step, words):
     r = put(dev, guard + [http_scenario(TEST + "hv", [step])])
@@ -351,6 +356,28 @@ def test_a_failing_http_step_is_tried_three_times_and_the_scenario_goes_on(dev, 
     assert first["state"] == "failed" and first["attempts"] == 3 and first["detail"] == "http: the server answered 500", first
     assert second["state"] == "ok"  # no 600 s pause after a step that failed
     assert [g["path"] for g in fake.requests[before:]] == ["/status/500"] * 3 + ["/ok"]
+
+
+def test_an_http_step_with_its_own_attempts_and_gap(dev, guard, fake):
+    name = TEST + "hown"
+    steps = [{"action": "http", "url": f"{fake.base}/status/500", "attempts": 5, "retry_gap_s": 3, "timeout_ms": 2000}]
+    assert put(dev, guard + [http_scenario(name, steps)]).status_code == 200
+    got = scn(dev, name)["steps"][0]
+    assert got["attempts"] == 5 and got["retry_gap_s"] == 3 and got["timeout_ms"] == 2000, got
+    before = len(fake.requests)
+    started = time.time()
+    assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+    s = wait_state(dev, name, ("done",), timeout=60)
+    took = time.time() - started
+    assert s["run_steps"][0]["state"] == "failed" and s["run_steps"][0]["attempts"] == 5, s["run_steps"]
+    assert [g["path"] for g in fake.requests[before:]] == ["/status/500"] * 5
+    assert took >= 4 * 3, took  # four gaps of 3 s
+    steps = [{"action": "http", "url": f"{fake.base}/status/500", "attempts": 1}]
+    assert put(dev, guard + [http_scenario(name, steps)]).status_code == 200
+    before = len(fake.requests)
+    assert dev.request("POST", "/api/scenarios/run", params={"name": name}).status_code == 200
+    s = wait_state(dev, name, ("done",), timeout=30)
+    assert s["run_steps"][0]["attempts"] == 1 and len(fake.requests) - before == 1, s["run_steps"]
 
 
 def test_a_document_near_the_put_limit_saves_reads_back_and_leaves_the_internal_ram(dev, guard):

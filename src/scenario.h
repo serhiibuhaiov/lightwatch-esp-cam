@@ -41,11 +41,22 @@
 //             socket that answers its first query is the base; one that does not, comes online as an event; one that never
 //             comes up gives no "offline". A query that failed while the board had no Wi-Fi changes nothing (Devices). See
 //             lib/online_rule. Overlapping runs and restarts as for relay.
+//   cron      starts at the minutes of a cron expression, local time (config time.tz), with `when`: { "cron": "0 21 * * *" }
+//             (lib/cron). Needs the clock; looked at every 3 s, every minute since the last look (a few back at most): a minute
+//             while the board was away, or the one it started in, is not caught up; the hour the clocks go back fires once.
+//             A minute while its run is going starts it again once that run ends. Nothing is kept over a restart.
 // Any scenario, enabled or not, can be started by hand (runNow) and stopped (stop).
+//
+// Hours (lib/time_window): "hours": {"from": "05:00", "to": "21:00", "clock_wait_min": 10}, local time. On a scenario (any
+// trigger but manual) a trigger starts it only inside them: power_on, relay, online and cron outside them are dropped, a
+// power rule stays armed and fires once they begin if its condition still holds, an interval tick is skipped. A start by
+// hand ignores them. On a step (on/off/http) the step is skipped outside them (lib/scenario_engine). Without a clock a
+// start or a step waits for it up to clock_wait_min (an interval tick is skipped), then is skipped.
 //
 // A step always sends its action (3 s timeout; the cached state is not trusted: it can be old or empty after a
 // blackout, and "on" to a socket that is already on does no harm), then queries the state to see the new state,
-// up to 3 attempts 2 s apart. After the last failed attempt the step is "failed" and the scenario goes on.
+// up to 3 attempts 2 s apart (an HTTP step may have its own: attempts 1..20, retry_gap_s 1..600). After the last failed
+// attempt the step is "failed" and the scenario goes on.
 // A run started by the power-up is more patient, because the router and the sockets are still booting: it first waits
 // for Wi-Fi (as long as it takes, then 10 s more for the sockets), and each step is retried for up to 90 s, 5 s apart.
 // The pause after a step (its own, or the scenario's default) is kept only after a step that really
