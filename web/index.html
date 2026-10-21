@@ -88,6 +88,17 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}
 .hreq textarea{flex-basis:100%;min-height:70px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .hreq .res{flex-basis:100%}
 .rs{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.card{scroll-margin-top:72px}
+.card.ed{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.sh{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}
+.sh .sn{font-size:16px}
+.sh .sp{flex:1}
+.sh button{padding:5px 12px}
+ol.ss{margin:6px 0 0;padding-left:26px;font-size:14px}
+ol.ss li{margin:1px 0}
+ol.ss .off{color:var(--mut);text-decoration:line-through}
+.ft{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.ft .banner{margin-bottom:0}
 .rs div{margin:3px 0}
 textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 .op{border:1px solid var(--line);border-radius:8px;margin:0 0 8px;padding:0 10px}
@@ -149,6 +160,8 @@ async function getJson(path) {
 }
 const note = (cls, text) => E("div", { class: "banner " + cls }, text);
 const badge = (cls, text) => E("span", { class: "badge b-" + cls }, text);
+// Brings a card into view when it is not (after a save or a cancel the card changes size, and the page would jump).
+const show = id => { const el = document.getElementById(id); if (!el) return; const r = el.getBoundingClientRect(); if (r.top < 60 || r.top > innerHeight - 80) el.scrollIntoView({ block: "start" }); };
 const stamp = () => { $("#stamp").textContent = "оновлено " + new Date().toLocaleTimeString(); };
 
 function fmtUp(s) {
@@ -378,12 +391,15 @@ function scenariosCard(list, st) {
       E("a", { href: "#scenarios" }, "вкладка «Сценарії»"), "."));
 }
 
-function viewScenarios() {
+function viewScenarios(params) {
   const box = E("div");
   main.replaceChildren(box);
   const NAME_RE = /^[a-z0-9_-]{1,32}$/;
-  let rows = [], devNames = [], ignored = new Set(), limits = { max: 8, steps: 24, pause: 3600, watts: 20000, forMin: 10, forMax: 900, warmup: 3600, fileBytes: 32768 },
-    live = {}, info = {}, msg = null, saving = false;
+  // One item per scenario: `name` (as saved on the board; null for a new one), `draft` (the form while it is edited, else null),
+  // `base` (the scenario as the board had it when the editing began: a save checks nobody changed it meanwhile), `msg`.
+  // Only the edited scenario is sent: the rest of the list goes back as the board has it right before the save.
+  let items = [], server = {}, devNames = [], ignored = new Set(), limits = { max: 8, steps: 24, pause: 3600, watts: 20000, forMin: 10, forMax: 900, warmup: 3600, fileBytes: 32768 },
+    live = {}, info = {}, msg = null, saving = false, editFirst = params && params.get("edit");
   const runBoxes = new Map();
 
   const blankHttp = () => ({ method: "GET", url: "", content_type: "application/json", body: "", timeout: "", attempts: "", gap: "" });
@@ -427,9 +443,39 @@ function viewScenarios() {
       Object.assign(limits, { clockWait: (l.hours || {}).clock_wait_min || 10, clockWaitMax: (l.hours || {}).max_clock_wait_min || 1440, cronBytes: (l.cron || {}).max_bytes || 100 });
       info = { sd: j.sd, error: j.error };
       live = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
-      if (!keepEdits) rows = j.scenarios.map(fromServer);
+      server = Object.fromEntries(j.scenarios.map(s => [s.name, s]));
+      // The board's list, in its order; an item being edited keeps its draft, a new one stays at the end.
+      const old = new Map(items.filter(it => it.name).map(it => [it.name, it]));
+      const next = j.scenarios.map(s => old.get(s.name) || { name: s.name, draft: null, base: null, msg: null });
+      for (const it of items) {
+        if (!it.name) next.push(it);
+        else if (!server[it.name] && it.draft) next.push(Object.assign(it, { msg: { cls: "warn", text: "Цього сценарію на пристрої вже немає (видалили в іншій вкладці?). «Зберегти» додасть його знову." } }));
+      }
+      items = next;
+      if (editFirst && server[editFirst]) { const it = items.find(x => x.name === editFirst); if (it && !it.draft) startEdit(it); }
+      editFirst = null;
       render();
     } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати сценарії: " + e.message)); }
+  }
+
+  // A scenario as GET /api/scenarios has it -> as PUT takes it (the runtime fields left out). The rest of the list is sent so.
+  const toPut = sc => {
+    const o = { name: sc.name, enabled: sc.enabled, trigger: sc.trigger, default_pause_s: sc.default_pause_s };
+    if (sc.when) o.when = sc.when;
+    if (sc.hours) o.hours = sc.hours;
+    if (sc.on_interrupt) o.on_interrupt = sc.on_interrupt;
+    o.steps = (sc.steps || []).map(st => { const x = { ...st }; if (x.pause_after_s == null) delete x.pause_after_s; return x; });
+    return o;
+  };
+  const dirty = it => it.draft && JSON.stringify(rowOut(it.draft)) !== it.clean;
+  window.onbeforeunload = () => items.some(dirty) ? true : undefined;
+
+  function startEdit(it) {
+    const sc = server[it.name];
+    it.draft = fromServer(sc);
+    it.base = JSON.stringify(toPut(sc));
+    it.clean = JSON.stringify(rowOut(it.draft));
+    it.msg = null;
   }
 
   async function poll() {   // only the run state (no step definitions: HTTP bodies can be long): edits in the form are not touched
@@ -505,15 +551,13 @@ function viewScenarios() {
     setTimeout(poll, 400);
   }
 
-  function validate() {
-    if (rows.length > limits.max) return "Забагато сценаріїв (максимум " + limits.max + ").";
-    const seen = new Set();
+  // The same rules as the firmware for one scenario (the firmware checks again); `it.name`: its name on the board (null: new).
+  function validate(it) {
+    const r = it.draft, at = "";
     const pauseOk = v => /^\d{1,4}$/.test(v) && Number(v) <= limits.pause;
-    for (const [i, r] of rows.entries()) {
-      const at = "Сценарій " + (i + 1) + (r.name ? " («" + r.name + "»)" : "") + ": ";
+    {
       if (!NAME_RE.test(r.name)) return at + "ім'я має бути 1–32 символи a-z, 0-9, _ або -.";
-      if (seen.has(r.name)) return at + "ім'я повторюється.";
-      seen.add(r.name);
+      if (r.name !== it.name && server[r.name]) return at + "сценарій з ім'ям «" + r.name + "» уже є.";
       if (!pauseOk(r.pause)) return at + "пауза за замовчуванням має бути числом 0–" + limits.pause + " с.";
       if (r.trigger === "power_below" || r.trigger === "power_above") {
         const w = r.when;
@@ -548,12 +592,8 @@ function viewScenarios() {
     return null;
   }
 
-  async function save() {
-    const err = validate();
-    if (err) { msg = { cls: "err", text: err }; render(); return; }
-    saving = true; msg = { cls: "warn", text: "Зберігаю…" }; render();
-    try {
-      const body = { scenarios: rows.map(r => ({ name: r.name, enabled: r.enabled, trigger: r.trigger, default_pause_s: Number(r.pause),
+  // The form of one scenario as PUT takes it.
+  const rowOut = r => ({ name: r.name, enabled: r.enabled, trigger: r.trigger, default_pause_s: Number(r.pause),
         ...(r.trigger === "power_below" || r.trigger === "power_above" ? { when: { device: r.when.device, watts: Number(r.when.watts), for_s: Number(r.when.for_s), warmup_s: Number(r.when.warmup_s) } } : {}),
         ...(r.trigger === "interval" ? { when: { every_s: Number(r.when.every_s) } } : {}),
         ...(r.trigger === "relay" ? { when: { device: r.when.device, to: r.when.to } } : {}),
@@ -567,18 +607,73 @@ function viewScenarios() {
           if (st.action === "http" && st.attempts !== "") o.attempts = Number(st.attempts);
           if (st.action === "http" && st.gap !== "") o.retry_gap_s = Number(st.gap);
           if (st.hours.on) o.hours = hoursOut(st.hours);
-          if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) })) };
-      const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-      msg = { cls: "ok", text: "Збережено: " + j.count + " сценарій(ів). Діє одразу, без перезапуску; сценарій, що вже виконується, доробить зі старими кроками." };
-      saving = false;
-      await load(false);
-    } catch (e) {
-      saving = false;
-      msg = { cls: "err", text: "Не збережено: " + e.message };
-      render();
+          if (st.pause !== "") o.pause_after_s = Number(st.pause); return o; }) });
+
+  // Puts the list the board has right now back with `change` applied to it (one scenario replaced, added or removed).
+  // `it.name` is the scenario's name on the board; a scenario someone else changed meanwhile is overwritten only on a yes.
+  async function putOne(it, change) {
+    const { j } = await getJson("/api/scenarios");
+    const list = j.scenarios.map(toPut);
+    const at = it.name ? list.findIndex(x => x.name === it.name) : -1;
+    if (at >= 0 && it.base && JSON.stringify(list[at]) !== it.base &&
+        !confirm("Сценарій «" + it.name + "» змінили на пристрої після того, як ви почали його редагувати (інша вкладка чи API). Перезаписати його вашою версією?")) return null;
+    const next = change(list, at);
+    if (!next) return null;
+    const r = await api("/api/scenarios", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scenarios: next }) });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(res.error || "HTTP " + r.status);
+    return res;
+  }
+
+  async function saveItem(it) {
+    const err = validate(it);
+    if (err) { it.msg = { cls: "err", text: "Не збережено: " + err }; render(); return; }
+    if (it.name && !dirty(it)) {  // nothing to send: no write to the card
+      it.draft = null; it.msg = { cls: "ok", text: "Змін немає: нічого не надсилалось." }; render(); show((box.classList.contains("dc") ? "dv-" : "sc-") + it.name); return;
     }
+    const mine = rowOut(it.draft);
+    saving = true; it.msg = { cls: "warn", text: "Зберігаю…" }; render();
+    try {
+      const res = await putOne(it, (list, at) => {
+        if (list.some((x, k) => x.name === mine.name && k !== at)) throw new Error("сценарій з ім'ям «" + mine.name + "» уже є на пристрої.");
+        if (at >= 0) list[at] = mine;
+        else if (list.length >= limits.max) throw new Error("на пристрої вже " + list.length + " сценаріїв (максимум " + limits.max + ").");
+        else list.push(mine);
+        return list;
+      });
+      if (!res) {
+        it.msg = { cls: "warn", text: "Не збережено: скасовано. Ваші зміни лишились у формі." };
+      } else {
+        it.name = mine.name; it.draft = null; it.base = null;
+        it.msg = { cls: "ok", text: "Збережено «" + mine.name + "». Діє одразу, без перезапуску; запуск, що вже йде, доробить зі старими кроками. Інші сценарії не змінювались." };
+      }
+    } catch (e) {
+      it.msg = { cls: "err", text: "Не збережено: " + e.message };
+    } finally {
+      saving = false;
+    }
+    await load();
+    show("sc-" + (it.draft && !it.name ? "new" : it.name));
+  }
+
+  async function deleteItem(it) {
+    if (!it.name) { items = items.filter(x => x !== it); render(); return; }  // never saved: nothing on the board
+    if (!confirm("Видалити сценарій «" + it.name + "» з пристрою? Якщо він зараз виконується, його буде зупинено. Інші сценарії не зміняться.")) return;
+    saving = true; it.msg = { cls: "warn", text: "Видаляю…" }; render();
+    try {
+      const res = await putOne(it, (list, at) => (at < 0 ? null : list.filter((x, k) => k !== at)));  // gone already: nothing to send
+      if (!res) {
+        it.msg = null;
+      } else {
+        items = items.filter(x => x !== it);
+        msg = { cls: "ok", text: "Сценарій «" + it.name + "» видалено." };
+      }
+    } catch (e) {
+      it.msg = { cls: "err", text: "Не видалено: " + e.message };
+    } finally {
+      saving = false;
+    }
+    await load();
   }
 
   function hoursError(h) {
@@ -815,7 +910,50 @@ function viewScenarios() {
         "тож пауза втрачає не більше 5 хв. Для сценарію «З'явилося живлення» після вмикання живлення «почати спочатку» і «не продовжувати» означають звичайний старт за тригером."));
   }
 
-  function card(r, i) {
+  // What starts a saved scenario, in one line.
+  function triggerText(sc) {
+    const w = sc.when || {};
+    const t = sc.trigger === "power_below" || sc.trigger === "power_above"
+      ? w.device + ": потужність " + (sc.trigger === "power_below" ? "нижче " : "вище ") + w.watts + " Вт протягом " + w.for_s + " с (розігрів " + w.warmup_s + " с)"
+      : sc.trigger === "relay" ? w.device + ": реле " + ((RELAY_TO.find(x => x[0] === w.to) || [0, w.to])[1])
+      : sc.trigger === "online" ? w.device + ": " + ((ONLINE_TO.find(x => x[0] === w.to) || [0, w.to])[1]) + (w.for_s ? ", протягом " + w.for_s + " с" : "")
+      : sc.trigger === "interval" ? "кожні " + fmtDur(w.every_s)
+      : sc.trigger === "cron" ? "розклад «" + w.cron + "»"
+      : sc.trigger === "power_on" ? "після вмикання живлення"
+      : sc.trigger === "manual" ? "лише вручну" : sc.trigger;
+    return t + (sc.hours ? " · лише " + sc.hours.from + "–" + sc.hours.to : "") + " · пауза між кроками " + sc.default_pause_s + " с";
+  }
+
+  // The steps of a saved scenario, one line each.
+  function stepsList(sc) {
+    const steps = sc.steps || [];
+    if (!steps.length) return E("p", { class: "mut", style: "margin:6px 0 0" }, "Кроків немає.");
+    return E("ol", { class: "ss" }, steps.map(st => {
+      const what = st.action === "wait" ? "почекати " + fmtDur(st.seconds)
+        : st.action === "http" ? "HTTP " + httpSummary(st) + (st.attempts || st.retry_gap_s ? " (спроб " + (st.attempts || limits.httpAttempts) + " через " + (st.retry_gap_s || limits.httpGap) + " с)" : "")
+        : st.device + " — " + (st.action === "off" ? "вимкнути" : "увімкнути") + (ignored.has(st.device) ? " (ігнорується)" : devNames.includes(st.device) ? "" : " (немає в списку пристроїв)");
+      const extra = [st.hours ? "лише " + st.hours.from + "–" + st.hours.to : "", st.action !== "wait" && st.pause_after_s != null ? "пауза " + st.pause_after_s + " с" : ""].filter(Boolean).join(", ");
+      return E("li", {}, E("span", { class: st.enabled === false ? "off" : "" }, what), st.enabled === false ? E("span", { class: "mut" }, " (вимкнено)") : "", extra ? E("span", { class: "mut" }, " · " + extra) : "");
+    }));
+  }
+
+  function card(it) {
+    if (it.draft) return editCard(it);
+    const sc = server[it.name];
+    const rb = E("div", { class: "rs" });
+    runBoxes.set(it.name, rb);
+    rb.replaceChildren(...runBlock(it.name));
+    return E("div", { class: "card", id: "sc-" + it.name },
+      E("div", { class: "sh" }, E("b", { class: "sn" }, sc.name), badge(sc.enabled ? "ok" : "n", sc.enabled ? "увімкнений" : "вимкнений"),
+        E("span", { class: "mut" }, TRIGGERS[sc.trigger] || sc.trigger), E("span", { class: "sp" }),
+        E("button", { type: "button", disabled: saving, onclick: () => { startEdit(it); render(); } }, "Редагувати")),
+      it.msg ? note(it.msg.cls, it.msg.text) : "",
+      E("div", { class: "mut" }, triggerText(sc)),
+      stepsList(sc), rb);
+  }
+
+  function editCard(it) {
+    const r = it.draft;
     const nameIn = E("input", { type: "text", value: r.name, maxlength: 32, placeholder: "наприклад power-restored", autocomplete: "off" });
     nameIn.addEventListener("input", () => { r.name = nameIn.value.trim(); });
     const en = E("input", { type: "checkbox", checked: r.enabled });
@@ -824,15 +962,16 @@ function viewScenarios() {
     trig.addEventListener("change", () => { r.trigger = trig.value; render(); });
     const pz = E("input", { type: "number", min: 0, max: limits.pause, value: r.pause });
     pz.addEventListener("input", () => { r.pause = pz.value.trim(); });
-    const unsaved = !r.orig || r.orig !== r.name;
     const rb = E("div", { class: "rs" });
-    if (r.orig) { runBoxes.set(r.orig, rb); rb.replaceChildren(...runBlock(r.orig)); }
-    return E("div", { class: "card" },
-      E("h2", {}, "Сценарій " + (i + 1) + (r.orig ? " · " + r.orig : " · новий"),
-        E("button", { type: "button", class: "d", disabled: saving, onclick: () => {
-          if (!confirm("Видалити сценарій «" + (r.name || "без імені") + "»? Зміна застосується після «Зберегти».")) return;
-          rows.splice(i, 1); render();
-        } }, "Видалити")),
+    if (it.name) { runBoxes.set(it.name, rb); rb.replaceChildren(...runBlock(it.name)); }
+    const cancel = () => {
+      if (dirty(it) && !confirm("Відкинути зміни в «" + (it.name || r.name || "новий сценарій") + "»?")) return;
+      if (it.name) { it.draft = null; it.msg = null; } else items = items.filter(x => x !== it);
+      render();
+      if (it.name) show("sc-" + it.name);
+    };
+    return E("div", { class: "card ed", id: "sc-" + (it.name || "new") },
+      E("div", { class: "sh" }, E("b", { class: "sn" }, it.name ? "Редагування: " + it.name : "Новий сценарій"), E("span", { class: "sp" })),
       E("div", { class: "fields" },
         field("Ім'я", nameIn, "a-z 0-9 _ -, до 32 символів, унікальне"),
         field("Тригер", trig, "що запускає сценарій автоматично"),
@@ -852,7 +991,13 @@ function viewScenarios() {
       r.steps.length ? r.steps.map((st, k) => stepRow(r, st, k)) : E("p", { class: "mut", style: "margin:0 0 8px" }, "Кроків ще немає."),
       E("div", { class: "row" }, E("button", { type: "button", disabled: saving || r.steps.length >= limits.steps, onclick: () => { r.steps.push(blankStep()); render(); } }, "Додати крок"),
         devNames.length ? "" : E("span", { class: "mut" }, "Пристроїв ще немає: крок буде HTTP-запитом.")),
-      r.orig ? E("div", {}, rb, unsaved ? E("p", { class: "mut", style: "margin:6px 0 0" }, "Запуск і зупинка діють на збережену версію.") : "") : "");
+      E("div", { class: "ft" },
+        it.msg ? E("div", { style: "flex-basis:100%" }, note(it.msg.cls, it.msg.text)) : "",
+        E("button", { type: "button", class: "p", disabled: saving, onclick: () => saveItem(it) }, it.name ? "Зберегти цей сценарій" : "Зберегти новий сценарій"),
+        E("button", { type: "button", disabled: saving, onclick: cancel }, "Скасувати"),
+        it.name ? E("button", { type: "button", class: "d", disabled: saving, onclick: () => deleteItem(it) }, "Видалити") : "",
+        E("span", { class: "mut" }, "Зберігається лише цей сценарій; інші не змінюються.")),
+      it.name ? E("div", {}, rb, E("p", { class: "mut", style: "margin:6px 0 0" }, "Запуск і зупинка діють на збережену версію.")) : "");
   }
 
   function render() {
@@ -869,13 +1014,17 @@ function viewScenarios() {
     out.push(E("p", { class: "mut", style: "margin:0 0 12px" }, "Ліміти: до " + limits.max + " сценаріїв, до " + limits.steps + " кроків у кожному, пауза після кроку 0–" +
       limits.pause + " с (" + fmtDur(limits.pause) + "), файл до " + fmtKb(limits.fileBytes) + ". Тригер споживання: поріг 0–" + limits.watts + " Вт, тривалість " +
       limits.forMin + "–" + limits.forMax + " с, розігрів 0–" + limits.warmup + " с. Історія запусків: до 2 × " + fmtKb(limits.historyBytes) + " на SD. " + limits.basis + " Усі ліміти: вкладка «Статус»."));
-    if (!rows.length) out.push(note("warn", "Сценаріїв ще немає. Натисніть «Додати сценарій»."));
-    rows.forEach((r, i) => out.push(card(r, i)));
+    if (!items.length) out.push(note("warn", "Сценаріїв ще немає. Натисніть «Додати сценарій»."));
+    items.forEach(it => out.push(card(it)));
+    const saved = Object.keys(server).length;
     out.push(E("div", { class: "row" },
-      E("button", { type: "button", disabled: saving || rows.length >= limits.max, onclick: () => { rows.push(blank()); msg = null; render(); } }, "Додати сценарій"),
-      E("button", { type: "button", class: "p", disabled: saving, onclick: save }, "Зберегти"),
-      E("button", { type: "button", disabled: saving, onclick: () => { msg = null; load(false); } }, "Скасувати зміни"),
-      E("span", { class: "mut" }, rows.length + " з " + limits.max)));
+      E("button", { type: "button", disabled: saving || saved + items.filter(x => !x.name).length >= limits.max, onclick: () => {
+        const it = { name: null, draft: blank(), base: null, msg: null };
+        it.clean = JSON.stringify(rowOut(it.draft));
+        items.push(it); msg = null; render();
+        const el = document.getElementById("sc-new"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      } }, "Додати сценарій"),
+      E("span", { class: "mut" }, saved + " з " + limits.max + " на пристрої")));
     out.push(hist.box);
     box.replaceChildren(...out);
     stamp();
@@ -940,7 +1089,11 @@ function viewScenarios() {
         "Запуски сценаріїв «Кожні N секунд» тут не показуються: їхня історія окрема (runs/interval/<ім'я>.jsonl), оберіть такий сценарій у списку.")));
   }
 
-  load(false).then(() => { every(poll, 3000); loadHistory(false); });
+  load().then(() => {
+    every(poll, 3000);
+    loadHistory(false);
+    if (params && params.get("edit")) { const el = document.getElementById("sc-" + params.get("edit")); if (el) el.scrollIntoView({ block: "start" }); }
+  });
 }
 
 // ---------------------------------------------------------------- devices
@@ -1045,6 +1198,7 @@ function viewDevices() {
       E("button", { class: "p", disabled: isBusy || on === true, onclick: () => act(d, "on") }, "Увімкнути"),
       E("button", { class: "d", disabled: isBusy || on === false, onclick: () => act(d, "off") }, "Вимкнути"),
       E("button", { disabled: isBusy, onclick: () => act(d, "status") }, "Оновити зараз"),
+      E("a", { class: "btn", href: "#devconfig?edit=" + encodeURIComponent(d.name), title: "IP, ключ, версія, опитування, показники цього пристрою" }, "Налаштувати"),
       E("span", { class: "mut" }, st.age_s != null && st.online ? "відповів " + fmtAge(st.age_s) + (st.latency_ms ? " · " + st.latency_ms + " мс" : "") : "")));
     const en = d.energy_since_boot;  // counted two ways side by side, to compare (the socket's own `energy` reading is above)
     if (en && (en.integrated_wh != null || en.reported_wh != null)) {
@@ -1147,38 +1301,69 @@ function viewDevices() {
 // ---------------------------------------------------------------- devices configuration
 // Edits /devices.json on the SD card (PUT /api/devices/config). The keys are never sent to the page:
 // an empty key field keeps the stored key of a device with the same name.
-function viewDevConfig() {
+function viewDevConfig(params) {
   const box = E("div", { class: "dc" });
   main.replaceChildren(box);
-  let rows = [];
+  // One item per device: `name` (as saved; null for a new one), `draft` (the form while it is edited, else null), `base` (the
+  // device as the board had it when the editing began), `msg`. Only the edited device is sent: the rest of the list goes back
+  // as the board has it right before the save, with an empty key (= keep the key it has).
+  let items = [], server = {}, order = [];
   let max = 16;
   let msg = null;      // { cls, text } shown on top, kept across re-renders
   let saving = false;
+  let editFirst = params && params.get("edit");
 
   const NAME_RE = /^[a-z0-9_-]{1,32}$/;
   const IP_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
   const blank = () => ({ orig: null, name: "", ip: "", key: "", key_set: false, version: "3.4", dp: 1, ignore: false, keep_connected: false, updatedps: true, poll_s: "", meters: { power: "", current: "", voltage: "", energy: "" } });
   const mstr = v => (v == null ? "" : String(v));
 
+  const fromServer = d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false, poll_s: d.poll_s != null ? String(d.poll_s) : "",
+    meters: { power: mstr(d.meters && d.meters.power), current: mstr(d.meters && d.meters.current), voltage: mstr(d.meters && d.meters.voltage), energy: mstr(d.meters && d.meters.energy) } });
+  // A device as GET /api/devices/config has it -> as PUT takes it, with an empty key: the board keeps the key of that name.
+  const toPut = d => ({ name: d.name, ip: d.ip, key: "", version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected,
+    updatedps: d.updatedps !== false, poll_s: d.poll_s == null ? null : d.poll_s, meters: d.meters || {} });
+  const rowOut = r => {
+    const meters = {};
+    for (const [k, v] of Object.entries(r.meters)) meters[k] = v === "" ? null : Number(v);  // empty = standard number
+    return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, updatedps: !!r.updatedps, poll_s: r.poll_s === "" ? null : Number(r.poll_s), meters };
+  };
+  const dirty = it => it.draft && JSON.stringify(rowOut(it.draft)) !== it.clean;
+  window.onbeforeunload = () => items.some(dirty) ? true : undefined;
+
+  function startEdit(it) {
+    it.draft = fromServer(server[it.name]);
+    it.base = JSON.stringify(toPut(server[it.name]));
+    it.clean = JSON.stringify(rowOut(it.draft));
+    it.msg = null;
+  }
+
   async function load() {
     try {
       const { j } = await getJson("/api/devices/config");
       max = j.max || 16;
-      rows = j.devices.map(d => ({ orig: d.name, name: d.name, ip: d.ip, key: "", key_set: !!d.key_set, version: d.version, dp: d.dp, ignore: !!d.ignore, keep_connected: !!d.keep_connected, updatedps: d.updatedps !== false, poll_s: d.poll_s != null ? String(d.poll_s) : "",
-        meters: { power: mstr(d.meters && d.meters.power), current: mstr(d.meters && d.meters.current), voltage: mstr(d.meters && d.meters.voltage), energy: mstr(d.meters && d.meters.energy) } }));
+      server = Object.fromEntries(j.devices.map(d => [d.name, d]));
+      order = j.devices.map(d => d.name);
+      const old = new Map(items.filter(it => it.name).map(it => [it.name, it]));
+      const next = order.map(n => old.get(n) || { name: n, draft: null, base: null, msg: null });
+      for (const it of items) {
+        if (!it.name) next.push(it);
+        else if (!server[it.name] && it.draft) next.push(Object.assign(it, { msg: { cls: "warn", text: "Цього пристрою на платі вже немає (видалили в іншій вкладці?). «Зберегти» додасть його знову, але потрібен ключ." } }));
+      }
+      items = next;
+      if (editFirst && server[editFirst]) { const it = items.find(x => x.name === editFirst); if (it && !it.draft) startEdit(it); }
       render();
+      if (editFirst) { const el = document.getElementById("dv-" + editFirst); if (el) el.scrollIntoView({ block: "start" }); }
+      editFirst = null;
     } catch (e) { box.replaceChildren(note("err", "Не вдалося отримати список: " + e.message)); }
   }
 
-  // Same rules as the firmware; the firmware checks again.
-  function validate() {
-    if (rows.length > max) return "Забагато пристроїв (максимум " + max + ").";
-    const seen = new Set();
-    for (const [i, r] of rows.entries()) {
-      const at = "Пристрій " + (i + 1) + (r.name ? " («" + r.name + "»)" : "") + ": ";
+  // Same rules as the firmware for one device; the firmware checks again.
+  function validate(it) {
+    const r = it.draft, at = "";
+    {
       if (!NAME_RE.test(r.name)) return at + "ім'я має бути 1–32 символи a-z, 0-9, _ або -.";
-      if (seen.has(r.name)) return at + "ім'я повторюється.";
-      seen.add(r.name);
+      if (r.name !== it.name && server[r.name]) return at + "пристрій з ім'ям «" + r.name + "» уже є.";
       if (!IP_RE.test(r.ip.trim())) return at + "IP має бути адресою IPv4, наприклад 192.168.1.20.";
       const inherits = r.key === "" && r.orig === r.name && r.key_set;
       if (!inherits && r.key.length !== 16) return at + (r.key === "" ? "потрібен ключ (16 символів), бо це новий або перейменований пристрій." : "ключ має бути рівно 16 символів, зараз " + r.key.length + ".");
@@ -1192,38 +1377,98 @@ function viewDevConfig() {
     return null;
   }
 
-  async function save() {
-    const err = validate();
-    if (err) { msg = { cls: "err", text: err }; render(); return; }
-    saving = true; msg = { cls: "warn", text: "Зберігаю…" }; render();
-    try {
-      const body = { devices: rows.map(r => {
-        const meters = {};
-        for (const [k, v] of Object.entries(r.meters)) if (v !== "") meters[k] = Number(v);  // empty = standard number, left out
-        return { name: r.name, ip: r.ip.trim(), key: r.key, version: r.version, dp: Number(r.dp), ignore: !!r.ignore, keep_connected: !!r.keep_connected, updatedps: !!r.updatedps, poll_s: r.poll_s === "" ? null : Number(r.poll_s), meters };
-      }) };
-      const r = await api("/api/devices/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-      msg = { cls: "ok", text: "Збережено: " + j.count + " пристрій(ів). Зміни застосовано без перезапуску; стан нових пристроїв з'явиться після першого опитування." };
-      if (j.warnings && j.warnings.length) {  // scenarios that name a device which is not in the list any more
-        msg = { cls: "warn", text: "Збережено: " + j.count + " пристрій(ів), але сценарії посилаються на пристрої, яких тепер немає. Ці кроки не спрацюють, поки ви не виправите сценарії (вкладка «Сценарії»): " +
-          j.warnings.join("; ") };
-      }
-      saving = false;
-      await load();
-    } catch (e) {
-      saving = false;
-      msg = { cls: "err", text: "Не збережено: " + e.message };
-      render();
+  // Puts the list the board has right now back with `change` applied (one device replaced, added or removed). A device someone
+  // else changed meanwhile is overwritten only on a yes.
+  async function putOne(it, change) {
+    const { j } = await getJson("/api/devices/config");
+    const list = j.devices.map(toPut);
+    const at = it.name ? list.findIndex(x => x.name === it.name) : -1;
+    if (at >= 0 && it.base && JSON.stringify(list[at]) !== it.base &&
+        !confirm("Пристрій «" + it.name + "» змінили на платі після того, як ви почали його редагувати (інша вкладка чи API). Перезаписати його вашою версією?")) return null;
+    const next = change(list, at);
+    if (!next) return null;
+    const r = await api("/api/devices/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ devices: next }) });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(res.error || "HTTP " + r.status);
+    return res;
+  }
+  // Scenarios that name a device which is not in the list any more.
+  const warned = res => res.warnings && res.warnings.length ? " Але сценарії посилаються на пристрої, яких тепер немає, ці кроки не спрацюють, поки ви не виправите сценарії (вкладка «Сценарії»): " + res.warnings.join("; ") : "";
+
+  async function saveItem(it) {
+    const err = validate(it);
+    if (err) { it.msg = { cls: "err", text: "Не збережено: " + err }; render(); return; }
+    if (it.name && !dirty(it)) {  // nothing to send: no write to the card
+      it.draft = null; it.msg = { cls: "ok", text: "Змін немає: нічого не надсилалось." }; render(); show((box.classList.contains("dc") ? "dv-" : "sc-") + it.name); return;
     }
+    const mine = rowOut(it.draft);
+    saving = true; it.msg = { cls: "warn", text: "Зберігаю…" }; render();
+    try {
+      const res = await putOne(it, (list, at) => {
+        if (list.some((x, k) => x.name === mine.name && k !== at)) throw new Error("пристрій з ім'ям «" + mine.name + "» уже є.");
+        if (at >= 0) list[at] = mine;
+        else if (list.length >= max) throw new Error("на платі вже " + list.length + " пристроїв (максимум " + max + ").");
+        else list.push(mine);
+        return list;
+      });
+      if (!res) {
+        it.msg = { cls: "warn", text: "Не збережено: скасовано. Ваші зміни лишились у формі." };
+      } else {
+        const w = warned(res);
+        it.name = mine.name; it.draft = null; it.base = null;
+        it.msg = { cls: w ? "warn" : "ok", text: "Збережено «" + mine.name + "». Застосовано без перезапуску; інші пристрої не змінювались." + w };
+      }
+    } catch (e) {
+      it.msg = { cls: "err", text: "Не збережено: " + e.message };
+    } finally {
+      saving = false;
+    }
+    await load();
+    show("dv-" + (it.draft && !it.name ? "new" : it.name));
+  }
+
+  async function deleteItem(it) {
+    if (!it.name) { items = items.filter(x => x !== it); render(); return; }
+    if (!confirm("Видалити «" + it.name + "» зі списку пристроїв? Його ключ буде втрачено: повернути пристрій можна лише ввівши ключ знову. Інші пристрої не зміняться.")) return;
+    saving = true; it.msg = { cls: "warn", text: "Видаляю…" }; render();
+    try {
+      const res = await putOne(it, (list, at) => (at < 0 ? null : list.filter((x, k) => k !== at)));  // gone already: nothing to send
+      if (!res) {
+        it.msg = null;
+      } else {
+        const w = warned(res);
+        items = items.filter(x => x !== it);
+        msg = { cls: w ? "warn" : "ok", text: "Пристрій «" + it.name + "» видалено." + w };
+      }
+    } catch (e) {
+      it.msg = { cls: "err", text: "Не видалено: " + e.message };
+    } finally {
+      saving = false;
+    }
+    await load();
   }
 
   function field(label, input, hint) {
     return E("div", { class: "f" }, E("label", {}, label), input, hint ? E("small", {}, hint) : null);
   }
 
-  function card(r, i) {
+  // A saved device in one card: what it is set up as, and the buttons.
+  function card(it) {
+    if (it.draft) return editCard(it);
+    const d = server[it.name];
+    const ms = METERS.map(([k, label]) => d.meters && d.meters[k] != null ? label.toLowerCase() + " DP " + d.meters[k] : "").filter(Boolean);
+    const flags = [d.keep_connected ? "тримати з'єднання" : "", d.updatedps === false ? "без UPDATEDPS" : "UPDATEDPS",
+      d.poll_s == null ? "опитування кожен цикл" : d.poll_s === 0 ? "без опитування (лише push)" : "опитування раз на " + d.poll_s + " с"].filter(Boolean);
+    return E("div", { class: "card", id: "dv-" + it.name },
+      E("div", { class: "sh" }, E("b", { class: "sn" }, d.name), d.ignore ? badge("warn", "ігнорується") : "",
+        E("span", { class: "mut" }, d.ip + " · версія " + d.version + " · DP " + d.dp), E("span", { class: "sp" }),
+        E("button", { type: "button", disabled: saving, onclick: () => { startEdit(it); render(); } }, "Редагувати")),
+      it.msg ? note(it.msg.cls, it.msg.text) : "",
+      E("div", { class: "mut" }, flags.join(" · ") + (ms.length ? " · показники: " + ms.join(", ") : " · показники: стандартні DP")));
+  }
+
+  function editCard(it) {
+    const r = it.draft;
     const nameIn = E("input", { type: "text", value: r.name, maxlength: 32, placeholder: "наприклад towel", autocomplete: "off" });
     const ipIn = E("input", { type: "text", value: r.ip, maxlength: 15, placeholder: "192.168.1.20", inputmode: "decimal", autocomplete: "off" });
     const keyIn = E("input", { type: "password", value: r.key, maxlength: 16, autocomplete: "new-password" });
@@ -1256,12 +1501,14 @@ function viewDevConfig() {
     keyIn.addEventListener("input", () => { r.key = keyIn.value; });
     verIn.addEventListener("change", () => { r.version = verIn.value; });
     dpIn.addEventListener("input", () => { r.dp = dpIn.value; });
-    return E("div", { class: "card" },
-      E("h2", {}, "Пристрій " + (i + 1) + (r.orig ? " · " + r.orig : " · новий"),
-        E("button", { type: "button", class: "d", disabled: saving, onclick: () => {
-          if (!confirm("Видалити «" + (r.name || "без імені") + "» зі списку? Зміна застосується після «Зберегти».")) return;
-          rows.splice(i, 1); render();
-        } }, "Видалити")),
+    const cancel = () => {
+      if (dirty(it) && !confirm("Відкинути зміни в «" + (it.name || r.name || "новий пристрій") + "»?")) return;
+      if (it.name) { it.draft = null; it.msg = null; } else items = items.filter(x => x !== it);
+      render();
+      if (it.name) show("dv-" + it.name);
+    };
+    return E("div", { class: "card ed", id: "dv-" + (it.name || "new") },
+      E("div", { class: "sh" }, E("b", { class: "sn" }, it.name ? "Редагування: " + it.name : "Новий пристрій"), E("span", { class: "sp" })),
       E("div", { class: "fields" },
         field("Ім'я", nameIn, "a-z 0-9 _ -, до 32 символів, унікальне"),
         field("IP-адреса", ipIn, "зарезервуйте її на роутері"),
@@ -1281,7 +1528,13 @@ function viewDevConfig() {
           mField("power", "потужності"), mField("current", "струму"), mField("voltage", "напруги"), mField("energy", "енергії")),
         E("p", { class: "mut", style: "margin:8px 0 0" }, "Порожньо: стандартний номер для розеток Tuya. 0: у цього пристрою такого показника немає. " +
           "Різні моделі нумерують їх по-різному, номери видно у «Усі data points» на вкладці «Пристрої». " +
-          "Одиниці стандартні: потужність 0,1 Вт, струм мА, напруга 0,1 В, енергія 0,001 кВт·год; якщо числа не збігаються з додатком виробника, значить номер вказано не той.")));
+          "Одиниці стандартні: потужність 0,1 Вт, струм мА, напруга 0,1 В, енергія 0,001 кВт·год; якщо числа не збігаються з додатком виробника, значить номер вказано не той.")),
+      E("div", { class: "ft" },
+        it.msg ? E("div", { style: "flex-basis:100%" }, note(it.msg.cls, it.msg.text)) : "",
+        E("button", { type: "button", class: "p", disabled: saving, onclick: () => saveItem(it) }, it.name ? "Зберегти цей пристрій" : "Зберегти новий пристрій"),
+        E("button", { type: "button", disabled: saving, onclick: cancel }, "Скасувати"),
+        it.name ? E("button", { type: "button", class: "d", disabled: saving, onclick: () => deleteItem(it) }, "Видалити") : "",
+        E("span", { class: "mut" }, "Зберігається лише цей пристрій; інші не змінюються.")));
   }
 
   function render() {
@@ -1290,13 +1543,16 @@ function viewDevConfig() {
     out.push(E("div", { class: "row" },
       E("a", { class: "btn", href: "#devices" }, "← До пристроїв"),
       E("span", { class: "mut" }, "Список зберігається лише на SD-картці (devices.json), не у флеші. Ключі ніколи не повертаються на цю сторінку.")));
-    if (!rows.length) out.push(note("warn", "Пристроїв ще немає. Натисніть «Додати пристрій»."));
-    rows.forEach((r, i) => out.push(card(r, i)));
+    if (!items.length) out.push(note("warn", "Пристроїв ще немає. Натисніть «Додати пристрій»."));
+    items.forEach(it => out.push(card(it)));
     out.push(E("div", { class: "row" },
-      E("button", { type: "button", disabled: saving || rows.length >= max, onclick: () => { rows.push(blank()); msg = null; render(); } }, "Додати пристрій"),
-      E("button", { type: "button", class: "p", disabled: saving, onclick: save }, "Зберегти"),
-      E("button", { type: "button", disabled: saving, onclick: () => { msg = null; load(); } }, "Скасувати зміни"),
-      E("span", { class: "mut" }, rows.length + " з " + max)));
+      E("button", { type: "button", disabled: saving || order.length + items.filter(x => !x.name).length >= max, onclick: () => {
+        const it = { name: null, draft: blank(), base: null, msg: null };
+        it.clean = JSON.stringify(rowOut(it.draft));
+        items.push(it); msg = null; render();
+        const el = document.getElementById("dv-new"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      } }, "Додати пристрій"),
+      E("span", { class: "mut" }, order.length + " з " + max + " на платі")));
     box.replaceChildren(...out);
     stamp();
   }
@@ -1724,10 +1980,11 @@ function viewApi() {
 const views = { status: viewStatus, devices: viewDevices, scenarios: viewScenarios, devconfig: viewDevConfig, config: viewConfig, logs: viewLogs, api: viewApi };
 function route() {
   clearTimers();
-  const t = (location.hash || "#status").slice(1);
+  window.onbeforeunload = null;
+  const [t, q] = (location.hash || "#status").slice(1).split("?");
   const v = views[t] ? t : "status";
   document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("on", a.dataset.t === (v === "devconfig" ? "devices" : v)));
-  views[v]();
+  views[v](new URLSearchParams(q || ""));
 }
 window.addEventListener("hashchange", route);
 route();
