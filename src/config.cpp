@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include "posix_tz.h"
 #include "psram_alloc.h"
 #include "storage.h"
 
@@ -171,6 +172,16 @@ bool parse(const String& json, AppConfig& out, String& err, const AppConfig* kee
   JsonVariantConst t = r["time"];
   if (!readStr(t["ntp"], "time.ntp", c.time.ntp, 64, err)) return false;
   if (!readStr(t["tz"], "time.tz", c.time.tz, 64, err)) return false;
+  std::string why;
+  if (!PosixTz::valid(c.time.tz.c_str(), why)) {
+    if (keep) {  // a save (PUT): rejected
+      err = String("time.tz ") + why.c_str() + " (a POSIX TZ string, e.g. UTC0 or EET-2EEST,M3.5.0/3,M10.5.0/4)";
+      return false;
+    }
+    // A file written before the check (or by hand): not a reason to set the whole config aside and lose Wi-Fi.
+    LOGW(TAG, "time.tz '%s' %s: UTC0 is used", c.time.tz.c_str(), why.c_str());
+    c.time.tz = "UTC0";
+  }
 
   out = c;
   return true;
@@ -371,12 +382,22 @@ SaveResult saveFromJson(const String& json) {
 
   if (r.ok) {
     const String nextText = toJson(next, true, false);
+    String tzWas;
     {
       Lock lock;
       gSaved = next;
+      // time.tz takes effect at once (like the web credentials): the active config follows, so it needs no restart.
+      if (next.time.tz != gActive.time.tz) {
+        tzWas = gActive.time.tz;
+        setenv("TZ", next.time.tz.c_str(), 1);
+        tzset();
+        gActive.time.tz = next.time.tz;
+        gActiveText = toJson(gActive, true, false);
+      }
       gPending = nextText != gActiveText;
     }
     LOGI(TAG, "config saved (sd=%d flash=%d)", r.sd, r.flash);
+    if (!tzWas.isEmpty()) LOGI(TAG, "time zone changed from '%s' to '%s': local time from now on", tzWas.c_str(), next.time.tz.c_str());
   } else {
     LOGE(TAG, "config save failed: %s", r.error.c_str());
   }

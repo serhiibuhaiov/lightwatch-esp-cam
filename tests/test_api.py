@@ -174,6 +174,7 @@ BAD_VALUES = [
     ("device.web_user", ""),
     ("wifi.ssid", "s" * 33),
     ("time.ntp", "n" * 65),
+    ("time.tz", "UTC"), ("time.tz", "Europe/Kyiv"), ("time.tz", "EET-2EEST,M3.5.0/3"), ("time.tz", ""),
 ]
 
 
@@ -234,6 +235,22 @@ def test_put_roundtrip_and_pending_flag(dev, baseline):
         assert r.status_code == 200, r.text
     assert dev.config() == saved
     assert r.json()["restart_required"] is baseline["pending"]
+    assert dev.pending() is baseline["pending"]
+
+
+def test_time_zone_takes_effect_without_a_restart(dev, baseline):
+    saved, active = baseline["saved"], baseline["active"]
+    other = "<+05>-5" if saved["time"]["tz"] != "<+05>-5" else "UTC0"
+    try:
+        r = dev.put(with_value(saved, "time.tz", other))
+        assert r.status_code == 200, r.text
+        assert r.json()["restart_required"] is baseline["pending"]  # time.tz alone needs no restart
+        assert dev.config(active=True)["time"]["tz"] == other
+        assert dev.config(active=True)["startup"] == active["startup"]
+    finally:
+        r = dev.put(saved)
+        assert r.status_code == 200, r.text
+    assert dev.config(active=True)["time"]["tz"] == saved["time"]["tz"]
     assert dev.pending() is baseline["pending"]
 
 

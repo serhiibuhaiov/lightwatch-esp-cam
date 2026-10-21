@@ -70,7 +70,7 @@ const char* sourceName(Source s);    // for logs and the status endpoint
 AppConfig snapshot();
 
 // The SAVED configuration (SD/flash): the active one plus whatever PUT changed
-// since boot. It takes effect after a restart.
+// since boot. It takes effect after a restart, except time.tz, which the save applies at once.
 AppConfig savedSnapshot();
 
 // True when the saved configuration differs from the active one.
