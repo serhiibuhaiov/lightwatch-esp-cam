@@ -483,6 +483,11 @@ def test_cached_state_after_a_status_query(dev, target):
 @pytest.mark.tuya
 def test_background_poll_refreshes_the_state(dev, target):
     interval = dev.get("/api/devices").json()["poll_interval_s"]
+    own = next(d for d in dev.get("/api/devices/config").json()["devices"] if d["name"] == target["name"]).get("poll_s")
+    if own:  # the device's own "poll every N s" (poll_s 0: no polling at all, only pushes)
+        interval = max(interval, own)
+    elif own == 0:
+        pytest.skip(f"{target['name']} has poll_s 0: the monitor does not poll it")
     deadline = time.time() + interval + 20
     first = listed(dev, target)["state"]["last_try_age_s"]
     while time.time() < deadline:
@@ -491,7 +496,7 @@ def test_background_poll_refreshes_the_state(dev, target):
         if age < first:  # the age dropped: a new query ran without us asking
             return
         first = age
-    pytest.fail("no background poll within monitor.interval_s")
+    pytest.fail(f"no background poll within {interval} s (monitor.interval_s, or the device's poll_s)")
 
 
 @pytest.mark.tuya

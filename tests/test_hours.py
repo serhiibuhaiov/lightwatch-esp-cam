@@ -115,13 +115,15 @@ def test_a_step_outside_its_hours_is_skipped_and_one_inside_goes(dev, guard, fak
     steps = [{"device": FAKE_NAME, "action": "off", "hours": outside(dev), "pause_after_s": 600},
              {"device": FAKE_NAME, "action": "off", "hours": inside(dev)}]
     assert put(dev, guard + [manual(name, steps)]).status_code == 200
+    after = last_id(dev, name)  # the history keeps runs of this name from earlier sessions
     before = len(fake.commands)
     s = run(dev, name)
     first, second = s["run_steps"]
     assert first["state"] == "skipped" and first["attempts"] == 0 and first["detail"].startswith("outside the hours "), first
     assert second["state"] == "ok", second  # right after: no 600 s pause after the skipped step
     assert [c for _, c in fake.commands[before:]] == [{"1": False}]  # the second step only
-    hist = runs(dev, name)[0]
+    assert wait_until(lambda: runs(dev, name, after), 10)
+    hist = runs(dev, name, after)[0]
     assert hist["skipped"] == 1 and hist["steps"][0]["state"] == "skipped", hist
 
 
@@ -178,12 +180,13 @@ def cron(name, expr="* * * * *", **kw):
 
 def test_cron_starts_the_scenario_at_the_minute(dev, guard):
     name = TEST + "cron"
+    after = last_id(dev, name)  # the history keeps runs of this name from earlier sessions
     assert put(dev, guard + [cron(name)]).status_code == 200
     assert wait_until(lambda: scn(dev, name).get("watch", {}).get("next"), 10), scn(dev, name)
     w = scn(dev, name)["watch"]
     assert w["reason"] == "watching" and len(w["next"]) == 16 and w["next"][10] == "T", w
-    assert wait_until(lambda: runs(dev, name), 75, step=2), scn(dev, name)
-    hist = runs(dev, name)[0]
+    assert wait_until(lambda: runs(dev, name, after), 75, step=2), scn(dev, name)
+    hist = runs(dev, name, after)[0]
     assert hist["trigger"] == "cron" and hist["result"] == "done", hist
     log = dev.get("/api/logs", params={"file": "current", "tail": 16384}).text
     assert f"[{name}] cron '* * * * *' at " in log
@@ -191,8 +194,9 @@ def test_cron_starts_the_scenario_at_the_minute(dev, guard):
 
 def test_cron_outside_its_hours_starts_nothing(dev, guard):
     name = TEST + "cronh"
+    after = last_id(dev, name)
     assert put(dev, guard + [cron(name, hours=outside(dev))]).status_code == 200
     time.sleep(70)
-    assert runs(dev, name) == [], runs(dev, name)
+    assert runs(dev, name, after) == [], runs(dev, name, after)
     log = dev.get("/api/logs", params={"file": "current", "tail": 16384}).text
     assert f"[{name}] cron '* * * * *' at " in log and "outside the hours" in log
