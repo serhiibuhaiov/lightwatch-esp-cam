@@ -71,6 +71,8 @@ class FakeEnv : public Env {
   uint32_t epochNow = 0;  // 0: the clock is not set
   uint32_t epoch() override { return epochNow ? epochNow + (now - epochAtMs) / 1000 : 0; }
   uint32_t epochAtMs = 0;
+  int minute = 600;  // the local time of day (10:00); -1: no clock
+  int localMinute() override { return minute; }
   void setClock(uint32_t unix) {
     epochNow = unix;
     epochAtMs = now;
@@ -285,6 +287,14 @@ void setDefs(std::vector<Def> defs) {
   env->defs.clear();
   for (Def& d : defs) env->defs[d.name] = d;
   eng->defsChanged();
+}
+
+TimeWindow::Window hours(const char* from, const char* to, uint16_t clockWaitMin = TimeWindow::kDefaultClockWaitMin) {
+  TimeWindow::Window w;
+  TimeWindow::parseClock(from, w.from);
+  TimeWindow::parseClock(to, w.to);
+  w.clockWaitMin = clockWaitMin;
+  return w;
 }
 
 const Run& R(const std::string& name) { return *eng->run(name); }
@@ -981,6 +991,249 @@ void test_a_wait_has_a_label_and_its_seconds_are_in_the_hash() {
   TEST_ASSERT_TRUE(defHash(def("s", {wait(45)})) != defHash(def("s", {wait(46)})));
 }
 
+// ---- hours (steps and the start of a run) ------------------------------------------------------------------------------
+
+void test_a_step_outside_its_hours_is_skipped_with_no_pause_and_the_run_goes_on() {
+  env->devices["a"] = FakeDevice();
+  env->devices["b"] = FakeDevice();
+  Def d = def("s", {step("a", true, 600), step("b")});
+  d.steps[0].hours = hours("05:00", "21:00");
+  setDefs({d});
+  env->minute = 22 * 60 + 14;
+  eng->start("s", "manual", env->now);
+  runFor(3000);
+  assertState(RunState::Done, "s");  // no 600 s pause after the skipped step
+  assertStep(StepState::Skipped, "s", 0);
+  TEST_ASSERT_EQUAL_STRING("outside the hours 05:00-21:00 (now 22:14)", stepDetail(R("s"), 0).c_str());
+  TEST_ASSERT_EQUAL_UINT8(0, R("s").steps[0].attempts);
+  assertStep(StepState::Ok, "s", 1);
+  TEST_ASSERT_EQUAL_UINT(1, R("s").skipped);
+  TEST_ASSERT_FALSE(env->devices["a"].relay);  // nothing went to it
+  TEST_ASSERT_TRUE(env->devices["b"].relay);
+  env->minute = 5 * 60;  // inside: the step goes, then its pause
+  eng->start("s", "manual", env->now);
+  runFor(3000);
+  assertStep(StepState::Ok, "s", 0);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+  assertState(RunState::Running, "s");  // in its pause
+}
+
+void test_the_hours_of_a_step_are_looked_at_once_after_the_pause_before_it() {
+  env->devices["a"] = FakeDevice();
+  env->devices["b"] = FakeDevice();
+  env->devices["b"].noEffect = true;
+  Def d = def("s", {step("a", true, 120), step("b")});
+  d.steps[1].hours = hours("22:00", "06:00");  // over midnight
+  setDefs({d});
+  env->minute = 21 * 60 + 59;
+  eng->start("s", "manual", env->now);
+  runFor(60000);
+  env->minute = 22 * 60 + 1;  // the pause ends inside the hours
+  runFor(61000);
+  env->minute = 6 * 60;  // the hours end while the step is being tried: its attempts go on
+  runFor(15000);
+  assertStep(StepState::Failed, "s", 1);
+  TEST_ASSERT_EQUAL_UINT8(3, R("s").steps[1].attempts);
+}
+
+void test_a_step_waits_for_the_clock_then_goes_or_is_skipped() {
+  env->devices["a"] = FakeDevice();
+  Def d = def("s", {step("a")});
+  d.steps[0].hours = hours("05:00", "21:00", 10);
+  setDefs({d});
+  env->minute = -1;
+  eng->start("s", "manual", env->now);
+  runFor(60000);
+  assertState(RunState::Running, "s");
+  assertStep(StepState::Running, "s", 0);
+  TEST_ASSERT_EQUAL_STRING("clock", R("s").waitReason.c_str());
+  TEST_ASSERT_EQUAL_INT(0, R("s").current);
+  TEST_ASSERT_EQUAL_STRING("waiting for the clock for the hours 05:00-21:00", stepDetail(R("s"), 0).c_str());
+  TEST_ASSERT_TRUE(env->sent.empty());
+  env->minute = 6 * 60;  // NTP
+  runFor(3000);
+  assertStep(StepState::Ok, "s", 0);
+  TEST_ASSERT_TRUE(R("s").waitReason.empty());
+  env->minute = -1;  // and no clock for the whole wait
+  eng->start("s", "manual", env->now);
+  runFor(9 * 60000);
+  assertState(RunState::Running, "s");
+  runFor(61000);
+  assertState(RunState::Done, "s");
+  assertStep(StepState::Skipped, "s", 0);
+  TEST_ASSERT_EQUAL_STRING("no clock for the hours 05:00-21:00 (waited 10 min)", stepDetail(R("s"), 0).c_str());
+}
+
+void test_clock_wait_min_0_skips_at_once_and_a_stop_ends_the_wait_for_the_clock() {
+  env->devices["a"] = FakeDevice();
+  Def d = def("s", {step("a"), step("a", false)});
+  d.steps[0].hours = hours("05:00", "21:00", 0);
+  d.steps[1].hours = hours("05:00", "21:00", 30);
+  setDefs({d});
+  env->minute = -1;
+  eng->start("s", "manual", env->now);
+  runFor(2000);
+  assertStep(StepState::Skipped, "s", 0);
+  assertStep(StepState::Running, "s", 1);
+  eng->stop("s");
+  runFor(100);
+  assertState(RunState::Stopped, "s");
+  assertStep(StepState::Stopped, "s", 1);
+  TEST_ASSERT_TRUE(env->sent.empty());
+}
+
+void test_a_run_starts_only_inside_the_scenarios_hours_but_by_hand_always() {
+  env->devices["a"] = FakeDevice();
+  Def d = def("s", {step("a")});
+  d.hours = hours("05:00", "21:00");
+  setDefs({d});
+  env->minute = 23 * 60;
+  eng->start("s", "relay-on", env->now);
+  runFor(2000);
+  assertState(RunState::Skipped, "s");
+  TEST_ASSERT_EQUAL_STRING("outside the hours 05:00-21:00 (now 23:00)", R("s").skipReason.c_str());
+  TEST_ASSERT_TRUE(env->sent.empty());
+  TEST_ASSERT_EQUAL_UINT(1, env->history.size());  // in the history as a skipped run
+  eng->start("s", "manual", env->now);
+  runFor(3000);
+  assertState(RunState::Done, "s");
+  env->minute = 20 * 60;
+  eng->start("s", "relay-on", env->now);
+  runFor(3000);
+  assertState(RunState::Done, "s");
+}
+
+void test_a_run_waits_for_the_clock_for_its_hours_and_by_hand_goes_at_once() {
+  env->devices["a"] = FakeDevice();
+  Def d = def("s", {step("a")});
+  d.hours = hours("05:00", "21:00", 5);
+  setDefs({d});
+  env->minute = -1;
+  eng->start("s", "device-online", env->now);
+  runFor(60000);
+  assertState(RunState::Waiting, "s");
+  TEST_ASSERT_EQUAL_STRING("clock", R("s").waitReason.c_str());
+  env->minute = 22 * 60;  // the clock comes, outside the hours
+  runFor(2000);
+  assertState(RunState::Skipped, "s");
+  env->minute = -1;
+  eng->start("s", "device-online", env->now);
+  runFor(5 * 60000 + 1000);
+  assertState(RunState::Skipped, "s");
+  TEST_ASSERT_EQUAL_STRING("no clock for the hours 05:00-21:00 (waited 5 min)", R("s").skipReason.c_str());
+  eng->start("s", "device-online", env->now);
+  runFor(1000);
+  assertState(RunState::Waiting, "s");
+  TEST_ASSERT_TRUE(eng->start("s", "manual", env->now) == Engine::StartResult::Started);  // by hand: no waiting
+  runFor(3000);
+  assertState(RunState::Done, "s");
+  eng->start("s", "device-online", env->now);
+  runFor(1000);
+  eng->stop("s");
+  runFor(100);
+  assertState(RunState::Stopped, "s");
+}
+
+void test_a_power_up_run_looks_at_its_hours_after_wifi_and_the_settle_time() {
+  env->devices["a"] = FakeDevice();
+  Def d = def("p", {step("a")});
+  d.hours = hours("05:00", "21:00");
+  setDefs({d});
+  env->wifi = false;
+  env->minute = -1;
+  eng->start("p", "power-on", env->now);
+  runFor(30000);
+  TEST_ASSERT_EQUAL_STRING("wifi", R("p").waitReason.c_str());
+  env->wifi = true;
+  runFor(11000);
+  TEST_ASSERT_EQUAL_STRING("clock", R("p").waitReason.c_str());
+  env->minute = 7 * 60;
+  runFor(3000);
+  assertState(RunState::Done, "p");
+  TEST_ASSERT_TRUE(R("p").patient);
+  TEST_ASSERT_TRUE(env->devices["a"].relay);
+}
+
+void test_a_run_cut_while_a_step_waited_for_the_clock_waits_again() {
+  env->devices["a"] = FakeDevice();
+  Def d = def("s", {step("a")});
+  d.steps[0].hours = hours("05:00", "21:00");
+  setDefs({d});
+  env->minute = -1;
+  eng->start("s", "manual", env->now);
+  runFor(5000);
+  std::vector<Snapshot> saved = eng->snapshot();
+  TEST_ASSERT_TRUE(saved[0].phase == Phase::WaitClock);
+  reboot(1000);
+  eng->resume(saved[0], 1000, "SW");
+  runFor(5000);
+  assertStep(StepState::Running, "s", 0);
+  TEST_ASSERT_EQUAL_STRING("clock", R("s").waitReason.c_str());
+  env->minute = 600;
+  runFor(3000);
+  assertState(RunState::Done, "s");
+}
+
+void test_hours_and_own_attempts_change_the_hash_only_when_set() {
+  const uint32_t plain = defHash(def("s", {step("towel"), http(kPing)}));
+  Def h = def("s", {step("towel"), http(kPing)});
+  h.steps[0].hours = hours("05:00", "21:00");
+  Def a = def("s", {step("towel"), http(kPing)});
+  a.steps[1].attempts = 5;
+  Def scenarioHours = def("s", {step("towel"), http(kPing)});
+  scenarioHours.hours = hours("05:00", "21:00");
+  TEST_ASSERT_TRUE(defHash(h) != plain);
+  TEST_ASSERT_TRUE(defHash(a) != plain);
+  TEST_ASSERT_TRUE(defHash(h) != defHash(a));
+  TEST_ASSERT_EQUAL_UINT32(plain, defHash(scenarioHours));  // the scenario's hours only gate a start
+}
+
+// ---- an HTTP step's own attempts ----------------------------------------------------------------------------------------
+
+void test_an_http_step_with_its_own_attempts_and_gap() {
+  env->answers[kPing] = 503;
+  Def d = def("s", {http(kPing)});
+  d.steps[0].attempts = 5;
+  d.steps[0].retryGapS = 30;
+  setDefs({d});
+  eng->start("s", "manual", env->now);
+  runFor(4 * 30800 + 200);  // 4 x (0.8 s request + 30 s gap): the 5th attempt is on its way
+  assertState(RunState::Running, "s");
+  TEST_ASSERT_EQUAL_UINT8(5, R("s").steps[0].attempts);
+  runFor(2000);
+  assertStep(StepState::Failed, "s", 0);
+  TEST_ASSERT_EQUAL_UINT8(5, R("s").steps[0].attempts);
+  // The same in a power-up run: exactly those attempts, not the 90 s window.
+  env->answers[kPing] = 0;
+  d.steps[0].attempts = 2;
+  d.steps[0].retryGapS = 1;
+  setDefs({d});
+  eng->start("s", "power-on", env->now);
+  runFor(10000 + 5000);
+  assertStep(StepState::Failed, "s", 0);
+  TEST_ASSERT_EQUAL_UINT8(2, R("s").steps[0].attempts);
+  // Only a gap: the usual 3 attempts, that far apart.
+  env->answers[kPing] = 503;
+  d.steps[0].attempts = 0;
+  d.steps[0].retryGapS = 20;
+  setDefs({d});
+  eng->start("s", "manual", env->now);
+  runFor(21000);  // 0.8 s + 20 s
+  assertState(RunState::Running, "s");
+  TEST_ASSERT_EQUAL_UINT8(2, R("s").steps[0].attempts);
+  runFor(22000);
+  assertStep(StepState::Failed, "s", 0);
+  TEST_ASSERT_EQUAL_UINT8(3, R("s").steps[0].attempts);
+  // One attempt: no retry at all.
+  d.steps[0].attempts = 1;
+  d.steps[0].retryGapS = 0;
+  setDefs({d});
+  eng->start("s", "manual", env->now);
+  runFor(3000);
+  assertStep(StepState::Failed, "s", 0);
+  TEST_ASSERT_EQUAL_UINT8(1, R("s").steps[0].attempts);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_steps_switch_and_verify_with_a_pause_after_a_switched_step);
@@ -1020,5 +1273,15 @@ int main(int, char**) {
   RUN_TEST(test_a_disabled_wait_costs_nothing_and_a_stop_ends_a_wait_at_once);
   RUN_TEST(test_a_run_continued_in_the_middle_of_a_wait_waits_it_again_in_full_and_needs_no_wifi_for_it);
   RUN_TEST(test_a_wait_has_a_label_and_its_seconds_are_in_the_hash);
+  RUN_TEST(test_a_step_outside_its_hours_is_skipped_with_no_pause_and_the_run_goes_on);
+  RUN_TEST(test_the_hours_of_a_step_are_looked_at_once_after_the_pause_before_it);
+  RUN_TEST(test_a_step_waits_for_the_clock_then_goes_or_is_skipped);
+  RUN_TEST(test_clock_wait_min_0_skips_at_once_and_a_stop_ends_the_wait_for_the_clock);
+  RUN_TEST(test_a_run_starts_only_inside_the_scenarios_hours_but_by_hand_always);
+  RUN_TEST(test_a_run_waits_for_the_clock_for_its_hours_and_by_hand_goes_at_once);
+  RUN_TEST(test_a_power_up_run_looks_at_its_hours_after_wifi_and_the_settle_time);
+  RUN_TEST(test_a_run_cut_while_a_step_waited_for_the_clock_waits_again);
+  RUN_TEST(test_hours_and_own_attempts_change_the_hash_only_when_set);
+  RUN_TEST(test_an_http_step_with_its_own_attempts_and_gap);
   return UNITY_END();
 }

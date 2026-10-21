@@ -22,12 +22,21 @@
 // before it if that one is due. A stop ends it at once. A run continued after a restart in the middle of a wait starts
 // that wait over (the step it was in is done again, like any step).
 //
+// Hours (lib/time_window, local time from Env::localMinute()): a step with `hours` is looked at once, when it begins (after
+// the pause of the step before it): outside them it is skipped (no command, no pause after it) and the run goes on; begun
+// inside, its attempts go on past the end. A scenario with `hours` starts a run (any trigger but "manual") only inside
+// them, looked at when the run's start is due (for a power-up: after Wi-Fi and the settle time); outside them the run ends
+// as skipped. Without a clock (no RTC: after a power cut the time comes with NTP) both wait for it up to clock_wait_min,
+// then skip ("no clock").
+//
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
+
+#include "time_window.h"
 
 namespace ScenarioEngine {
 
@@ -90,11 +99,19 @@ struct StepDef {
   bool enabled = true;
   int32_t pauseAfterS = -1;  // -1: the scenario's default (a wait step has none)
   uint32_t waitS = 0;        // a wait step: how long
+  TimeWindow::Window hours;  // a device or HTTP step: only inside these hours (none: always)
+  // An HTTP step: its own attempts and gap between them (0: the usual ones, kAttempts / kRetryGapMs, or the power-up's
+  // patience). Either one set: exactly that, in every run.
+  uint8_t attempts = 0;
+  uint16_t retryGapS = 0;
 };
+constexpr uint8_t kMaxHttpAttempts = 20;
+constexpr uint16_t kMaxRetryGapS = 600;
 
 struct Def {
   std::string name;
   uint16_t defaultPauseS = 30;
+  TimeWindow::Window hours;  // a run starts (any trigger but "manual") only inside these hours (none: always)
   List<Text> devices;      // the distinct device names of the steps
   List<HttpReq> requests;  // the requests of the HTTP steps, one per step
   List<StepDef> steps;
@@ -134,6 +151,7 @@ class Env {
   virtual bool def(const std::string& scenario, Def& out) = 0;
   virtual uint32_t nowMs() = 0;
   virtual uint32_t epoch() = 0;  // Unix time, 0 while the clock is not set
+  virtual int localMinute() = 0;  // the local time of day in minutes (0..1439, config time.tz), -1 while the clock is not set
   virtual bool wifiUp() = 0;
   virtual DeviceInfo device(const std::string& name) = 0;
   // Queues a command (On/Off) or a status query for the device in the command lane; 0 = the list is full right now.
@@ -194,15 +212,16 @@ class Whys {
   List<std::pair<uint16_t, Text>> v_;
 };
 
-// Wait: in a wait step (appended last: a saved /runs.json keeps the phases as numbers).
-enum class Phase : uint8_t { WaitStart, WaitNet, Settle, NextStep, Pause, Command, Verify, Gap, Finished, Wait };
+// Wait: in a wait step; WaitClock: waiting for the clock for the hours of the start or of a step (appended last: a saved
+// /runs.json keeps the phases as numbers).
+enum class Phase : uint8_t { WaitStart, WaitNet, Settle, NextStep, Pause, Command, Verify, Gap, Finished, Wait, WaitClock };
 
 struct Run {
   // What the API shows.
   RunState state = RunState::Idle;
   std::string trigger;     // what started it: power-on | manual | power-below | power-above
   Text skipReason;         // state Skipped / Interrupted: why
-  std::string waitReason;  // while waiting for the network: "wifi"
+  std::string waitReason;  // while waiting: "wifi" (the network), "clock" (the time, for the hours)
   uint32_t startAtMs = 0;
   int current = -1;        // the step in progress; -1 in a pause or when none
   List<StepRun> steps;
@@ -237,6 +256,8 @@ struct Run {
   uint32_t carriedMs = 0;        // how long it had been going before a restart it was continued after
   bool needNet = false;          // continued after a restart: wait for Wi-Fi before the next command
   bool netGate = false;          // in WaitNet/Settle for that reason (not for the start of a power-up run)
+  bool clockWait = false;        // waiting for the clock for the hours of the start or of the current step
+  uint32_t clockUntilMs = 0;     // ... until then, then it is skipped
   bool offlineAttempt = false;   // measurement: the monitor counted the device offline when the attempt began
   uint32_t attemptJobMs = 0;     // measurement: time the attempt's jobs held the command lane
 };
@@ -348,7 +369,9 @@ class Engine {
 
  private:
   void advance(const std::string& name, Run& r, uint32_t now);
-  void beginRunning(const std::string& name, Run& r, uint32_t now);
+  void beginRunning(const std::string& name, Run& r, uint32_t now, Def* found);
+  void enter(const std::string& name, Run& r, uint32_t now);
+  bool clockGate(const std::string& name, Run& r, uint32_t now, const TimeWindow::Window& w, const std::string& what, std::string& outside);
   void nextStep(const std::string& name, Run& r, uint32_t now);
   void startAttempt(const std::string& name, Run& r, uint32_t now);
   void attemptFailed(const std::string& name, Run& r, uint32_t now, const std::string& why);

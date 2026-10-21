@@ -183,6 +183,17 @@ uint32_t defHash(const Def& d) {
     }
     mix((d.steps[i].on ? 1u : 0u) | (d.steps[i].enabled ? 2u : 0u));
     mix(static_cast<uint32_t>(d.steps[i].pauseAfterS));
+    // Mixed in only when set: a step without them hashes as before, so a saved run of an older firmware still matches.
+    const TimeWindow::Window& w = d.steps[i].hours;
+    if (w.set()) {
+      mix(0x484F5552u);
+      mix(static_cast<uint32_t>(w.from) | static_cast<uint32_t>(w.to) << 16);
+      mix(w.clockWaitMin);
+    }
+    if (d.steps[i].attempts || d.steps[i].retryGapS) {
+      mix(0x41545450u);
+      mix(d.steps[i].attempts | static_cast<uint32_t>(d.steps[i].retryGapS) << 8);
+    }
   }
   return h;
 }
@@ -201,9 +212,16 @@ std::string stepDetail(const Run& r, size_t i) {
       return out;
     }
     case StepState::Failed: return str(r.whys.get(i));
-    case StepState::Skipped: return "the device was ignored";  // runs from firmware before ignore stopped skipping steps
+    case StepState::Skipped: {  // outside its hours; runs from firmware before ignore stopped skipping steps have no reason
+      const Text& why = r.whys.get(i);
+      return why.empty() ? std::string("the device was ignored") : str(why);
+    }
     case StepState::Stopped: return "stopped";
-    case StepState::Running: return s.attempts > 1 ? "previous attempt: " + str(r.whys.get(i)) : std::string();
+    case StepState::Running:
+      if (r.phase == Phase::WaitClock && static_cast<size_t>(r.current) == i && i < r.def.steps.size()) {
+        return "waiting for the clock for the hours " + TimeWindow::text(r.def.steps[i].hours);
+      }
+      return s.attempts > 1 ? "previous attempt: " + str(r.whys.get(i)) : std::string();
     default: return std::string();
   }
 }
@@ -310,6 +328,7 @@ uint32_t Engine::tick() {
       case Phase::Pause:
       case Phase::Wait:
       case Phase::Gap: sleep = std::min(sleep, until(now, r.deadlineMs)); break;
+      case Phase::WaitClock: sleep = std::min(sleep, until(now, r.clockUntilMs)); break;  // the clock is looked at every second anyway
       case Phase::Command:
       case Phase::Verify: sleep = std::min(sleep, kBusyTickMs); break;
       default: sleep = 0; break;  // NextStep: look again at once
@@ -334,7 +353,7 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
           r.phase = Phase::WaitNet;
           return;
         }
-        beginRunning(name, r, now);
+        enter(name, r, now);
         continue;
 
       case Phase::WaitNet:
@@ -345,7 +364,7 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
           return;
         }
         if (!r.netGate && r.trigger != "power-on") {  // started by hand meanwhile: no more waiting
-          beginRunning(name, r, now);
+          enter(name, r, now);
           continue;
         }
         if (r.phase == Phase::WaitNet) {
@@ -362,8 +381,29 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
           r.phase = Phase::NextStep;
           continue;
         }
-        beginRunning(name, r, now);
+        enter(name, r, now);
         continue;
+
+      case Phase::WaitClock: {
+        const bool running = r.state == RunState::Running;
+        if (r.stop) {
+          logf(false, "[%s] stopped while waiting for the clock", name.c_str());
+          if (running) {
+            stopNow(name, r, true, 0);
+          } else {
+            finish(name, r, RunState::Stopped);
+          }
+          return;
+        }
+        // Until the clock comes or the wait is over (a waiting run started by hand meanwhile goes at once).
+        if (env_.localMinute() < 0 && !due(now, r.clockUntilMs) && (running || r.trigger != "manual")) return;
+        if (running) {
+          r.phase = Phase::NextStep;  // looks at the step's hours again
+        } else {
+          enter(name, r, now);
+        }
+        continue;
+      }
 
       case Phase::NextStep:
         nextStep(name, r, now);
@@ -470,19 +510,70 @@ void Engine::advance(const std::string& name, Run& r, uint32_t now) {
   }
 }
 
-void Engine::beginRunning(const std::string& name, Run& r, uint32_t now) {
+// The hours `w` of the run's start or of a step. True: go on (inside them, or none). False: either it waits for the clock
+// now (phase WaitClock, `outside` empty) or `outside` says why it does not go (outside the hours, or no clock in time).
+bool Engine::clockGate(const std::string& name, Run& r, uint32_t now, const TimeWindow::Window& w, const std::string& what,
+                       std::string& outside) {
+  outside.clear();
+  if (!w.set()) return true;
+  const int minute = env_.localMinute();
+  if (minute < 0) {
+    if (!r.clockWait) {
+      r.clockWait = true;
+      r.clockUntilMs = now + w.clockWaitMin * 60000UL;
+      if (w.clockWaitMin) {
+        logf(false, "[%s] %s: no clock yet for the hours %s, waiting for it up to %u min", name.c_str(), what.c_str(),
+             TimeWindow::text(w).c_str(), static_cast<unsigned>(w.clockWaitMin));
+      }
+    }
+    if (!due(now, r.clockUntilMs)) {
+      r.waitReason = "clock";
+      r.phase = Phase::WaitClock;
+      return false;
+    }
+    r.clockWait = false;
+    r.waitReason.clear();
+    outside = "no clock for the hours " + TimeWindow::text(w) + " (waited " + std::to_string(w.clockWaitMin) + " min)";
+    return false;
+  }
+  r.clockWait = false;
+  r.waitReason.clear();
+  if (w.contains(minute)) return true;
+  outside = "outside the hours " + TimeWindow::text(w) + " (now " + TimeWindow::clockText(minute) + ")";
+  return false;
+}
+
+// The run's start is due: through the scenario's hours (any trigger but "manual"), then running.
+void Engine::enter(const std::string& name, Run& r, uint32_t now) {
+  Def def;
+  const bool found = env_.def(name, def);
+  if (found && def.hours.set() && r.trigger != "manual") {
+    std::string outside;
+    if (!clockGate(name, r, now, def.hours, "start", outside)) {
+      if (outside.empty()) return;  // waits for the clock
+      logf(false, "[%s] %s: not started, %s", name.c_str(), r.trigger.c_str(), outside.c_str());
+      r.skipReason.assign(outside.data(), outside.size());
+      finish(name, r, RunState::Skipped);
+      return;
+    }
+  }
+  r.clockWait = false;
+  r.waitReason.clear();
+  beginRunning(name, r, now, found ? &def : nullptr);
+}
+
+void Engine::beginRunning(const std::string& name, Run& r, uint32_t now, Def* found) {
   r.waitReason.clear();
   r.startedMs = now;
   r.carriedMs = 0;
   r.startEpoch = env_.epoch();
-  Def def;
-  if (!env_.def(name, def)) {
+  if (!found) {
     logf(true, "[%s] removed before it started", name.c_str());
     r.skipReason = "the scenario was removed before it started";
     finish(name, r, RunState::Skipped);
     return;
   }
-  r.def = std::move(def);  // the steps as they are now: an edit made while the run was waiting counts
+  r.def = std::move(*found);  // the steps as they are now: an edit made while the run was waiting counts
   r.state = RunState::Running;
   r.patient = r.trigger == "power-on";
   r.steps.assign(r.def.steps.size(), StepRun());
@@ -540,6 +631,26 @@ void Engine::nextStep(const std::string& name, Run& r, uint32_t now) {
       r.current = -1;
       r.phase = Phase::WaitNet;
       return;
+    }
+  }
+  if (r.def.steps[r.step].hours.set()) {  // a device or HTTP step with hours
+    std::string outside;
+    const std::string what = "step " + std::to_string(r.step + 1) + " (" + r.def.label(r.step) + ")";
+    if (!clockGate(name, r, now, r.def.steps[r.step].hours, what, outside)) {
+      StepRun& sr = r.steps[r.step];
+      if (outside.empty()) {  // waits for the clock
+        r.current = static_cast<int>(r.step);
+        sr.state = StepState::Running;
+        return;
+      }
+      sr.state = StepState::Skipped;
+      sr.attempts = 0;
+      r.whys.set(r.step, Text(outside.data(), outside.size()));
+      stepEnded(r, now);
+      logf(false, "[%s] %s skipped: %s", name.c_str(), what.c_str(), outside.c_str());
+      ++r.skipped;
+      ++r.step;
+      return;  // NextStep: on with the next one, no pause after this one
     }
   }
   r.current = static_cast<int>(r.step);
@@ -601,8 +712,12 @@ void Engine::attemptFailed(const std::string& name, Run& r, uint32_t now, const 
   r.lastWhy.assign(why.data(), why.size());
   logf(true, "[%s] step %u: %s attempt %u failed: %s", name.c_str(), static_cast<unsigned>(r.step + 1), step.c_str(),
        static_cast<unsigned>(r.attempt), why.c_str());
-  const uint32_t gap = r.patient ? kPatientGapMs : kRetryGapMs;
-  const bool more = r.patient ? static_cast<int32_t>(r.windowEndMs - now) > static_cast<int32_t>(gap) && r.attempt < 255 : r.attempt < kAttempts;
+  const StepDef& sd = r.def.steps[r.step];
+  const bool own = sd.attempts || sd.retryGapS;  // an HTTP step with its own attempts: exactly those, in every run
+  const uint32_t gap = own ? (sd.retryGapS ? sd.retryGapS * 1000UL : kRetryGapMs) : r.patient ? kPatientGapMs : kRetryGapMs;
+  const bool more = own        ? r.attempt < (sd.attempts ? sd.attempts : kAttempts)
+                    : r.patient ? static_cast<int32_t>(r.windowEndMs - now) > static_cast<int32_t>(gap) && r.attempt < 255
+                                : r.attempt < kAttempts;
   if (more) {
     r.deadlineMs = now + gap;
     r.phase = Phase::Gap;
