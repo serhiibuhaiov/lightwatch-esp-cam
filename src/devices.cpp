@@ -5,12 +5,15 @@
 #include <WiFi.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <map>
 
+#include "energy_meter.h"
 #include "logger.h"
 #include "power_rule.h"
 #include "psram_alloc.h"
@@ -44,6 +47,59 @@ std::atomic<uint32_t> gLastCycleMs{0}, gMaxCycleMs{0};  // see monitorCycle()
 
 // Seconds since boot from the 64-bit timer: millis()/1000 would jump back to 0 after 49.7 days and break the history.
 uint32_t uptimeS() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
+uint64_t uptimeMs() { return static_cast<uint64_t>(esp_timer_get_time() / 1000); }
+
+// The data point of reading i of `d` (0 power, 1 current, 2 voltage, 3 energy): its meters, else the usual number; 0 = none.
+int16_t meterDp(const Device& d, int i) {
+  static const int16_t standard[4] = {19, 18, 20, 17};
+  const int16_t chosen[4] = {d.dpPower, d.dpCurrent, d.dpVoltage, d.dpEnergy};
+  return chosen[i] < 0 ? standard[i] : chosen[i];
+}
+
+// Energy since boot (see energy()): the two sums of a device and their history. The rings are allocated once, from PSRAM
+// only (nothing without it, or when it is full: the sums go on without a history).
+template <class T>
+struct Ring {
+  T* buf = nullptr;
+  size_t cap = 0, size = 0, head = 0;  // head: the oldest once full
+  Ring() = default;
+  Ring(const Ring&) = delete;
+  Ring& operator=(const Ring&) = delete;
+  ~Ring() { free(buf); }
+  void push(const T& v, size_t capacity) {
+    if (!buf && !cap) {
+      buf = psramAvailable() ? static_cast<T*>(heap_caps_malloc(capacity * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) : nullptr;
+      cap = buf ? capacity : SIZE_MAX;  // SIZE_MAX: tried, none
+    }
+    if (!buf) return;
+    if (size < cap) {
+      buf[size++] = v;
+    } else {
+      buf[head] = v;
+      head = (head + 1) % cap;
+    }
+  }
+  const T& at(size_t i) const { return buf[size < cap ? i : (head + i) % cap]; }  // 0 = the oldest
+};
+struct EnergyPoint {
+  uint32_t t;              // uptimeS()
+  float integratedWh;
+  uint32_t reportedWh;
+  int32_t heldPowerRaw;    // INT32_MIN: none
+};
+struct EnergyReport {
+  uint32_t t;              // uptimeS()
+  int32_t raw;
+  bool pushed, counted;
+};
+struct EnergyLog {
+  EnergyMeter::Meter meter;
+  Ring<EnergyPoint> points;
+  Ring<EnergyReport> reports;
+  uint32_t lastPointS = 0;
+  bool anyPoint = false;
+};
+std::map<String, EnergyLog> gEnergy;  // by device name; outlives an edit of the device, not its removal
 
 struct Lock {
   Lock() {
@@ -280,6 +336,27 @@ void applyList(const std::vector<Device>& list) {
   };
   for (auto it = gStates.begin(); it != gStates.end();) it = unchanged(it->first) ? std::next(it) : gStates.erase(it);
   for (auto it = gHistory.begin(); it != gHistory.end();) it = unchanged(it->first) ? std::next(it) : gHistory.erase(it);
+  // Energy since boot: a removed device loses it; an edited one keeps the sums, but the time until its next answer is
+  // not counted and the next energy value read is a new base (its data points may mean something else now).
+  const uint64_t ms = uptimeMs();
+  for (auto it = gEnergy.begin(); it != gEnergy.end();) {
+    const Device* n = nullptr;
+    for (const Device& x : list) {
+      if (x.name == it->first) n = &x;
+    }
+    if (!n) {
+      it = gEnergy.erase(it);
+      continue;
+    }
+    for (const Device& o : gList) {
+      if (o.name == n->name && !(o.ip == n->ip && o.key == n->key && o.version == n->version && o.dp == n->dp && o.ignore == n->ignore &&
+                                 meterDp(o, 0) == meterDp(*n, 0) && meterDp(o, 3) == meterDp(*n, 3))) {
+        it->second.meter.lose(ms);
+        it->second.meter.rebase();
+      }
+    }
+    ++it;
+  }
   gList = list;
 }
 
@@ -469,6 +546,11 @@ void limits(JsonObject out) {
   out["history_span_s"] = static_cast<uint32_t>(kHistoryCapacity) * interval;  // at the current polling interval
   out["poll_interval_s"] = interval;
   out["poll_s_max"] = kMaxPollS;
+  JsonObject e = out["energy"].to<JsonObject>();
+  e["points"] = kEnergyPoints;
+  e["point_s"] = kEnergyPointS;
+  e["reports"] = kEnergyReports;
+  e["psram"] = psramAvailable();  // without it there is no history, only the sums
 }
 
 namespace {
@@ -495,6 +577,29 @@ int32_t numberAt(JsonVariantConst dps, int dp) {
   if (dp <= 0) return INT32_MIN;
   JsonVariantConst v = dps[String(dp)];
   return v.is<long>() ? static_cast<int32_t>(v.as<long>()) : INT32_MIN;
+}
+
+// A fresh state of `d` for the energy since boot: `state` holds its data points now (the answer, or the cache with a push
+// merged in), `relay` its switch (1 on, 0 off, -1 unknown); `energySource` is where a new value of its energy data point
+// may be (the answer; for a push only what was pushed, not the cache). The caller holds the lock.
+// Nothing for an ignored device: nobody polls it, so a power held from a user's query would never be let go.
+void energyFrom(const Device& d, int relay, JsonVariantConst state, JsonVariantConst energySource, bool pushed) {
+  if (d.ignore) return;
+  EnergyLog& e = gEnergy[d.name];
+  const uint64_t ms = uptimeMs();
+  const int16_t power = meterDp(d, 0);
+  if (power > 0) e.meter.observe(ms, relay, numberAt(state, power));
+  const int16_t energy = meterDp(d, 3);
+  const int32_t v = energy > 0 ? numberAt(energySource, energy) : INT32_MIN;
+  if (v == INT32_MIN || v < 0) return;
+  const bool counted = e.meter.report(ms, v, pushed);
+  e.reports.push(EnergyReport{uptimeS(), v, pushed, counted}, kEnergyReports);
+}
+
+// The device stopped answering (counted offline): the energy since its last answer is not counted. The caller holds the lock.
+void energyLost(const String& name) {
+  auto it = gEnergy.find(name);
+  if (it != gEnergy.end()) it->second.meter.lose(uptimeMs());
 }
 
 // Appends one sample to the history of `d`. The caller holds the lock and has checked that `d` is in the list;
@@ -581,6 +686,11 @@ int applyQuery(const String& name, const Tuya::Target& target, uint16_t dp, cons
     if (!before.known || before.online != st.online) st.changedMs = st.lastTryMs ? st.lastTryMs : 1;
     after = st;
     appendSample(*dev, r.ok, dpsDoc.as<JsonVariantConst>());  // same lock: the device cannot vanish in between
+    if (r.ok && !dpsDoc.isNull()) {
+      energyFrom(*dev, now, dpsDoc.as<JsonVariantConst>(), dpsDoc.as<JsonVariantConst>(), false);
+    } else if (!r.ok && !st.online) {
+      energyLost(name);
+    }
   }
 
   if (r.ok && (!before.known || !before.online)) {
@@ -827,6 +937,7 @@ void monitorTask(void* arg) {
       LOGI(TAG, "monitor cycle back within the interval (%lu ms)", static_cast<unsigned long>(spent));
     }
     slow = spent > period;
+    energyTick();
     vTaskDelay(pdMS_TO_TICKS(spent < period ? period - spent : 1000));
   }
 }
@@ -1008,6 +1119,7 @@ void onPush(const String& name, const Tuya::Target& target, const String& json) 
     serializeJson(merged, st.dpsJson);
     st.lastPushMs = millis() ? millis() : 1;
     ++st.pushes;
+    energyFrom(*dev, now, merged.as<JsonVariantConst>(), pushed, true);
   }
   if (now >= 0 && was != now) {
     LOGI(TAG, "[%s] switch (dp %u) is now %s (pushed)", name.c_str(), static_cast<unsigned>(dp), now ? "ON" : "OFF");
@@ -1021,6 +1133,134 @@ void startMonitor(uint16_t intervalSec, uint16_t timeoutMs, uint8_t attempts) {
   }
   auto* p = new MonitorParams{intervalSec, timeoutMs, static_cast<uint8_t>(attempts ? attempts : 1)};
   xTaskCreate(monitorTask, "devmon", 6144, p, 1, nullptr);
+}
+
+bool energy(const String& name, Energy& out) {
+  out = Energy();
+  Lock lock;
+  bool listed = false;
+  for (const Device& d : gList) listed = listed || d.name == name;
+  if (!listed) return false;
+  auto it = gEnergy.find(name);
+  if (it == gEnergy.end()) return true;
+  const EnergyMeter::Meter& m = it->second.meter;
+  const uint64_t ms = uptimeMs();
+  out.integratedKnown = m.counting();
+  out.integratedWh = m.integratedWh(ms);
+  out.sinceS = m.sinceS(ms);
+  out.coveredS = m.coveredS(ms);
+  out.heldPowerRaw = m.heldPowerRaw();
+  out.reportedKnown = m.reportedStarted();
+  out.reportedWh = m.reportedWh();
+  out.reports = m.reports();
+  out.reportsCounted = m.reportsCounted();
+  out.lastReportRaw = m.lastReportRaw();
+  return true;
+}
+
+void writeEnergy(const Energy& e, JsonObject o) {
+  if (e.integratedKnown) {
+    o["integrated_wh"] = std::round(e.integratedWh * 10.0) / 10.0;
+  } else {
+    o["integrated_wh"] = nullptr;
+  }
+  if (e.reportedKnown) {
+    o["reported_wh"] = e.reportedWh;
+  } else {
+    o["reported_wh"] = nullptr;
+  }
+  o["since_s"] = e.sinceS;
+  o["covered_s"] = e.coveredS;
+  if (e.heldPowerRaw == INT32_MIN) {
+    o["power_w"] = nullptr;
+  } else {
+    o["power_w"] = e.heldPowerRaw / 10.0;
+  }
+  o["reports"] = e.reports;
+  o["reports_counted"] = e.reportsCounted;
+  if (e.lastReportRaw == INT32_MIN) {
+    o["last_report"] = nullptr;
+  } else {
+    o["last_report"] = e.lastReportRaw;
+  }
+}
+
+void energyTick() {
+  Lock lock;
+  const uint64_t ms = uptimeMs();
+  const uint32_t t = uptimeS();
+  for (auto& kv : gEnergy) {
+    EnergyLog& e = kv.second;
+    if (!e.meter.started() || (e.anyPoint && t - e.lastPointS < kEnergyPointS)) continue;
+    e.points.push(EnergyPoint{t, static_cast<float>(e.meter.integratedWh(ms)), static_cast<uint32_t>(e.meter.reportedWh()),
+                              e.meter.heldPowerRaw()},
+                  kEnergyPoints);
+    e.lastPointS = t;
+    e.anyPoint = true;
+  }
+}
+
+bool energyJson(const String& name, size_t limit, String& out) {
+  Energy totals;
+  if (!energy(name, totals)) return false;
+  std::vector<EnergyPoint, PsramStdAllocator<EnergyPoint>> points;  // copies, so the lock is not held while the JSON is built
+  std::vector<EnergyReport, PsramStdAllocator<EnergyReport>> reports;
+  {
+    Lock lock;
+    auto it = gEnergy.find(name);
+    if (it != gEnergy.end()) {
+      const EnergyLog& e = it->second;
+      const size_t n = e.points.buf ? e.points.size : 0;
+      const size_t from = limit > 0 && n > limit ? n - limit : 0;
+      points.reserve(n - from);
+      for (size_t i = from; i < n; ++i) points.push_back(e.points.at(i));
+      const size_t r = e.reports.buf ? e.reports.size : 0;
+      reports.reserve(r);
+      for (size_t i = 0; i < r; ++i) reports.push_back(e.reports.at(i));
+    }
+  }
+  const uint32_t nowUp = uptimeS();
+  const time_t nowEpoch = time(nullptr);
+  const bool timeValid = nowEpoch > 1700000000;
+  JsonDocument doc(PsramAllocator::instance());
+  doc["name"] = name;
+  doc["point_s"] = kEnergyPointS;
+  doc["points_capacity"] = kEnergyPoints;
+  doc["reports_capacity"] = kEnergyReports;
+  doc["psram"] = psramAvailable();
+  doc["time_valid"] = timeValid;
+  writeEnergy(totals, doc["energy"].to<JsonObject>());
+  auto stamp = [&](JsonObject o, uint32_t t) {
+    const uint32_t age = nowUp - t;
+    o["age_s"] = age;
+    if (timeValid) {
+      o["time"] = static_cast<uint32_t>(nowEpoch) - age;
+    } else {
+      o["time"] = nullptr;
+    }
+  };
+  JsonArray pa = doc["points"].to<JsonArray>();
+  for (const EnergyPoint& p : points) {
+    JsonObject o = pa.add<JsonObject>();
+    stamp(o, p.t);
+    o["integrated_wh"] = std::round(p.integratedWh * 10.0f) / 10.0f;
+    o["reported_wh"] = p.reportedWh;
+    if (p.heldPowerRaw == INT32_MIN) {
+      o["power_w"] = nullptr;
+    } else {
+      o["power_w"] = p.heldPowerRaw / 10.0;
+    }
+  }
+  JsonArray ra = doc["reports"].to<JsonArray>();
+  for (const EnergyReport& r : reports) {
+    JsonObject o = ra.add<JsonObject>();
+    stamp(o, r.t);
+    o["value"] = r.raw;
+    o["pushed"] = r.pushed;
+    o["counted"] = r.counted;
+  }
+  serializeJson(doc, out);
+  return true;
 }
 
 }  // namespace Devices

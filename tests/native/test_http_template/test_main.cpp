@@ -24,7 +24,7 @@ std::string error(const char* text, bool url = false, bool hasWhen = true) {
 
 // Names every placeholder by what it refers to, so a test sees what was asked.
 std::string names(const Ref& r) {
-  static const char* kFields[] = {"power", "current", "voltage", "energy", "relay"};
+  static const char* kFields[] = {"power", "current", "voltage", "energy", "relay", "energy_integrated", "energy_reported"};
   switch (r.kind) {
     case Ref::Kind::Device: return "<" + r.device + ":" + kFields[static_cast<int>(r.field)] + ">";
     case Ref::Kind::When: return std::string("<when:") + kFields[static_cast<int>(r.field)] + ">";
@@ -50,6 +50,17 @@ void test_every_placeholder_is_recognised() {
   TEST_ASSERT_EQUAL_STRING("<heater1:power> <tw-2_x:current> <a:voltage> <a:energy> <a:relay>",
                            expanded("{{heater1.power}} {{tw-2_x.current}} {{a.voltage}} {{a.energy}} {{a.relay}}").c_str());
   TEST_ASSERT_EQUAL_STRING("<when:power>/<time>/<scenario>/<trigger>", expanded("{{when.power}}/{{time}}/{{scenario}}/{{trigger}}").c_str());
+}
+
+void test_the_energy_since_boot_is_recognised() {
+  TEST_ASSERT_EQUAL_STRING("<boiler:energy_integrated> <boiler:energy_reported> <when:energy_integrated>",
+                           expanded("{{boiler.energy_integrated}} {{boiler.energy_reported}} {{when.energy_integrated}}").c_str());
+  // the longest: a name of 32 characters with the longest field
+  TEST_ASSERT_TRUE(valid("{{abcdefghijklmnopqrstuvwxyz012345.energy_integrated}}"));
+  error("{{boiler.energy_total}}");
+  TEST_ASSERT_EQUAL_STRING("1.235", HttpTemplate::format(Field::EnergyIntegrated, 1235).c_str());  // Wh -> kWh
+  TEST_ASSERT_EQUAL_STRING("0.000", HttpTemplate::format(Field::EnergyReported, 0).c_str());
+  TEST_ASSERT_EQUAL_STRING("-", HttpTemplate::format(Field::EnergyReported, HttpTemplate::kNone).c_str());
 }
 
 void test_json_braces_are_left_alone() {
@@ -110,6 +121,7 @@ void test_the_result_is_limited() {
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_every_placeholder_is_recognised);
+  RUN_TEST(test_the_energy_since_boot_is_recognised);
   RUN_TEST(test_json_braces_are_left_alone);
   RUN_TEST(test_unknown_or_broken_placeholders_are_errors);
   RUN_TEST(test_when_needs_a_trigger_device);

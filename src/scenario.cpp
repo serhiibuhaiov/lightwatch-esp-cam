@@ -8,6 +8,7 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1976,6 +1977,19 @@ bool fillPlaceholders(HttpOut::Job& job, const String& scenario, const String& t
       case Kind::Device:
       case Kind::When: {
         const String name = r.kind == Kind::When ? whenDevice : String(r.device.c_str());
+        if (r.field == HttpTemplate::Field::EnergyIntegrated || r.field == HttpTemplate::Field::EnergyReported) {
+          // The energy since boot: a sum, so it is there while the socket is offline too (it is what was counted).
+          Devices::Energy e;
+          int32_t wh = HttpTemplate::kNone;
+          if (!name.isEmpty() && Devices::energy(name, e)) {
+            if (r.field == HttpTemplate::Field::EnergyIntegrated && e.integratedKnown) {
+              wh = static_cast<int32_t>(std::lround(e.integratedWh));
+            } else if (r.field == HttpTemplate::Field::EnergyReported && e.reportedKnown) {
+              wh = static_cast<int32_t>(std::min<uint64_t>(e.reportedWh, INT32_MAX));
+            }
+          }
+          return HttpTemplate::format(r.field, wh);
+        }
         int32_t v[4];
         int relay = -1;
         if (!name.isEmpty()) Devices::readings(name, v, relay);

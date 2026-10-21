@@ -5,7 +5,9 @@
 //
 //   {{heater1.power}}  a reading of the socket named heater1, by name, not data point number (the device's meters say
 //                      which data point carries it): power W, voltage V (one decimal), current A, energy kWh (three
-//                      decimals); relay: on | off
+//                      decimals); relay: on | off; energy_integrated, energy_reported: the energy since the board started,
+//                      kWh (three decimals), counted two ways (lib/energy_meter): from the power over time, and as the
+//                      sum of the socket's own energy reports
 //   {{when.power}}     the same of the socket in the scenario's `when` (power_below, power_above, relay, online only)
 //   {{time}}           the local time (time.tz) as 2026-10-19T14:05:00
 //   {{scenario}}       the scenario's name;  {{trigger}}: what started the run (relay-off, power-below, manual...)
@@ -24,7 +26,7 @@ namespace HttpTemplate {
 
 constexpr int32_t kNone = INT32_MIN;  // a reading that is not there
 
-enum class Field : uint8_t { Power, Current, Voltage, Energy, Relay };
+enum class Field : uint8_t { Power, Current, Voltage, Energy, Relay, EnergyIntegrated, EnergyReported };
 
 // What one placeholder names.
 struct Ref {
@@ -39,7 +41,7 @@ struct Ref {
 bool validate(const char* text, size_t n, bool url, bool hasWhen, std::string& err);
 
 // The text of a reading: `raw` as the socket sends it (0.1 W, mA, 0.1 V, 0.001 kWh; for Relay 1 on, 0 off, anything
-// else unknown), kNone for none -> "-".
+// else unknown; for the energy since boot Wh), kNone for none -> "-".
 std::string format(Field field, int32_t raw);
 
 // `text` with every placeholder replaced by resolve(ref). False when the result would be longer than `maxBytes` (`out`

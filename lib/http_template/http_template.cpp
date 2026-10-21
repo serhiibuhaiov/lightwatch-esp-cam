@@ -14,7 +14,7 @@ bool fieldOf(const std::string& s, Field& out) {
     const char* name;
     Field field;
   } kFields[] = {{"power", Field::Power}, {"current", Field::Current}, {"voltage", Field::Voltage}, {"energy", Field::Energy},
-                 {"relay", Field::Relay}};
+                 {"relay", Field::Relay}, {"energy_integrated", Field::EnergyIntegrated}, {"energy_reported", Field::EnergyReported}};
   for (const auto& f : kFields) {
     if (s == f.name) {
       out = f.field;
@@ -50,7 +50,7 @@ bool parseRef(const std::string& s, Ref& out) {
   return true;
 }
 
-constexpr size_t kMaxInside = 48;  // longer than any placeholder: "{{" without its "}}" nearby is not one
+constexpr size_t kMaxInside = 56;  // longer than any placeholder (a 32-char name + ".energy_integrated"): "{{" without its "}}" nearby is not one
 
 // The placeholder that starts at text[at] ("{{"): its length up to and with "}}" and what it names; 0 if none.
 size_t refAt(const char* text, size_t n, size_t at, Ref& ref) {
@@ -93,7 +93,8 @@ bool validate(const char* text, size_t n, bool url, bool hasWhen, std::string& e
     const std::string seen(text + i, std::min(n - i, len ? len : static_cast<size_t>(24)));
     if (!len) {
       err = "unknown placeholder at byte " + std::to_string(i) + " (" + seen +
-            "...): use {{device.power|current|voltage|energy|relay}}, {{when.<field>}}, {{time}}, {{scenario}} or {{trigger}}";
+            "...): use {{device.power|current|voltage|energy|relay|energy_integrated|energy_reported}}, {{when.<field>}}, {{time}}, "
+            "{{scenario}} or {{trigger}}";
       return false;
     }
     if (url && i < pathAt) {
@@ -101,7 +102,7 @@ bool validate(const char* text, size_t n, bool url, bool hasWhen, std::string& e
       return false;
     }
     if (ref.kind == Ref::Kind::When && !hasWhen) {
-      err = "placeholder " + seen + ": only a scenario whose trigger names a device (power_below, power_above, relay) has a `when` device";
+      err = "placeholder " + seen + ": only a scenario whose trigger names a device (power_below, power_above, relay, online) has a `when` device";
       return false;
     }
     i += len - 1;
@@ -117,6 +118,8 @@ std::string format(Field field, int32_t raw) {
     case Field::Current: return decimal(raw, 3);  // mA -> A
     case Field::Energy: return decimal(raw, 3);   // 0.001 kWh -> kWh
     case Field::Relay: return raw == 1 ? "on" : raw == 0 ? "off" : "-";
+    case Field::EnergyIntegrated:
+    case Field::EnergyReported: return decimal(raw, 3);  // Wh -> kWh
   }
   return "-";
 }

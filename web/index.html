@@ -179,6 +179,8 @@ function limitsCard(l) {
     ["Тригер споживання", "поріг 0–" + pr.max_watts + " Вт; тривалість " + pr.min_for_s + "–" + pr.max_for_s + " с (не довше за історію показників); розігрів 0–" + pr.max_warmup_s + " с; умова перевіряється кожні " + pr.check_every_s + " с"],
     ["Пристрої", "до " + dv.max + " пристроїв; файл devices.json до " + fmtKb(dv.max_file_bytes)],
     ["Історія показників", dv.history_capacity + " останніх запитів на пристрій (≈" + fmtDur(dv.history_span_s) + " при опитуванні кожні " + dv.poll_interval_s + " с); у пам'яті, скидається при перезапуску"],
+    ...(dv.energy ? [["Енергія від старту плати", dv.energy.psram ? "історія в PSRAM: точка кожні " + dv.energy.point_s + " с, останні " + dv.energy.points + " (" + fmtDur(dv.energy.points * dv.energy.point_s) +
+      "), і " + dv.energy.reports + " останніх значень DP енергії на пристрій; скидається при перезапуску" : "лише суми: без PSRAM історії немає"]] : []),
     ["Черги запитів до розеток", "команди (кнопки, API, сценарії): " + l.tuya_queues.commands + " місць; опитування: " + l.tuya_queues.monitor + " місця"],
     ...(l.http ? [["Вихідні HTTP-запити", "URL до " + fmtKb(l.http.max_url_bytes) + ", тіло POST до " + fmtKb(l.http.max_body_bytes) + "; таймаут " + l.http.min_timeout_ms / 1000 + "–" +
       l.http.max_timeout_ms / 1000 + " с (за замовчуванням " + l.http.timeout_ms / 1000 + "); черга " + l.http.queue + " місця; з відповіді зберігаються перші " + l.http.response_bytes + " байт"]] : []),
@@ -638,7 +640,7 @@ function viewScenarios() {
       parts.push(ct, body, count);
     }
     parts.push(E("small", { class: "mut", style: "flex:1 1 100%" }, "Підстановки в шляху й параметрах адреси та в тілі: {{розетка.power}} (Вт), .voltage (В), .current (А), .energy (кВт·год), .relay (on/off) — " +
-      "з останнього стану розетки; {{when.power}} тощо — розетка з умови тригера; {{time}}, {{scenario}}, {{trigger}}. Немає значення (офлайн, ігнорується) — «-». " +
+      "з останнього стану розетки; .energy_integrated і .energy_reported — енергія від старту плати, кВт·год (з потужності й сума звітів розетки); {{when.power}} тощо — розетка з умови тригера; {{time}}, {{scenario}}, {{trigger}}. Немає значення (офлайн, ігнорується) — «-». " +
       "«Перевірити» підставляє показники й час, а сценарій, тригер і when дають «-»."));
     parts.push(res);
     return E("div", { class: "hreq" }, ...parts);
@@ -961,6 +963,13 @@ function viewDevices() {
       E("button", { class: "d", disabled: isBusy || on === false, onclick: () => act(d, "off") }, "Вимкнути"),
       E("button", { disabled: isBusy, onclick: () => act(d, "status") }, "Оновити зараз"),
       E("span", { class: "mut" }, st.age_s != null && st.online ? "відповів " + fmtAge(st.age_s) + (st.latency_ms ? " · " + st.latency_ms + " мс" : "") : "")));
+    const en = d.energy_since_boot;  // counted two ways side by side, to compare (the socket's own `energy` reading is above)
+    if (en && (en.integrated_wh != null || en.reported_wh != null)) {
+      const kwh = wh => wh == null ? "—" : (wh / 1000).toFixed(3) + " кВт·год";
+      parts.push(E("div", { class: "mut", style: "margin:2px 0 8px", title: "Від старту плати, у пам'яті. «З потужності»: потужність × час за кожною відповіддю й push (вимкнене реле = 0 Вт). «Звіти розетки»: сума її DP енергії (push — завжди, відповідь на запит — коли значення змінилось)." },
+        "Енергія від старту плати: з потужності " + kwh(en.integrated_wh) + " · звіти розетки " + kwh(en.reported_wh) +
+        " (" + en.reports_counted + " з " + en.reports + ")" + (en.since_s ? " · враховано " + Math.round(100 * en.covered_s / en.since_s) + " % з " + fmtDur(en.since_s) : "")));
+    }
     const m = msgs[d.name];
     if (m) parts.push(E("div", { class: "mut", style: "margin-bottom:6px" }, badge(m.cls, m.cls === "ok" ? "ok" : m.cls === "err" ? "помилка" : "…"), " ", m.text));
 

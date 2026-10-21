@@ -562,6 +562,8 @@ JsonDocument devicesSummary() {
       JsonVariantConst sw = dps[String(d.dp)];
       if (sw.is<bool>()) s["on"] = sw.as<bool>();  // the configured switch data point
     }
+    Devices::Energy e;  // since boot, counted two ways (a new field: the readings above are as the socket sends them)
+    if (Devices::energy(d.name, e)) Devices::writeEnergy(e, o["energy_since_boot"].to<JsonObject>());
   }
   return doc;
 }
@@ -591,6 +593,26 @@ void onDevicesHistory(AsyncWebServerRequest* req) {
   }
   String out;
   if (!Devices::historyJson(req->getParam("name")->value(), static_cast<size_t>(limit), out)) {
+    sendError(req, 404, "no such device in /devices.json");
+    return;
+  }
+  sendJson(req, 200, out);
+}
+
+// GET /api/devices/energy?name=<device>[&limit=N]: the energy since boot and its history (see Devices::energyJson).
+void onDevicesEnergy(AsyncWebServerRequest* req) {
+  if (!authorize(req)) return;
+  if (!req->hasParam("name")) {
+    sendError(req, 400, "name=<device> is required");
+    return;
+  }
+  uint64_t limit = 0;
+  if (req->hasParam("limit") && (!parseUnsigned(req->getParam("limit")->value(), Devices::kEnergyPoints, limit) || limit < 1)) {
+    sendError(req, 400, "limit must be an integer 1.." + String(static_cast<unsigned>(Devices::kEnergyPoints)));
+    return;
+  }
+  String out;
+  if (!Devices::energyJson(req->getParam("name")->value(), static_cast<size_t>(limit), out)) {
     sendError(req, 404, "no such device in /devices.json");
     return;
   }
@@ -1081,6 +1103,7 @@ void begin() {
   server.on("/api/devices/config", HTTP_GET, onDevicesConfigGet);
   server.on("/api/devices/config", HTTP_PUT, onDevicesConfigPut, nullptr, onConfigBody);
   server.on("/api/devices/history", HTTP_GET, onDevicesHistory);
+  server.on("/api/devices/energy", HTTP_GET, onDevicesEnergy);
   server.on("/api/devices", HTTP_GET, onDevicesList);
   server.on("/api/devices/reload", HTTP_POST, onDevicesReload);
   server.on("/api/devices/status", HTTP_POST, [](AsyncWebServerRequest* req) { onDeviceOp(req, Tuya::Op::Query); });

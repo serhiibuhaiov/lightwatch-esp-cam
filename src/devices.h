@@ -162,6 +162,40 @@ String meterDps(const Device& d);
 constexpr size_t kHistoryCapacity = 80;
 bool historyJson(const String& name, size_t limit, String& out);
 
+// Energy since the board started (lib/energy_meter), counted two ways side by side: `integrated` (power x time, from the
+// power reading of every answer and push; a switch that is off is 0 W) and `reported` (the sum of the socket's energy data
+// point, meters.energy: a pushed value always counts, one read by a query only when it changed, the first is the base).
+// Not kept across a restart. A device without a power data point (meters.power 0) has no integrated energy, one without
+// an energy data point no reported energy; an ignored one counts nothing. Kept across an edit of the device (the time it was lost is not counted, the
+// reported energy takes a new base); a removed device loses it. The values the socket's `energy` reading shows elsewhere
+// (state, history, {{x.energy}}) are untouched.
+struct Energy {
+  bool integratedKnown = false;   // a power was held at least once
+  double integratedWh = 0;
+  uint32_t sinceS = 0;            // since the first answer or push after the board started
+  uint32_t coveredS = 0;          // how much of it was counted (the rest: the device was lost, or had no power reading)
+  int32_t heldPowerRaw = INT32_MIN;  // the power held now, 0.1 W (INT32_MIN: none: not answering, lost)
+  bool reportedKnown = false;     // the energy data point was seen at least once
+  uint64_t reportedWh = 0;
+  uint32_t reports = 0;           // values of the energy data point seen (pushed or read)
+  uint32_t reportsCounted = 0;    // ... and added
+  int32_t lastReportRaw = INT32_MIN;
+};
+bool energy(const String& name, Energy& out);  // false: no such device
+// As JSON: integrated_wh (0.1 Wh) and reported_wh (null: not known), since_s, covered_s, power_w (held now, null: none),
+// reports, reports_counted, last_report (raw, null: none).
+void writeEnergy(const Energy& e, JsonObject o);
+
+// Its history, in PSRAM only (none without it): a point every kEnergyPointS seconds (both sums and the power held then)
+// for the last kEnergyPoints of them, and the last kEnergyReports values of the energy data point (pushed or read, and
+// whether they were counted). Newest last; limit 0 = all points. False: no such device.
+constexpr size_t kEnergyPoints = 1440;  // 24 h
+constexpr uint32_t kEnergyPointS = 60;
+constexpr size_t kEnergyReports = 128;
+bool energyJson(const String& name, size_t limit, String& out);
+// Adds the points that are due; the monitor task calls it every cycle.
+void energyTick();
+
 // Does the power of `name` satisfy a rule for long enough? Read from the history (the answers of the status queries):
 // the newest answers must all be on the right side of `watts` (below or above), the relay on, with no unanswered query
 // and no gap between them, for `forS` seconds. A relay that was just switched on (or found on when the history began,
@@ -197,7 +231,8 @@ constexpr size_t kMaxDevices = 16;
 constexpr uint16_t kMaxPollS = 3600;  // the largest poll_s
 
 // The limits of the device list and the history, for the API and the page: max, max_file_bytes, history_capacity,
-// history_span_s (capacity x the current polling interval), poll_interval_s, poll_s_max.
+// history_span_s (capacity x the current polling interval), poll_interval_s, poll_s_max, energy (points, point_s, reports,
+// psram: whether there is a history at all).
 void limits(JsonObject out);
 
 }  // namespace Devices

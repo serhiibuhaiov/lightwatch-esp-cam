@@ -37,7 +37,8 @@ def test_devices_list_shape_and_keys_hidden(dev):
     assert isinstance(body["devices"], list)
     assert body["count"] == len(body["devices"])
     for d in body["devices"]:
-        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "updatedps", "poll_s", "meters", "state"}
+        assert set(d) == {"name", "ip", "version", "dp", "key_set", "ignore", "keep_connected", "updatedps", "poll_s", "meters", "state",
+                          "energy_since_boot"}
         assert set(d["meters"]) == {"power", "current", "voltage", "energy"}
         assert {"known", "online", "fails"} <= set(d["state"])
         assert d["version"] in ("3.4", "3.5")
@@ -51,8 +52,8 @@ def test_devices_are_not_in_the_main_config(dev, baseline):
 
 
 def static_part(devices):
-    """The configured fields only: `state` changes with every poll."""
-    return [{k: v for k, v in d.items() if k != "state"} for d in devices]
+    """The configured fields only: `state` changes with every poll, `energy_since_boot` with time."""
+    return [{k: v for k, v in d.items() if k not in ("state", "energy_since_boot")} for d in devices]
 
 
 def test_reload_is_idempotent(dev):
