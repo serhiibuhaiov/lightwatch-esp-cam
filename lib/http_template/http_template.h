@@ -6,7 +6,7 @@
 //   {{heater1.power}}  a reading of the socket named heater1, by name, not data point number (the device's meters say
 //                      which data point carries it): power W, voltage V (one decimal), current A, energy kWh (three
 //                      decimals); relay: on | off
-//   {{when.power}}     the same of the socket in the scenario's `when` (power_below, power_above, relay only)
+//   {{when.power}}     the same of the socket in the scenario's `when` (power_below, power_above, relay, online only)
 //   {{time}}           the local time (time.tz) as 2026-10-19T14:05:00
 //   {{scenario}}       the scenario's name;  {{trigger}}: what started the run (relay-off, power-below, manual...)
 //

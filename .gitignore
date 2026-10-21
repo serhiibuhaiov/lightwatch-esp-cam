@@ -7,3 +7,4 @@ src/secrets.h
 private/
 .DS_Store
 web/*.gz
+experiments/
